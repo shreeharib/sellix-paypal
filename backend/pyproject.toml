@@ -1,0 +1,42 @@
+[project]
+name = "sellix-backend"
+version = "0.1.0"
+description = "sellix backend: channel webhooks, the AI sales agent, orders, inventory and payments"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "httpx2>=2.16",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "psycopg[binary,pool]>=3.2",
+    "procrastinate>=3.0",
+    "cryptography>=43",
+    "pyjwt>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.21",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.basedpyright]
+pythonVersion = "3.12"
+include = ["app", "tests"]
+typeCheckingMode = "standard"

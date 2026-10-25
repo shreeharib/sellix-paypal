@@ -1,0 +1,193 @@
+{
+  "@@locale": "en",
+  "appTitle": "sellix",
+  "commonRetry": "Try again",
+  "commonSave": "Save",
+  "commonCancel": "Cancel",
+  "commonErrorTitle": "Something went wrong",
+  "commonSaved": "Saved.",
+  "signInTagline": "Your DMs, run like a business.",
+  "signInBody": "Sell in your Instagram DMs with an assistant that knows today's stock, takes orders and collects payment.",
+  "signInWithInstagram": "Continue with Instagram",
+  "signInNote": "Use your shop's Instagram professional account. Its messages will be connected to sellix.",
+  "signInCancelled": "Sign-in was cancelled.",
+  "navToday": "Today",
+  "navAskMe": "Ask me",
+  "navOrders": "Orders",
+  "navChats": "Chats",
+  "navSettings": "Settings",
+  "todayAgentSwitchLabel": "Agent replies to customers",
+  "todayAgentOn": "Replying to your DMs",
+  "todayAgentOff": "Off: messages are saved, nobody replies",
+  "todayOpenQuestions": "Questions for you",
+  "todayAwaitingPayment": "Waiting for payment",
+  "todayPaidOrders": "Paid orders",
+  "todayRevenue": "Sales",
+  "todayStockTitle": "Today's stock",
+  "todayStockEmpty": "No stock for today yet",
+  "todayStockEmptyHint": "Add what you've made today so the agent can sell it.",
+  "todayUpdateStock": "Update stock",
+  "todayLeft": "{count} left",
+  "@todayLeft": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "todayStockBreakdown": "Made {opening} · Held {held} · Sold {sold}",
+  "@todayStockBreakdown": {
+    "placeholders": {
+      "opening": {
+        "type": "int"
+      },
+      "held": {
+        "type": "int"
+      },
+      "sold": {
+        "type": "int"
+      }
+    }
+  },
+  "todaySoldOut": "Sold out",
+  "stockEditorProduct": "Product",
+  "stockEditorVariant": "Variant (optional)",
+  "stockEditorPrice": "Price",
+  "stockEditorCurrency": "Currency",
+  "stockEditorQuantity": "Quantity",
+  "stockEditorAddItem": "Add item",
+  "stockEditorRemoveItem": "Remove item",
+  "stockEditorSave": "Save stock",
+  "stockEditorInvalid": "Fill in a product, a price and a quantity for every item.",
+  "askMeOpen": "Open",
+  "askMeAnswered": "Answered",
+  "askMeEmpty": "No questions right now",
+  "askMeEmptyHint": "When the agent isn't sure, it asks you here.",
+  "askMeAnswerHint": "Your answer. The agent passes it on to the customer.",
+  "askMeSendAnswer": "Send answer",
+  "askMeDismiss": "Dismiss",
+  "askMeYourAnswer": "Your answer",
+  "askMeAnswerSent": "Sent. The agent will reply to the customer.",
+  "ordersFilterAll": "All",
+  "ordersEmpty": "No orders yet",
+  "ordersEmptyHint": "Orders the agent takes in your DMs appear here.",
+  "ordersNumber": "Order #{number}",
+  "@ordersNumber": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "ordersStatusAwaiting": "Waiting for payment",
+  "ordersStatusPaid": "Paid",
+  "ordersStatusExpired": "Expired",
+  "ordersStatusCancelled": "Cancelled",
+  "ordersStatusCompleted": "Completed",
+  "ordersStatusRefunded": "Refunded",
+  "ordersPickup": "Pickup",
+  "ordersDelivery": "Delivery",
+  "ordersNeededBy": "Needed: {when}",
+  "@ordersNeededBy": {
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "ordersHeldUntil": "Held until {time}",
+  "@ordersHeldUntil": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "chatsEmpty": "No chats yet",
+  "chatsEmptyHint": "When customers message your shop on Instagram, their chats appear here.",
+  "chatsAgentPaused": "Agent paused",
+  "chatsAgentInThisChat": "Agent replies in this chat",
+  "chatsAgentInThisChatOff": "You're handling this chat",
+  "chatsSenderAgent": "Agent",
+  "chatsSenderYou": "You",
+  "chatsNoMessages": "No messages",
+  "chatsNotDelivered": "Not delivered",
+  "settingsShopName": "Shop name",
+  "settingsAgentHint": "Turn off to stop all automatic replies. Messages are still saved.",
+  "settingsProfile": "Shop profile",
+  "settingsProfileHint": "What the agent knows about your shop: hours, pickup and delivery, policies, common questions.",
+  "settingsProfileSaved": "Shop profile saved.",
+  "settingsChannels": "Connected accounts",
+  "settingsInstagram": "Instagram · @{username}",
+  "@settingsInstagram": {
+    "placeholders": {
+      "username": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsSignOut": "Sign out",
+  "onboardingStep": "Step {step} of {total}",
+  "@onboardingStep": {
+    "placeholders": {
+      "step": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "onboardingFinishLater": "Finish later",
+  "onboardingBack": "Back",
+  "onboardingSkip": "Skip",
+  "onboardingNext": "Next",
+  "onboardingFinish": "Finish",
+  "onboardingNameRequired": "Enter your shop's name.",
+  "onboardingConnectedTitle": "Your Instagram is connected",
+  "onboardingConnectedBody": "sellix now receives your shop's Instagram DMs. Answer a few questions about your shop so the agent knows how to reply. You can skip any step and finish it later in Settings.",
+  "onboardingReceivingMessages": "Receiving messages",
+  "onboardingNotConnectedTitle": "Instagram isn't connected",
+  "onboardingNotConnectedBody": "sellix can't receive your DMs yet. Sign out and continue with your shop's Instagram professional account. You can still set up your shop now.",
+  "onboardingShopTitle": "Your shop",
+  "onboardingShopBody": "The basics customers ask about.",
+  "onboardingCategory": "What kind of shop",
+  "onboardingCategoryHint": "Home bakery, clothing…",
+  "onboardingArea": "Area",
+  "onboardingCity": "City",
+  "onboardingAddress": "Address for pickup",
+  "onboardingHours": "Working days and hours",
+  "onboardingHoursHint": "Tue–Sun, 9 am – 8 pm",
+  "onboardingWeeklyOff": "Weekly off",
+  "onboardingWeeklyOffHint": "Mondays",
+  "onboardingProductsTitle": "What you sell",
+  "onboardingProductsBody": "In plain words. No prices or quantities: you add those with each morning's stock.",
+  "onboardingProducts": "Products",
+  "onboardingProductsHint": "Cookies, brownies, custom birthday cakes, cupcakes",
+  "onboardingPersonaTitle": "How the agent talks",
+  "onboardingPersonaBody": "How your assistant sounds when it replies to customers.",
+  "onboardingIntro": "How it introduces itself",
+  "onboardingIntroHint": "Hi, I'm Sweet Crumbs' assistant",
+  "onboardingTone": "Tone",
+  "onboardingToneFriendly": "Friendly",
+  "onboardingToneFormal": "Formal",
+  "onboardingEmoji": "Use emoji",
+  "onboardingAddressCustomers": "How to address customers",
+  "onboardingAddressCustomersHint": "Sir/madam until they share a name",
+  "onboardingPoliciesTitle": "Policies and common questions",
+  "onboardingPoliciesBody": "The agent follows these and asks you about anything else.",
+  "onboardingFulfilment": "Pickup and delivery",
+  "onboardingFulfilmentHint": "Pickup from Anna Nagar, or we deliver nearby",
+  "onboardingCustomOrders": "Custom orders",
+  "onboardingCustomOrdersHint": "Yes, 2 days' notice, 50% advance",
+  "onboardingCancellations": "Cancellations and refunds",
+  "onboardingNeverPromise": "Things the agent must never promise",
+  "onboardingNeverPromiseHint": "Same-day custom cakes, delivery times",
+  "onboardingFaqs": "Common questions and answers",
+  "onboardingFaqsHint": "Eggless? Yes, on request.",
+  "onboardingPaymentsTitle": "Payments",
+  "onboardingPaymentsBody": "How customers pay for orders the agent takes.",
+  "onboardingPayPal": "PayPal",
+  "onboardingPaymentsReady": "Ready. Customers get a payment link, and the order is marked paid when PayPal confirms it.",
+  "onboardingPaymentsNotReady": "Not set up yet. Until it is, orders wait for you to confirm the payment."
+}

@@ -1,0 +1,61 @@
+# Render blueprint for the dev environment. Draft: check it on the first deploy.
+# Secrets marked `sync: false` are entered in the Render dashboard, never here.
+services:
+  - type: web
+    name: sellix-api
+    runtime: python
+    rootDir: backend
+    # Free instances sleep when idle, which breaks webhooks and the job worker inside the API.
+    plan: starter
+    buildCommand: pip install uv && uv sync --locked --no-dev
+    startCommand: uv run --frozen --no-dev uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+      - key: APP_ENV
+        value: dev
+      - key: RUN_WORKER_IN_PROCESS
+        value: "true"
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # Supabase: the direct or session-pooler connection string (not the transaction pooler).
+      - key: DATABASE_URL
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEYS
+        sync: false
+      - key: OAUTH_STATE_SECRET
+        sync: false
+      - key: SESSION_SIGNING_KEY
+        sync: false
+      - key: APP_REDIRECT_URIS
+        sync: false
+      - key: WEB_APP_ORIGINS
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_REASONING_EFFORT
+        value: low
+      # On while we capture real payloads (test accounts only); turn off afterwards.
+      - key: LOG_WEBHOOK_PAYLOADS
+        value: "true"
+
+# Next: the Flutter web app as a static site, and a separate worker once traffic needs it.

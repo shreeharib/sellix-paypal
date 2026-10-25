@@ -1,0 +1,40 @@
+# Who reviews what. Roles are described in docs/dev-plan.md section 13.
+# Once roles are assigned: replace each <placeholder> with a GitHub username (e.g. @priya-dev)
+# and uncomment the lines. Later lines take precedence over earlier ones.
+
+# Fallback reviewer for everything not listed below
+# *                                       @<integration-lead>
+
+# Role 1: Platform and channels
+# /.github/                               @<platform>
+# /render.yaml                            @<platform>
+# /justfile                               @<platform>
+# /backend/app/webhooks/                  @<platform>
+# /backend/app/modules/channels/          @<platform>
+# /backend/app/modules/conversations/     @<platform>
+# /backend/app/modules/notifications/     @<platform>
+
+# Role 2: AI
+# /backend/app/modules/agent/             @<ai>
+# /backend/app/modules/stories/           @<ai>
+# /evals/                                 @<ai>
+
+# Role 3: App, daily screens (with 4 people, the same person as role 4)
+# /app/                                   @<app-daily>
+
+# Role 4: App, setup screens and web
+# /app/lib/features/onboarding/           @<app-setup>
+# /app/lib/features/settings/             @<app-setup>
+# /app/lib/features/catalog/              @<app-setup>
+# /app/lib/features/insights/             @<app-setup>
+
+# Role 5: Commerce and data
+# /backend/app/core/                      @<commerce>
+# /backend/app/modules/catalog/           @<commerce>
+# /backend/app/modules/inventory/         @<commerce>
+# /backend/app/modules/orders/            @<commerce>
+# /backend/app/modules/payments/          @<commerce>
+# /backend/app/modules/escalations/       @<commerce>
+# /backend/app/modules/shop_profile/      @<commerce>
+# /backend/app/modules/insights/          @<commerce>
+# /supabase/                              @<commerce>

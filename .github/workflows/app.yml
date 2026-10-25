@@ -1,0 +1,35 @@
+name: app
+
+on:
+  pull_request:
+    paths: ["app/**", ".github/workflows/app.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/app.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      # Every step below is skipped until the Flutter project exists (app/pubspec.yaml).
+      - uses: subosito/flutter-action@v2
+        if: hashFiles('app/pubspec.yaml') != ''
+        with:
+          channel: stable
+          cache: true
+      - name: Install packages
+        if: hashFiles('app/pubspec.yaml') != ''
+        run: flutter pub get
+      - name: Analyze
+        if: hashFiles('app/pubspec.yaml') != ''
+        run: flutter analyze
+      - name: Tests
+        if: hashFiles('app/pubspec.yaml') != ''
+        run: flutter test
+      - name: Web build
+        if: hashFiles('app/pubspec.yaml') != ''
+        run: flutter build web --release
