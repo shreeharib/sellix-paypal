@@ -38,6 +38,15 @@ class PaymentFailed:
     outcome: Literal["payment_failed"] = "payment_failed"
 
 
+@dataclass(frozen=True)
+class RefundOutcome:
+    order_id: uuid.UUID
+    refund_id: str
+    amount_minor: int
+    currency: str
+    status: str
+
+
 def configured() -> bool:
     """Whether customers can be sent a payment link at all (PayPal keys are set)."""
     return paypal.configured()
@@ -88,6 +97,57 @@ async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
             .on_conflict_do_nothing(index_elements=[Payment.provider, Payment.provider_order_id])
         )
     return created.approve_url
+
+
+async def create_invoice_checkout(
+    placed: PlacedOrder,
+    *,
+    shop_name: str,
+    customer_name: str | None = None,
+    customer_email: str | None = None,
+    items: list[dict[str, Any]] | None = None,
+) -> paypal.CreatedInvoice:
+    """Create a PayPal invoice for an order and return the created invoice details."""
+    if not paypal.configured():
+        raise PaymentUnavailable("PayPal isn't set up")
+    if placed.currency not in paypal.SUPPORTED_CURRENCIES:
+        raise PaymentUnavailable(f"PayPal can't take payments in {placed.currency}")
+
+    try:
+        invoice_id = await paypal.create_invoice(
+            reference_id=str(placed.order_id),
+            invoice_number=f"INV-{placed.number}",
+            description=f"{shop_name} order #{placed.number}",
+            items=items or [],
+            total_minor=placed.total_minor,
+            currency=placed.currency,
+            brand_name=shop_name,
+            customer_name=customer_name,
+            customer_email=customer_email,
+        )
+        payer_view_url = await paypal.send_invoice(invoice_id)
+    except paypal.PayPalError as exc:
+        raise PaymentUnavailable(str(exc)) from exc
+
+    async with session_scope() as session:
+        order = await session.get(Order, placed.order_id)
+        if order is None:
+            raise LookupError(f"No order {placed.order_id}")
+        await session.execute(
+            pg_insert(Payment)
+            .values(
+                merchant_id=order.merchant_id,
+                order_id=order.id,
+                provider="paypal",
+                provider_order_id=invoice_id,
+                status="created",
+                currency=placed.currency,
+                amount_minor=placed.total_minor,
+                approve_url=payer_view_url,
+            )
+            .on_conflict_do_nothing(index_elements=[Payment.provider, Payment.provider_order_id])
+        )
+    return paypal.CreatedInvoice(invoice_id=invoice_id, payer_view_url=payer_view_url)
 
 
 async def capture(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
@@ -141,6 +201,70 @@ async def record_capture(
         return None
 
 
+async def record_invoice_payment(
+    invoice_id: str,
+    paid_amount_minor: int,
+    currency: str,
+) -> PaymentResult | None:
+    async with session_scope() as session:
+        payment = await session.scalar(
+            select(Payment)
+            .where(Payment.provider == "paypal", Payment.provider_order_id == invoice_id)
+            .with_for_update()
+        )
+        if payment is None:
+            log.warning("payments.unknown_paypal_invoice", invoice_id=invoice_id)
+            return None
+        payment.status = "completed"
+        return await orders.record_payment(
+            session,
+            payment.order_id,
+            amount_minor=paid_amount_minor,
+            currency=currency,
+            actor="paypal",
+        )
+
+
+async def refund_order(
+    order_id: uuid.UUID,
+    *,
+    reason: str | None = None,
+    restock: bool = True,
+) -> RefundOutcome:
+    """Refund a paid order through PayPal and update local records."""
+    async with session_scope() as session:
+        order = await session.get(Order, order_id)
+        if order is None:
+            raise LookupError(f"No order {order_id}")
+        payment = await session.scalar(
+            select(Payment).where(
+                Payment.order_id == order_id,
+                Payment.provider == "paypal",
+                Payment.status == "completed",
+            )
+        )
+        if payment is None or not payment.provider_capture_id:
+            raise RuntimeError(f"No completed PayPal payment capture found for order {order_id}")
+
+        result = await paypal.refund_capture(
+            payment.provider_capture_id,
+            amount_minor=payment.amount_minor,
+            currency=payment.currency,
+            note=reason,
+        )
+        payment.status = "refunded"
+
+        await orders.refund_order(session, order_id, restock=restock, reason=reason)
+
+    return RefundOutcome(
+        order_id=order_id,
+        refund_id=result.refund_id,
+        amount_minor=result.amount_minor,
+        currency=result.currency,
+        status=result.status,
+    )
+
+
 async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFailed | None:
     """Apply a verified PayPal webhook event."""
     event_type = event.get("event_type")
@@ -154,6 +278,14 @@ async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFai
             log.warning("payments.capture_without_order", event_type=event_type)
             return None
         return await record_capture(str(paypal_order_id), paypal.capture_from_resource(resource))
+    if event_type == "INVOICING.INVOICE.PAID":
+        invoice_id = str(resource.get("id", ""))
+        amount_data = resource.get("amount") or (
+            resource.get("payments", [{}])[-1].get("amount") if resource.get("payments") else {}
+        )
+        paid_amount_minor = paypal.to_minor(str(amount_data.get("value", "0")))
+        currency = str(amount_data.get("currency_code", ""))
+        return await record_invoice_payment(invoice_id, paid_amount_minor, currency)
     log.info("payments.webhook_ignored", event_type=event_type)
     return None
 

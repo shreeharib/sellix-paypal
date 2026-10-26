@@ -60,7 +60,9 @@ class PlacedOrder:
     hold_minutes: int
 
 
-PaymentOutcome = Literal["paid", "already_paid", "paid_stock_short", "amount_mismatch"]
+PaymentOutcome = Literal[
+    "paid", "already_paid", "paid_stock_short", "amount_mismatch"
+]
 
 
 @dataclass(frozen=True)
