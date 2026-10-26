@@ -1,7 +1,7 @@
 """Checks every reply before it reaches the customer. Unchecked text is never sent.
 
 Each problem is phrased as an instruction, so the agent can repair its reply once. A reply
-that still fails is replaced by a holding message (see holding_message).
+that still fails is replaced by a holding message (templates.holding_message).
 """
 
 import re
@@ -93,25 +93,6 @@ def dominant_script(text: str) -> str | None:
         if count >= 3 and count >= 0.6 * letters:
             return name
     return None
-
-
-# The safe reply when a reply can't be checked or repaired, by language (see CustomerReply).
-_HOLDING = {
-    "ta": "கடையிடம் கேட்டுவிட்டு விரைவில் பதில் சொல்கிறேன்.",
-    "ta-en": "Shop-la check panni seekiram solren.",
-    "hi": "दुकान से पूछकर जल्द ही जवाब देते हैं।",
-    "hi-en": "Shop se check karke jaldi batate hain.",
-    "en": "Let me check with the shop and get back to you shortly.",
-}
-
-
-def holding_message(language: str | None, customer_text: str) -> str:
-    script = dominant_script(customer_text)
-    if script == "Tamil":
-        return _HOLDING["ta"]
-    if script == "Devanagari":
-        return _HOLDING["hi"]
-    return _HOLDING.get((language or "").lower(), _HOLDING["en"])
 
 
 def _letters(text: str, script: str) -> int:

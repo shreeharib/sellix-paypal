@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.escalations.models import Escalation
@@ -19,12 +19,15 @@ async def open_escalation(
     conversation_id: uuid.UUID,
     question: str,
     trigger_message_id: uuid.UUID | None = None,
+    customer_waiting: bool = False,
 ) -> Escalation:
+    """`customer_waiting`: the customer was told the shop will get back to them."""
     escalation = Escalation(
         merchant_id=merchant_id,
         conversation_id=conversation_id,
         trigger_message_id=trigger_message_id,
         question=question.strip(),
+        customer_waiting=customer_waiting,
     )
     session.add(escalation)
     await session.flush()
@@ -37,6 +40,39 @@ async def open_escalation(
         question=escalation.question,
     )
     return escalation
+
+
+async def waiting_questions(session: AsyncSession, conversation_id: uuid.UUID) -> list[Escalation]:
+    """Open questions the customer in this chat is waiting on, oldest first."""
+    return list(
+        await session.scalars(
+            select(Escalation)
+            .where(
+                Escalation.conversation_id == conversation_id,
+                Escalation.status == "open",
+                Escalation.customer_waiting,
+            )
+            .order_by(Escalation.created_at)
+        )
+    )
+
+
+async def claim_follow_ups(session: AsyncSession, *, asked_before: datetime) -> list[Escalation]:
+    """Open questions asked before `asked_before` whose customer hasn't had a follow-up yet.
+    Marked as followed up here, so each customer gets one at most."""
+    return list(
+        await session.scalars(
+            update(Escalation)
+            .where(
+                Escalation.status == "open",
+                Escalation.customer_waiting,
+                Escalation.followed_up_at.is_(None),
+                Escalation.created_at < asked_before,
+            )
+            .values(followed_up_at=func.now())
+            .returning(Escalation)
+        )
+    )
 
 
 class EscalationNotFound(LookupError):

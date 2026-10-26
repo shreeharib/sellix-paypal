@@ -18,6 +18,9 @@ class Escalation(Base):
     trigger_message_id: Mapped[uuid.UUID | None]
     question: Mapped[str]
     status: Mapped[str] = mapped_column(server_default="open")
+    # The customer was told the shop will get back to them about this.
+    customer_waiting: Mapped[bool] = mapped_column(server_default=text("false"))
+    followed_up_at: Mapped[datetime | None]
     answer: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     answered_at: Mapped[datetime | None]

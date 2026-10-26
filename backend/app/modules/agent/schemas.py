@@ -22,6 +22,8 @@ class TurnBrief:
     # Code's summary of the order in this chat (draft, quote, placed order), so the agent
     # doesn't rebuild it from the messages.
     order: str = "No order in progress."
+    # Questions the agent asked the shop owner that the customer is still waiting on.
+    waiting: str | None = None
 
 
 class OrderLineDraft(BaseModel):

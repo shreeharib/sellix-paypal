@@ -1,6 +1,6 @@
 import pytest
 
-from app.modules.agent import validator
+from app.modules.agent import templates, validator
 
 FACTS = validator.ReplyFacts(
     amounts_minor=frozenset({6000, 9000, 12000}), customer_text="rendu cookie venum"
@@ -69,4 +69,4 @@ def test_amounts_are_read_in_minor_units() -> None:
     ],
 )
 def test_holding_message_matches_the_customer(language: str, customer: str, expected: str) -> None:
-    assert validator.holding_message(language, customer) == expected
+    assert templates.holding_message(language, customer) == expected

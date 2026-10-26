@@ -20,6 +20,7 @@ from app.modules.conversations import actions
 from app.modules.conversations.models import Conversation, Customer, Message
 from app.modules.conversations.schemas import ConversationSummary, MessageView
 from app.modules.escalations import service as escalations
+from app.modules.escalations.models import Escalation
 from app.modules.merchants import service as merchants
 from app.modules.merchants.models import Merchant
 
@@ -28,6 +29,8 @@ log = structlog.get_logger()
 # How long after sending we still match an echo to our reply by its text (the echo can
 # arrive before the channel API has returned the message ID).
 ECHO_MATCH_WINDOW = timedelta(minutes=5)
+# Instagram lets a business reply only this long after the customer's last message.
+REPLY_WINDOW = timedelta(hours=24)
 # One turn: up to two actions (quote, then place the order) and the reply itself.
 MAX_AGENT_STEPS = 3
 # The agent answers when the latest message is from the customer or a system note.
@@ -126,8 +129,7 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
     loaded = await _load_turn(conversation_id)
     if loaded is None:
         return
-    context, recent, order = loaded
-    brief = agent.new_turn_brief(order=order)
+    context, recent, brief = loaded
     history = [_as_chat_message(message, brief) for message in recent]
 
     reply: CustomerReply | None = None
@@ -289,7 +291,7 @@ async def set_agent_active(session: AsyncSession, conversation_id: uuid.UUID, ac
 
 async def _load_turn(
     conversation_id: uuid.UUID,
-) -> tuple[actions.TurnContext, list[Message], str] | None:
+) -> tuple[actions.TurnContext, list[Message], TurnBrief] | None:
     async with session_scope() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
@@ -313,7 +315,13 @@ async def _load_turn(
             business_date=merchants.business_date(merchant),
             trigger_message_id=recent[-1].id,
         )
-        return context, recent, await actions.order_summary(session, conversation)
+        brief = agent.new_turn_brief(
+            order=await actions.order_summary(session, conversation),
+            waiting=_waiting_summary(
+                await escalations.waiting_questions(session, conversation.id), datetime.now(UTC)
+            ),
+        )
+        return context, recent, brief
 
 
 async def _send(
@@ -343,6 +351,7 @@ async def _send(
                 conversation_id=context.conversation_id,
                 question=owner_question,
                 trigger_message_id=context.trigger_message_id,
+                customer_waiting=True,  # the reply told them the shop will get back to them
             )
         credentials = await channels.get_send_credentials(session, context.channel_connection_id)
 
@@ -373,6 +382,81 @@ async def _send(
             )
         )
     log.info("conversations.replied", conversation_id=str(context.conversation_id))
+
+
+def _waiting_summary(questions: list[Escalation], now: datetime) -> str | None:
+    if not questions:
+        return None
+    asked = "; ".join(
+        f'"{question.question}" ({_minutes_ago(question.created_at, now)})'
+        for question in questions
+    )
+    return (
+        f"You've asked the shop owner, and the customer is waiting for the answer: {asked}. "
+        "Don't answer that yourself or guess: if the customer asks about it, say you're still "
+        "checking with the shop. Answer anything else normally."
+    )
+
+
+def _minutes_ago(moment: datetime, now: datetime) -> str:
+    minutes = max(0, int((now - moment).total_seconds() // 60))
+    return "just now" if minutes < 1 else f"{minutes} min ago"
+
+
+async def follow_up_waiting_customers(*, waited: timedelta) -> int:
+    """Tell customers still waiting on the merchant that the shop will get back to them. Once
+    per question; only in chats the agent is handling, inside Instagram's 24-hour window."""
+    now = datetime.now(UTC)
+    async with session_scope() as session:
+        due = await escalations.claim_follow_ups(session, asked_before=now - waited)
+    sent = 0
+    for question in due:
+        loaded = await _follow_up_context(question.conversation_id, now)
+        if loaded is None:
+            continue
+        context, language, customer_said = loaded
+        await _send(
+            context,
+            agent.follow_up_message(language, customer_said),
+            details={"language": language, "follow_up_for": str(question.id)},
+            owner_question=None,
+        )
+        sent += 1
+    return sent
+
+
+async def _follow_up_context(
+    conversation_id: uuid.UUID, now: datetime
+) -> tuple[actions.TurnContext, str | None, str] | None:
+    async with session_scope() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or not conversation.agent_active:
+            return None
+        if (
+            conversation.last_customer_message_at is None
+            or now - conversation.last_customer_message_at > REPLY_WINDOW
+        ):
+            return None
+        merchant = await session.get(Merchant, conversation.merchant_id)
+        customer = await session.get(Customer, conversation.customer_id)
+        if merchant is None or customer is None or not merchant.agent_enabled:
+            return None
+        recent = await _recent_messages(session, conversation_id, get_settings().history_messages)
+    language = next(
+        (m.details.get("language") for m in reversed(recent) if m.sender == "agent"), None
+    )
+    customer_said = next((m.body for m in reversed(recent) if m.sender == "customer"), "")
+    context = actions.TurnContext(
+        conversation_id=conversation.id,
+        merchant_id=merchant.id,
+        shop_name=merchant.name,
+        customer_id=customer.id,
+        customer_external_id=customer.external_id,
+        channel_connection_id=conversation.channel_connection_id,
+        business_date=merchants.business_date(merchant),
+        trigger_message_id=None,
+    )
+    return context, language, customer_said
 
 
 async def _escalate(context: actions.TurnContext, question: str) -> None:

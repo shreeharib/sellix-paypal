@@ -2,15 +2,19 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from procrastinate.testing import InMemoryConnector
+from sqlalchemy import func, select, update
 
 from app.core.db import session_scope
+from app.modules.agent import customer_agent
 from app.modules.agent import service as agent
 from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.channels import service as channels
 from app.modules.channels.models import ChannelConnection
 from app.modules.conversations import service
 from app.modules.conversations.models import Message
+from app.modules.conversations.tasks import inform_customer
+from app.modules.escalations import service as escalations
 from app.modules.escalations.models import Escalation
 from tests.integration.factories import CUSTOMER_ID, start_conversation
 
@@ -174,7 +178,100 @@ async def test_owner_question_opens_an_escalation(
         escalation = await session.scalar(select(Escalation))
     assert escalation is not None
     assert escalation.question == "Customer wants a custom birthday cake for Saturday."
-    assert escalation.status == "open"
+    assert (escalation.status, escalation.customer_waiting) == ("open", True)
+
+
+CAKE_QUESTION = "Customer wants a custom birthday cake for Saturday."
+
+
+async def ask_about_the_cake(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
+    """A turn where the agent tells the customer it will check with the shop."""
+    asking = reply(
+        "Let me check with the shop and get back to you!",
+        needs_owner=True,
+        owner_question=CAKE_QUESTION,
+    )
+    monkeypatch.setattr(agent, "reply_to_customer", FakeAgent(asking))
+    turn = await start_conversation("can you make a birthday cake for saturday?")
+    await service.run_turn(turn.conversation_id)
+    return turn.conversation_id
+
+
+async def test_open_question_holds_until_the_merchant_answers(
+    shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch, deferred_jobs: InMemoryConnector
+) -> None:
+    channel = FakeChannel()
+    monkeypatch.setattr(channels, "send_text", channel)
+    conversation_id = await ask_about_the_cake(monkeypatch)
+
+    await start_conversation("so? can you make it?", message_id="m-2")
+    holding = FakeAgent(reply("Still checking with the shop, will tell you soon!"))
+    monkeypatch.setattr(agent, "reply_to_customer", holding)
+    await service.run_turn(conversation_id)
+
+    waiting = holding.briefs[0].waiting
+    assert waiting is not None
+    assert f'"{CAKE_QUESTION}" (just now)' in waiting
+    assert "Don't answer that yourself or guess" in waiting
+    assert waiting in customer_agent.build_system_prompt(
+        None,
+        [],
+        holding.briefs[0],
+        customer_agent.ShopClock(now="Now: test.", week="Not set."),
+    )
+
+    async with session_scope() as session:
+        (question,) = await escalations.list_escalations(session, shop.merchant_id)
+        await escalations.answer(session, shop.merchant_id, question.id, "Yes, ₹900 for 1 kg")
+    await inform_customer(conversation_id, "The shop owner answered: yes, ₹900 for 1 kg.")
+    answered = FakeAgent(reply("Yes! 1 kg cake is ₹900."))
+    monkeypatch.setattr(agent, "reply_to_customer", answered)
+    await service.run_turn(conversation_id)
+
+    assert answered.briefs[0].waiting is None
+    assert channel.sent[-1] == (CUSTOMER_ID, "Yes! 1 kg cake is ₹900.")
+
+
+async def age_questions(minutes: int) -> None:
+    async with session_scope() as session:
+        await session.execute(
+            update(Escalation).values(created_at=func.now() - timedelta(minutes=minutes))
+        )
+
+
+async def test_customer_waiting_too_long_gets_one_follow_up(
+    shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = FakeChannel()
+    monkeypatch.setattr(channels, "send_text", channel)
+    await ask_about_the_cake(monkeypatch)
+
+    early = await service.follow_up_waiting_customers(waited=timedelta(minutes=30))
+    await age_questions(31)
+    first = await service.follow_up_waiting_customers(waited=timedelta(minutes=30))
+    second = await service.follow_up_waiting_customers(waited=timedelta(minutes=30))
+
+    assert (early, first, second) == (0, 1, 0)
+    assert channel.sent[-1] == (
+        CUSTOMER_ID,
+        "Wait panna vachathukku sorry! Shop konjam busy-a irukku, avanga reply pannadhum "
+        "udane solren.",
+    )
+
+
+async def test_no_follow_up_once_the_merchant_took_over_the_chat(
+    shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = FakeChannel()
+    monkeypatch.setattr(channels, "send_text", channel)
+    conversation_id = await ask_about_the_cake(monkeypatch)
+    async with session_scope() as session:
+        await service.set_agent_active(session, conversation_id, False)
+    await age_questions(31)
+
+    sent = await service.follow_up_waiting_customers(waited=timedelta(minutes=30))
+
+    assert sent == 0 and len(channel.sent) == 1  # only the first "let me check"
 
 
 async def test_failed_send_is_recorded_and_escalated(

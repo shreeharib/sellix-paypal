@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     turn_batch_seconds: int = 3
     # Messages of history the agent sees on each turn.
     history_messages: int = 20
+    # A customer waiting on the merchant's answer gets one "still checking" message after this.
+    owner_follow_up_minutes: int = 30
 
     def missing_required(self) -> list[str]:
         """Settings the API can't work without."""

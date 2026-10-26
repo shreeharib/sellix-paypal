@@ -47,7 +47,7 @@ class TurnContext:
     customer_external_id: str
     channel_connection_id: uuid.UUID
     business_date: date
-    trigger_message_id: uuid.UUID
+    trigger_message_id: uuid.UUID | None  # the message being answered; None for follow-ups
 
 
 @dataclass(frozen=True)

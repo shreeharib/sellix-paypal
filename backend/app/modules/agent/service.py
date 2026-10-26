@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import structlog
 
 from app.core.db import session_scope
-from app.modules.agent import customer_agent, llm, validator
+from app.modules.agent import customer_agent, llm, templates, validator
 from app.modules.agent.models import AiUsage
 from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.inventory import service as inventory
@@ -25,8 +25,8 @@ class AgentUnavailable(RuntimeError):
     """The model failed, or returned unusable output on every attempt."""
 
 
-def new_turn_brief(*, order: str) -> TurnBrief:
-    return TurnBrief(system_tag=customer_agent.new_system_tag(), order=order)
+def new_turn_brief(*, order: str, waiting: str | None = None) -> TurnBrief:
+    return TurnBrief(system_tag=customer_agent.new_system_tag(), order=order, waiting=waiting)
 
 
 def system_note(text: str, brief: TurnBrief) -> str:
@@ -113,7 +113,12 @@ async def review_reply(
 
 def holding_message(language: str | None, customer_text: str) -> str:
     """A safe reply in the customer's language when no checked reply is available."""
-    return validator.holding_message(language, customer_text)
+    return templates.holding_message(language, customer_text)
+
+
+def follow_up_message(language: str | None, customer_text: str) -> str:
+    """ "Still checking with the shop", for a customer who has waited a while."""
+    return templates.follow_up_message(language, customer_text)
 
 
 async def _record_usage(

@@ -52,6 +52,16 @@ async def reconcile_unanswered(timestamp: int) -> None:
         log.info("conversations.reconciled", count=len(conversation_ids))
 
 
+@jobs.periodic(cron="* * * * *")
+@jobs.task(name="follow_up_waiting_customers", queue="agent")
+async def follow_up_waiting_customers(timestamp: int) -> None:
+    """Every minute: a "still checking" message for customers the merchant hasn't answered."""
+    minutes = get_settings().owner_follow_up_minutes
+    sent = await service.follow_up_waiting_customers(waited=timedelta(minutes=minutes))
+    if sent:
+        log.info("conversations.followed_up", count=sent)
+
+
 async def inform_customer(conversation_id: uuid.UUID | None, note: str) -> None:
     """Have the agent tell the customer something, in their language, in their chat."""
     if conversation_id is None:

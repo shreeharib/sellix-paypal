@@ -97,8 +97,12 @@ def build_system_prompt(
     return (
         f"{_ROLE}\n\n# Shop profile\n{profile}\n\n{_time_section(clock)}\n\n"
         f"# Today's stock (prices are fixed)\n{stock_section}\n\n"
-        f"# This conversation\n{brief.order}\n\n{rules}"
+        f"# This conversation\n{brief.order}{_waiting(brief)}\n\n{rules}"
     )
+
+
+def _waiting(brief: TurnBrief) -> str:
+    return f"\n{brief.waiting}" if brief.waiting else ""
 
 
 def _id_suffix(item: StockItem) -> str:
