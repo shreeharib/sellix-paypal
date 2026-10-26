@@ -34,9 +34,23 @@ class CreatedOrder:
 
 
 @dataclass(frozen=True)
+class CreatedInvoice:
+    invoice_id: str
+    payer_view_url: str
+
+
+@dataclass(frozen=True)
 class Capture:
     status: str  # COMPLETED, PENDING, DECLINED, FAILED
     capture_id: str
+    amount_minor: int
+    currency: str
+
+
+@dataclass(frozen=True)
+class RefundResult:
+    refund_id: str
+    status: str
     amount_minor: int
     currency: str
 
@@ -86,6 +100,7 @@ async def create_order(
                         "brand_name": brand_name[:127],
                         "user_action": "PAY_NOW",
                         "shipping_preference": "NO_SHIPPING",
+                        "landing_page": "GUEST_CHECKOUT",
                         "return_url": return_url,
                         "cancel_url": cancel_url,
                     }
@@ -131,6 +146,136 @@ def capture_from_resource(capture: Mapping[str, Any]) -> Capture:
         capture_id=str(capture.get("id", "")),
         amount_minor=to_minor(str(amount.get("value", "0"))),
         currency=str(amount.get("currency_code", "")),
+    )
+
+
+async def create_invoice(
+    *,
+    reference_id: str,
+    invoice_number: str | None = None,
+    description: str,
+    items: list[dict[str, Any]] | None = None,
+    total_minor: int,
+    currency: str,
+    brand_name: str,
+    customer_name: str | None = None,
+    customer_email: str | None = None,
+) -> str:
+    """Create a draft invoice in PayPal for the full order amount. Returns invoice ID."""
+    invoice_items: list[dict[str, Any]] = []
+    if items:
+        for item in items:
+            unit_price = int(item.get("unit_price_minor", 0))
+            qty = int(item.get("quantity", 1))
+            invoice_items.append(
+                {
+                    "name": str(item.get("name") or description)[:300],
+                    "quantity": str(qty),
+                    "unit_amount": {
+                        "currency_code": currency,
+                        "value": to_amount(unit_price),
+                    },
+                    "unit_of_measure": "QUANTITY",
+                }
+            )
+    if not invoice_items:
+        invoice_items.append(
+            {
+                "name": description[:300],
+                "quantity": "1",
+                "unit_amount": {
+                    "currency_code": currency,
+                    "value": to_amount(total_minor),
+                },
+                "unit_of_measure": "QUANTITY",
+            }
+        )
+
+    recipient_info: dict[str, Any] = {
+        "email_address": customer_email or f"customer-{reference_id[:8]}@sellix.local"
+    }
+    if customer_name:
+        recipient_info["name"] = {"given_name": customer_name[:140]}
+
+    payload: dict[str, Any] = {
+        "detail": {
+            "currency_code": currency,
+            "reference": reference_id[:60],
+            "note": f"Thank you for ordering with {brand_name}!",
+            "payment_term": {"term_type": "DUE_ON_RECEIPT"},
+        },
+        "invoicer": {
+            "business_name": brand_name[:300],
+        },
+        "primary_recipients": [{"billing_info": recipient_info}],
+        "items": invoice_items,
+        "amount": {
+            "currency_code": currency,
+            "value": to_amount(total_minor),
+            "breakdown": {
+                "item_total": {
+                    "currency_code": currency,
+                    "value": to_amount(total_minor),
+                }
+            },
+        },
+    }
+    if invoice_number:
+        payload["detail"]["invoice_number"] = invoice_number
+
+    data = await _request(
+        "POST",
+        "/v2/invoicing/invoices",
+        request_id=f"sellix-invoice-{reference_id}",
+        json=payload,
+    )
+    return str(data["id"])
+
+
+async def send_invoice(invoice_id: str) -> str:
+    """Activate an invoice without emailing the recipient. Returns payer_view_url."""
+    data = await _request(
+        "POST",
+        f"/v2/invoicing/invoices/{invoice_id}/send",
+        request_id=f"sellix-send-{invoice_id}",
+        json={"send_to_recipient": False, "send_to_invoicer": False},
+    )
+    links = {link.get("rel"): link.get("href") for link in data.get("links", [])}
+    payer_view = links.get("payer-view")
+    if not payer_view:
+        invoice_data = await _request("GET", f"/v2/invoicing/invoices/{invoice_id}")
+        metadata = invoice_data.get("detail", {}).get("metadata", {})
+        payer_view = metadata.get("payer_view_url")
+    if not payer_view:
+        raise PayPalError(200, "PayPal returned no payer view link for invoice")
+    return payer_view
+
+
+async def refund_capture(
+    capture_id: str,
+    *,
+    amount_minor: int | None = None,
+    currency: str | None = None,
+    note: str | None = None,
+) -> RefundResult:
+    """Refund a captured payment. Full refund if amount_minor is None."""
+    payload: dict[str, Any] = {}
+    if amount_minor is not None and currency is not None:
+        payload["amount"] = {"value": to_amount(amount_minor), "currency_code": currency}
+    if note:
+        payload["note_to_payer"] = note[:255]
+    data = await _request(
+        "POST",
+        f"/v2/payments/captures/{capture_id}/refund",
+        request_id=f"sellix-refund-{capture_id}",
+        json=payload,
+    )
+    amt = data.get("amount", {})
+    return RefundResult(
+        refund_id=str(data.get("id", "")),
+        status=str(data.get("status", "")),
+        amount_minor=to_minor(str(amt.get("value", "0"))),
+        currency=str(amt.get("currency_code", "")),
     )
 
 

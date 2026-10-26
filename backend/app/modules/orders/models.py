@@ -21,6 +21,7 @@ class Order(Base):
     customer_id: Mapped[uuid.UUID]
     conversation_id: Mapped[uuid.UUID | None]
     status: Mapped[str]
+    payment_status: Mapped[str] = mapped_column(server_default=text("'pending'"))
     business_date: Mapped[date]
     currency: Mapped[str]
     total_minor: Mapped[int]
@@ -65,3 +66,18 @@ class OrderEvent(Base):
     actor: Mapped[str]  # agent | customer | merchant | system | paypal
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Refund(Base):
+    """Refund record mapped to enterprise_schema.sql refunds table."""
+
+    __tablename__ = "refunds"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    order_id: Mapped[uuid.UUID]
+    refund_amount_minor: Mapped[int]
+    reason: Mapped[str | None]
+    is_restocked: Mapped[bool] = mapped_column(server_default=text("true"))
+    processed_at: Mapped[datetime] = mapped_column(server_default=func.now())

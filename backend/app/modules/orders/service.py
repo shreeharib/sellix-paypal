@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
-from app.modules.orders.models import Order, OrderEvent, OrderItem
+from app.modules.orders.models import Order, OrderEvent, OrderItem, Refund
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
@@ -230,11 +230,52 @@ async def record_payment(
         except _StockShortfall:
             outcome = "paid_stock_short"
 
-    order.status = "paid"
+    target_status = "paid"
+    order.status = target_status
+    order.payment_status = "paid"
     order.paid_at = datetime.now(UTC)
     order.hold_expires_at = None
-    _log(session, order, outcome, previous, "paid", actor)
+    _log(session, order, outcome, previous, target_status, actor)
     return result(outcome)
+
+
+async def refund_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    restock: bool = True,
+    reason: str | None = None,
+    actor: str = "merchant",
+) -> None:
+    """Mark an order as refunded, record in refunds table, and release stock."""
+    order = await session.scalar(select(Order).where(Order.id == order_id).with_for_update())
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == "refunded":
+        return
+
+    previous = order.status
+    if restock and previous in ("paid", "completed", "confirmed"):
+        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+        for item in items:
+            await inventory.release(
+                session,
+                variant_id=item.variant_id,
+                business_date=order.business_date,
+                quantity=item.quantity,
+            )
+
+    order.status = "refunded"
+    order.payment_status = "refunded"
+    session.add(
+        Refund(
+            order_id=order.id,
+            refund_amount_minor=order.total_minor,
+            reason=reason,
+            is_restocked=restock,
+        )
+    )
+    _log(session, order, "refunded", previous, "refunded", actor, {"reason": reason})
 
 
 async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> list[ExpiredOrder]:
