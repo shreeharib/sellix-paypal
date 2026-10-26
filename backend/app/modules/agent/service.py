@@ -1,6 +1,7 @@
 """Public interface of the agent module."""
 
 import uuid
+from datetime import UTC, datetime
 
 import structlog
 
@@ -9,6 +10,7 @@ from app.modules.agent import customer_agent, llm
 from app.modules.agent.models import AiUsage
 from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.inventory import service as inventory
+from app.modules.merchants import hours
 from app.modules.merchants import service as merchants
 from app.modules.shop_profile import service as shop_profile
 
@@ -45,13 +47,20 @@ async def reply_to_customer(
     brief: TurnBrief,
 ) -> CustomerReply:
     """Next reply in a customer conversation, from the shop profile and today's stock."""
+    now = datetime.now(UTC)
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, merchant_id)
         profile = await shop_profile.latest_profile(session, merchant_id)
-        stock = await inventory.today_stock(session, merchant_id, merchants.business_date(merchant))
+        today = merchants.business_date(merchant, now)
+        stock = await inventory.today_stock(session, merchant_id, today)
+    opening = merchants.opening_hours(merchant)
+    clock = customer_agent.ShopClock(
+        now=hours.describe_now(opening, merchant.timezone, now),
+        week=hours.describe_week(opening, today),
+    )
 
     messages = [
-        ChatMessage("system", customer_agent.build_system_prompt(profile, stock, brief)),
+        ChatMessage("system", customer_agent.build_system_prompt(profile, stock, brief, clock)),
         *history,
     ]
     for _ in range(MAX_ATTEMPTS):

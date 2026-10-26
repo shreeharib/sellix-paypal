@@ -124,6 +124,7 @@ just cli --help
 just cli create-merchant --name "Sweet Crumbs"                         # prints the merchant ID
 just cli set-shop-profile --merchant-id <id> --file shop.md            # Markdown: hours, policies, FAQs
 just cli set-stock --merchant-id <id> --file stock.json                # today's items (format below)
+just cli set-hours --merchant-id <id> --hours "mon=closed tue-sun=09:00-20:00"  # opening hours (below)
 just cli connect-instagram --merchant-id <id>                          # prints the link to open
 just cli set-agent --merchant-id <id> off                              # or: on
 just cli resume-conversation --conversation-id <id>                    # agent back on for one chat
@@ -140,6 +141,16 @@ Without just: `cd backend && uv run python -m app.cli <command> ...`
   {"product": "Gift box", "variant": "Chocolate", "price": "12.50", "quantity": 5, "currency": "USD"}
 ]
 ```
+
+**Opening hours** are what the agent uses to say whether the shop is open now; until they're set, it checks with the merchant instead. Times are in the shop's time zone, a day left out is closed, `+` joins several ranges in a day, and a range that closes before it opens runs past midnight:
+
+```bash
+just cli set-hours --merchant-id <id> --hours "mon=closed tue-thu=09:00-20:00 fri=09:00-13:00+16:00-21:00 sat-sun=09:00-20:00"
+just cli set-hours --merchant-id <id> --hours "tue-sun=09:00-20:00" --closed-dates 2026-11-01,2026-11-12  # holidays
+just cli set-hours --merchant-id <id> --clear
+```
+
+The app can also set them with `PATCH /v1/merchant` (`opening_hours`).
 
 Merchants who sign in with **"Continue with Instagram"** in the app get their shop created automatically; the commands above are for support and testing.
 

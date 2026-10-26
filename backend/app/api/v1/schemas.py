@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from app.modules.merchants.hours import OpeningHours
 from app.modules.shop_profile.schemas import OnboardingAnswers
 
 # Auth -----------------------------------------------------------------------------------------
@@ -52,6 +53,10 @@ class Merchant(BaseModel):
     name: str
     timezone: str
     agent_enabled: bool
+    opening_hours: OpeningHours | None = Field(
+        description="Weekly hours in the shop's time zone; a missing day is closed. "
+        "Null until set: the agent then can't say whether the shop is open."
+    )
 
 
 class Me(BaseModel):
@@ -66,6 +71,9 @@ class MerchantUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     timezone: str | None = None
     agent_enabled: bool | None = None
+    opening_hours: OpeningHours | None = Field(
+        default=None, description="Replaces the opening hours; send null to clear them"
+    )
 
 
 class ShopProfile(BaseModel):

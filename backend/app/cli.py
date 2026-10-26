@@ -25,6 +25,7 @@ from app.modules.channels import service as channels
 from app.modules.conversations import service as conversations
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import OpeningStockLine
+from app.modules.merchants import hours
 from app.modules.merchants import service as merchants
 from app.modules.shop_profile import service as shop_profile
 
@@ -78,6 +79,20 @@ def _parser() -> argparse.ArgumentParser:
         "--date", type=date.fromisoformat, help="business date (default: today for the merchant)"
     )
 
+    command = commands.add_parser(
+        "set-hours", help="set the shop's opening hours, which the agent uses to say if it's open"
+    )
+    command.add_argument("--merchant-id", type=uuid.UUID, required=True)
+    command.add_argument(
+        "--hours",
+        help='e.g. "mon=closed tue-sat=09:00-20:00 sun=10:00-14:00"; several ranges in a day: '
+        '"fri=09:00-13:00+16:00-21:00"; a day left out is closed',
+    )
+    command.add_argument(
+        "--closed-dates", default="", help="one-off closures, e.g. 2026-11-01,2026-11-12"
+    )
+    command.add_argument("--clear", action="store_true", help="remove the opening hours")
+
     command = commands.add_parser("set-agent", help="switch the agent on or off for a merchant")
     command.add_argument("--merchant-id", type=uuid.UUID, required=True)
     command.add_argument("state", choices=["on", "off"])
@@ -120,6 +135,11 @@ async def _run(args: argparse.Namespace) -> int:
                         lines=lines,
                     )
                     print(f"Set opening stock for {business_date}: {len(lines)} items")
+                case "set-hours":
+                    opening = None if args.clear else _opening_hours(args)
+                    merchant = await merchants.set_opening_hours(session, args.merchant_id, opening)
+                    print("Opening hours:")
+                    print(hours.describe_week(opening, merchants.business_date(merchant)))
                 case "set-agent":
                     await merchants.set_agent_enabled(session, args.merchant_id, args.state == "on")
                     print(f"Agent switched {args.state}")
@@ -142,6 +162,13 @@ def _require_public_https() -> None:
         raise ValueError("INSTAGRAM_APP_ID is not set")
     if not settings.public_base_url.startswith("https://"):
         raise ValueError("PUBLIC_BASE_URL must be the public https:// address of this API")
+
+
+def _opening_hours(args: argparse.Namespace) -> hours.OpeningHours:
+    if not args.hours:
+        raise ValueError("Give --hours, or --clear to remove the opening hours")
+    closed = [date.fromisoformat(d.strip()) for d in args.closed_dates.split(",") if d.strip()]
+    return hours.parse_spec(args.hours, closed)  # its validation errors are ValueErrors
 
 
 def _stock_lines(raw: Any) -> list[OpeningStockLine]:

@@ -2,6 +2,7 @@
 
 import re
 import secrets
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
@@ -68,7 +69,15 @@ class AgentOutputError(ValueError):
     pass
 
 
-def build_system_prompt(shop_profile: str | None, stock: list[StockItem], brief: TurnBrief) -> str:
+@dataclass(frozen=True)
+class ShopClock:
+    now: str  # hours.describe_now: local time, and whether the shop is open
+    week: str  # hours.describe_week: the weekly hours and upcoming closures
+
+
+def build_system_prompt(
+    shop_profile: str | None, stock: list[StockItem], brief: TurnBrief, clock: ShopClock
+) -> str:
     profile = (shop_profile or "").strip() or "No shop profile has been written yet."
     lines = [
         f"- {item.label}: {format_money(item.price_minor, item.currency)}, {item.available} left"
@@ -79,8 +88,18 @@ def build_system_prompt(shop_profile: str | None, stock: list[StockItem], brief:
     stock_section = "\n".join(lines) or "- Nothing has been added to today's stock yet."
     rules = _RULES.replace("{system_notes}", _system_notes_rule(brief.system_tag))
     return (
-        f"{_ROLE}\n\n# Shop profile\n{profile}\n\n"
+        f"{_ROLE}\n\n# Shop profile\n{profile}\n\n{_time_section(clock)}\n\n"
         f"# Today's stock (prices are fixed)\n{stock_section}\n\n{rules}"
+    )
+
+
+def _time_section(clock: ShopClock) -> str:
+    return (
+        f"# Time and opening hours\n{clock.now}\nOpening hours:\n{clock.week}\n"
+        'Use these for anything about time: whether the shop is open, what "today", '
+        '"tonight" or "tomorrow" means, and when a customer can pick up. They replace any '
+        "hours written in the shop profile. Never agree to a pickup or delivery time when the "
+        "shop is closed; suggest an open time instead."
     )
 
 

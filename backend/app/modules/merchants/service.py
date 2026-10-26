@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.merchants.hours import OpeningHours
 from app.modules.merchants.models import Merchant
 
 
@@ -42,6 +43,21 @@ def business_date(merchant: Merchant, at: datetime | None = None) -> date:
     """The merchant's local calendar date (closing-time cut-off comes with the stock ledger)."""
     moment = at or datetime.now(tz=ZoneInfo("UTC"))
     return moment.astimezone(ZoneInfo(merchant.timezone)).date()
+
+
+def opening_hours(merchant: Merchant) -> OpeningHours | None:
+    if merchant.opening_hours is None:
+        return None
+    return OpeningHours.model_validate(merchant.opening_hours)
+
+
+async def set_opening_hours(
+    session: AsyncSession, merchant_id: uuid.UUID, hours: OpeningHours | None
+) -> Merchant:
+    """Replace the shop's opening hours; None clears them."""
+    merchant = await get_merchant(session, merchant_id)
+    merchant.opening_hours = None if hours is None else hours.model_dump(mode="json")
+    return merchant
 
 
 async def update_settings(

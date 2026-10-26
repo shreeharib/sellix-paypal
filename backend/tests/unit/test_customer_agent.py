@@ -10,10 +10,19 @@ STOCK = [
     StockItem("Brownie", None, 9000, "INR", 15),
 ]
 BRIEF = TurnBrief(system_tag="5eb1a7c2")
+CLOCK = customer_agent.ShopClock(
+    now="Now: Tuesday 27 October 2026, 7:40 pm (Asia/Kolkata). The shop is open now and closes "
+    "at 8:00 pm today.",
+    week="- Monday: closed",
+)
+
+
+def make_prompt(profile: str | None, stock: list[StockItem]) -> str:
+    return customer_agent.build_system_prompt(profile, stock, BRIEF, CLOCK)
 
 
 def test_prompt_lists_stock_with_prices_and_sold_out_items() -> None:
-    prompt = customer_agent.build_system_prompt("# Sweet Crumbs\nOpen 9-8.", STOCK, BRIEF)
+    prompt = make_prompt("# Sweet Crumbs\nOpen 9-8.", STOCK)
 
     assert "# Sweet Crumbs" in prompt
     assert "- Scoop cookie (Chocolate): ₹60, 8 left" in prompt
@@ -24,19 +33,26 @@ def test_prompt_lists_stock_with_prices_and_sold_out_items() -> None:
 
 
 def test_prompt_without_profile_or_stock_says_so() -> None:
-    prompt = customer_agent.build_system_prompt(None, [], BRIEF)
+    prompt = make_prompt(None, [])
 
     assert "No shop profile has been written yet." in prompt
     assert "Nothing has been added to today's stock yet." in prompt
 
 
 def test_prompt_names_this_turns_system_note_prefix() -> None:
-    prompt = customer_agent.build_system_prompt(None, STOCK, BRIEF)
+    prompt = make_prompt(None, STOCK)
 
     assert "Messages that start with [Shop system #5eb1a7c2] come from the shop's system" in prompt
     assert customer_agent.system_note("Payment received.", BRIEF.system_tag) == (
         "[Shop system #5eb1a7c2] Payment received."
     )
+
+
+def test_prompt_gives_the_time_and_hours_over_the_profiles_wording() -> None:
+    text = make_prompt("# Sweet Crumbs\nOpen 9-8.", STOCK)
+
+    assert f"# Time and opening hours\n{CLOCK.now}\nOpening hours:\n- Monday: closed" in text
+    assert "They replace any hours written in the shop profile" in text
 
 
 def test_system_tags_differ_every_turn() -> None:

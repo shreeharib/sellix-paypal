@@ -9,6 +9,7 @@ from app.modules.agent.schemas import ChatMessage
 from app.modules.channels.models import ChannelConnection
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import OpeningStockLine
+from app.modules.merchants import hours
 from app.modules.merchants import service as merchants
 from app.modules.shop_profile import service as shop_profile
 from tests.integration.factories import start_conversation
@@ -41,6 +42,9 @@ async def test_reply_uses_the_shop_profile_and_todays_stock(
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, shop.merchant_id)
         await shop_profile.save_profile(session, merchant.id, "# Sweet Crumbs\nHome bakery.")
+        await merchants.set_opening_hours(
+            session, merchant.id, hours.parse_spec("mon=closed tue-sun=09:00-20:00")
+        )
         await inventory.set_opening_stock(
             session,
             merchant_id=merchant.id,
@@ -62,6 +66,8 @@ async def test_reply_uses_the_shop_profile_and_todays_stock(
     assert reply.reply == "Chocolate or red velvet?"
     assert "# Sweet Crumbs" in system_prompt
     assert "Scoop cookie (Chocolate): ₹60, 10 left" in system_prompt
+    assert "(Asia/Kolkata). The shop is " in system_prompt
+    assert "- Monday: closed\n- Tuesday: 9:00 am to 8:00 pm" in system_prompt
     async with session_scope() as session:
         usage = await session.scalar(select(AiUsage))
     assert usage is not None

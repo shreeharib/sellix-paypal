@@ -301,6 +301,34 @@ async def test_merchant_switches_the_agent_off_for_the_shop(
     assert merchant is not None and merchant.agent_enabled is False
 
 
+async def test_merchant_sets_and_clears_opening_hours(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+    hours = {
+        "week": {"tue": [{"opens": "09:00", "closes": "20:00"}]},
+        "closed_dates": ["2026-11-01"],
+    }
+
+    saved = await api.patch("/v1/merchant", headers=bearer(token), json={"opening_hours": hours})
+    renamed = await api.patch("/v1/merchant", headers=bearer(token), json={"name": "Crumbs"})
+    bad = await api.patch(
+        "/v1/merchant",
+        headers=bearer(token),
+        json={"opening_hours": {"week": {"tue": [{"opens": "09:00", "closes": "09:00"}]}}},
+    )
+    cleared = await api.patch("/v1/merchant", headers=bearer(token), json={"opening_hours": None})
+
+    assert saved.status_code == 200
+    assert saved.json()["opening_hours"] == {
+        "week": {"tue": [{"opens": "09:00:00", "closes": "20:00:00"}]},
+        "closed_dates": ["2026-11-01"],
+    }
+    assert renamed.json()["opening_hours"] == saved.json()["opening_hours"]  # left alone
+    assert bad.status_code == 422
+    assert cleared.status_code == 200 and cleared.json()["opening_hours"] is None
+
+
 async def test_answering_a_question_relays_it_to_the_customer(
     api: httpx2.AsyncClient, shop: ChannelConnection, deferred_jobs: InMemoryConnector
 ) -> None:

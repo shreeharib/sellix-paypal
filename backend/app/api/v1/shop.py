@@ -40,6 +40,10 @@ async def update_merchant(shop: Shop, body: schemas.MerchantUpdate) -> schemas.M
                 timezone=body.timezone,
                 agent_enabled=body.agent_enabled,
             )
+            if "opening_hours" in body.model_fields_set:
+                merchant = await merchants.set_opening_hours(
+                    session, shop.merchant_id, body.opening_hours
+                )
             return _merchant(merchant)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -89,4 +93,5 @@ def _merchant(merchant: Merchant) -> schemas.Merchant:
         name=merchant.name,
         timezone=merchant.timezone,
         agent_enabled=merchant.agent_enabled,
+        opening_hours=merchants.opening_hours(merchant),
     )
