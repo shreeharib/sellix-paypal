@@ -125,6 +125,7 @@ just cli create-merchant --name "Sweet Crumbs"                         # prints 
 just cli set-shop-profile --merchant-id <id> --file shop.md            # Markdown: hours, policies, FAQs
 just cli set-stock --merchant-id <id> --file stock.json                # today's items (format below)
 just cli set-hours --merchant-id <id> --hours "mon=closed tue-sun=09:00-20:00"  # opening hours (below)
+just cli add-alias --merchant-id <id> --product "Scoop cookie" --alias "சாக்லேட் குக்கீ"  # another name customers use
 just cli connect-instagram --merchant-id <id>                          # prints the link to open
 just cli set-agent --merchant-id <id> off                              # or: on
 just cli resume-conversation --conversation-id <id>                    # agent back on for one chat

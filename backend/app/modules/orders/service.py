@@ -11,8 +11,10 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.catalog import service as catalog
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
+from app.modules.orders import matching
 from app.modules.orders.models import Order, OrderEvent, OrderItem
 from app.modules.orders.schemas import (
     DaySummary,
@@ -44,26 +46,29 @@ async def quote(
     session: AsyncSession, *, merchant_id: uuid.UUID, business_date: date, request: OrderRequest
 ) -> Quote:
     stock = await inventory.today_stock(session, merchant_id, business_date)
+    aliases = await catalog.aliases(session, merchant_id)
     wanted: dict[uuid.UUID, int] = defaultdict(int)
     items: dict[uuid.UUID, StockItem] = {}
     problems: list[str] = []
 
     for line in request.lines:
-        label = f"{line.product} ({line.variant})" if line.variant else line.product
+        label = line.label
         if line.quantity < 1:
             problems.append(f"{label}: the quantity must be at least 1")
             continue
-        matches = [
-            item
-            for item in stock
-            if _same(item.product, line.product)
-            and (line.variant is None or _same(item.variant or "", line.variant))
-        ]
+        if line.ref:
+            matches = [item for item in stock if item.ref == line.ref.strip().lower()]
+        else:
+            matches = list(matching.find(stock, line.product, line.variant, aliases).items)
         if not matches:
             problems.append(f"{label} isn't in today's stock")
         elif len(matches) > 1:
-            variants = ", ".join(item.variant or "plain" for item in matches)
-            problems.append(f"{line.product} comes in {variants}: ask which one")
+            if len({item.product for item in matches}) == 1:
+                variants = ", ".join(item.variant or "plain" for item in matches)
+                problems.append(f"{matches[0].product} comes in {variants}: ask which one")
+            else:
+                options = ", ".join(item.label for item in matches)
+                problems.append(f'"{label}" could be {options}: ask which one')
         elif matches[0].variant_id is not None:
             items[matches[0].variant_id] = matches[0]
             wanted[matches[0].variant_id] += line.quantity
@@ -265,10 +270,6 @@ async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> l
         _log(session, order, "expired", "awaiting_payment", "expired", "system")
         expired.append(ExpiredOrder(order.id, order.number, order.conversation_id))
     return expired
-
-
-def _same(a: str, b: str) -> bool:
-    return " ".join(a.lower().split()) == " ".join(b.lower().split())
 
 
 def _log(

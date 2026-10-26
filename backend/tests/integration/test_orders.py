@@ -4,13 +4,14 @@ import pytest
 from sqlalchemy import select
 
 from app.core.db import session_scope
+from app.modules.catalog import service as catalog
 from app.modules.channels.models import ChannelConnection
 from app.modules.conversations.models import Conversation
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import OpeningStockLine
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order, OrderEvent
-from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder
+from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder, Quote
 from tests.integration.factories import start_conversation
 
 pytestmark = pytest.mark.anyio
@@ -99,6 +100,56 @@ async def test_quote_explains_what_cant_be_sold(stocked: ChannelConnection) -> N
         "Scoop cookie (Chocolate): only 3 left",
         "Scoop cookie (Red velvet) is sold out",
     )
+
+
+async def quote_line(shop: ChannelConnection, line: OrderLineRequest) -> Quote:
+    async with session_scope() as session:
+        return await orders.quote(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=TODAY,
+            request=OrderRequest(lines=(line,)),
+        )
+
+
+@pytest.mark.parametrize("words", ["choco cookie", "choclate cookie", "chocolate scoop"])
+async def test_customers_words_quote_the_right_variant(
+    stocked: ChannelConnection, words: str
+) -> None:
+    offer = await quote_line(stocked, OrderLineRequest(words, None, 2))
+
+    assert offer.ok
+    assert [(line.label, line.quantity) for line in offer.lines] == [
+        ("Scoop cookie (Chocolate)", 2)
+    ]
+
+
+async def test_item_id_from_the_prompt_decides_the_item(stocked: ChannelConnection) -> None:
+    async with session_scope() as session:
+        stock = await inventory.today_stock(session, stocked.merchant_id, TODAY)
+    brownie = next(item for item in stock if item.product == "Brownie")
+
+    by_id = await quote_line(stocked, OrderLineRequest("", None, 1, ref=brownie.ref))
+    wrong_name = await quote_line(stocked, OrderLineRequest("Cookie", None, 1, ref=brownie.ref))
+    unknown = await quote_line(stocked, OrderLineRequest("", None, 1, ref="p000000"))
+
+    assert [line.label for line in by_id.lines] == ["Brownie"]
+    assert [line.label for line in wrong_name.lines] == ["Brownie"]
+    assert unknown.problems == ("p000000 isn't in today's stock",)
+
+
+async def test_merchants_alias_finds_the_product(stocked: ChannelConnection) -> None:
+    async with session_scope() as session:
+        await catalog.add_alias(
+            session,
+            merchant_id=stocked.merchant_id,
+            product_name="scoop cookie",
+            alias="சாக்லேட் குக்கீ",
+        )
+
+    offer = await quote_line(stocked, OrderLineRequest("சாக்லேட் குக்கீ", "Chocolate", 1))
+
+    assert [line.label for line in offer.lines] == ["Scoop cookie (Chocolate)"]
 
 
 async def test_placing_holds_stock_and_the_last_items_cant_be_sold_twice(

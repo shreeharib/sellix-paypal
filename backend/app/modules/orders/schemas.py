@@ -9,6 +9,14 @@ class OrderLineRequest:
     product: str
     variant: str | None
     quantity: int
+    # The item's ID from today's stock (StockItem.ref). When given, it decides the item and
+    # the names are only for messages.
+    ref: str | None = None
+
+    @property
+    def label(self) -> str:
+        name = f"{self.product} ({self.variant})" if self.variant else self.product
+        return name or self.ref or "an item"
 
 
 @dataclass(frozen=True)

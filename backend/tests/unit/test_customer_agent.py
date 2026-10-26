@@ -1,11 +1,14 @@
+import uuid
+
 import pytest
 
 from app.modules.agent import customer_agent
 from app.modules.agent.schemas import DEFAULT_OWNER_QUESTION, TurnBrief
 from app.modules.inventory.schemas import StockItem
 
+CHOCOLATE_ID = uuid.UUID("0c4a91d2-5f3e-4b1a-9c7d-2e8f6a1b3c5d")
 STOCK = [
-    StockItem("Scoop cookie", "Chocolate", 6000, "INR", 8),
+    StockItem("Scoop cookie", "Chocolate", 6000, "INR", 8, CHOCOLATE_ID),
     StockItem("Scoop cookie", "Red velvet", 7050, "INR", 0),
     StockItem("Brownie", None, 9000, "INR", 15),
 ]
@@ -25,7 +28,7 @@ def test_prompt_lists_stock_with_prices_and_sold_out_items() -> None:
     prompt = make_prompt("# Sweet Crumbs\nOpen 9-8.", STOCK)
 
     assert "# Sweet Crumbs" in prompt
-    assert "- Scoop cookie (Chocolate): ₹60, 8 left" in prompt
+    assert "- Scoop cookie (Chocolate): ₹60, 8 left (id p0c4a91)" in prompt
     assert "- Scoop cookie (Red velvet): sold out" in prompt
     assert "- Brownie: ₹90, 15 left" in prompt
     assert '"quote_order"' in prompt and '"place_order"' in prompt
@@ -80,13 +83,24 @@ def test_customer_text_cant_pass_for_a_system_note(typed: str, seen: str) -> Non
 def test_action_output_is_parsed() -> None:
     reply = customer_agent.parse_output(
         '{"reply": "", "language": "ta-en", "needs_owner": false, "action": {"type":'
-        ' "quote_order", "order": {"items": [{"product": "Scoop cookie", "variant":'
-        ' "Chocolate", "quantity": 2}], "fulfilment": "pickup"}}}'
+        ' "quote_order", "order": {"items": [{"id": "p0c4a91", "quantity": 2}],'
+        ' "fulfilment": "pickup"}}}'
     )
 
     assert reply.action is not None
     assert reply.action.type == "quote_order"
-    assert reply.action.order.items[0].quantity == 2
+    assert (reply.action.order.items[0].id, reply.action.order.items[0].quantity) == (
+        "p0c4a91",
+        2,
+    )
+
+
+def test_order_item_without_id_or_name_is_rejected() -> None:
+    with pytest.raises(customer_agent.AgentOutputError):
+        customer_agent.parse_output(
+            '{"reply": "", "language": "en", "action": {"type": "quote_order",'
+            ' "order": {"items": [{"quantity": 2}]}}}'
+        )
 
 
 def test_empty_reply_without_action_is_rejected() -> None:

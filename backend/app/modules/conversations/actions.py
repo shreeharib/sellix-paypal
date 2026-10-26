@@ -132,7 +132,12 @@ def _quote_note(offer: Quote) -> str:
 def _order_request(draft: OrderDraft) -> OrderRequest:
     return OrderRequest(
         lines=tuple(
-            OrderLineRequest(product=item.product, variant=item.variant, quantity=item.quantity)
+            OrderLineRequest(
+                product=item.product or "",
+                variant=item.variant,
+                quantity=item.quantity,
+                ref=item.id,
+            )
             for item in draft.items
         ),
         fulfilment=draft.fulfilment,

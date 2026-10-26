@@ -60,9 +60,10 @@ letters), "ta", "hi-en"
 - "owner_question": if needs_owner is true, a short note in English telling the owner what's \
 needed; otherwise null
 - "action": null, or {"type": "quote_order" | "place_order", "order": {"items": \
-[{"product": "...", "variant": "..." or null, "quantity": 1}], "fulfilment": "pickup" | \
-"delivery" | null, "delivery_address": "..." or null, "needed_by": "..." or null, \
-"notes": "..." or null}}. Use the exact product and variant names from Today's stock."""
+[{"id": "...", "quantity": 1}], "fulfilment": "pickup" | "delivery" | null, \
+"delivery_address": "..." or null, "needed_by": "..." or null, "notes": "..." or null}}. \
+Each item's "id" is the one shown next to it in Today's stock (customers never see ids). If \
+you can't tell which item the customer means, ask them instead of guessing."""
 
 
 class AgentOutputError(ValueError):
@@ -81,6 +82,7 @@ def build_system_prompt(
     profile = (shop_profile or "").strip() or "No shop profile has been written yet."
     lines = [
         f"- {item.label}: {format_money(item.price_minor, item.currency)}, {item.available} left"
+        f"{_id_suffix(item)}"
         if item.available > 0
         else f"- {item.label}: sold out"
         for item in stock
@@ -91,6 +93,10 @@ def build_system_prompt(
         f"{_ROLE}\n\n# Shop profile\n{profile}\n\n{_time_section(clock)}\n\n"
         f"# Today's stock (prices are fixed)\n{stock_section}\n\n{rules}"
     )
+
+
+def _id_suffix(item: StockItem) -> str:
+    return f" (id {item.ref})" if item.ref else ""
 
 
 def _time_section(clock: ShopClock) -> str:

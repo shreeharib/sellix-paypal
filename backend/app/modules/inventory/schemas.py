@@ -12,10 +12,16 @@ class StockItem:
     currency: str
     available: int
     variant_id: uuid.UUID | None = None
+    product_id: uuid.UUID | None = None
 
     @property
     def label(self) -> str:
         return f"{self.product} ({self.variant})" if self.variant else self.product
+
+    @property
+    def ref(self) -> str | None:
+        """Short, stable ID the agent orders by, so it never has to retype names exactly."""
+        return f"p{self.variant_id.hex[:6]}" if self.variant_id else None
 
 
 @dataclass(frozen=True)

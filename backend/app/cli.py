@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.core.db import dispose_engine, session_scope
 from app.core.logging import configure_logging
 from app.core.runtime import new_event_loop
+from app.modules.catalog import service as catalog
 from app.modules.channels import service as channels
 from app.modules.conversations import service as conversations
 from app.modules.inventory import service as inventory
@@ -93,6 +94,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     command.add_argument("--clear", action="store_true", help="remove the opening hours")
 
+    command = commands.add_parser(
+        "add-alias", help="teach the agent another name for a product (e.g. its Tamil name)"
+    )
+    command.add_argument("--merchant-id", type=uuid.UUID, required=True)
+    command.add_argument("--product", required=True, help="the product's name, as in the stock")
+    command.add_argument("--alias", required=True)
+
     command = commands.add_parser("set-agent", help="switch the agent on or off for a merchant")
     command.add_argument("--merchant-id", type=uuid.UUID, required=True)
     command.add_argument("state", choices=["on", "off"])
@@ -140,6 +148,14 @@ async def _run(args: argparse.Namespace) -> int:
                     merchant = await merchants.set_opening_hours(session, args.merchant_id, opening)
                     print("Opening hours:")
                     print(hours.describe_week(opening, merchants.business_date(merchant)))
+                case "add-alias":
+                    await catalog.add_alias(
+                        session,
+                        merchant_id=args.merchant_id,
+                        product_name=args.product,
+                        alias=args.alias,
+                    )
+                    print(f"Customers can now call {args.product!r} {args.alias!r}")
                 case "set-agent":
                     await merchants.set_agent_enabled(session, args.merchant_id, args.state == "on")
                     print(f"Agent switched {args.state}")

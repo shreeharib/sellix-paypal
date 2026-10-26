@@ -34,3 +34,17 @@ class ProductVariant(Base):
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ProductAlias(Base):
+    """Another name customers use for a product (a nickname, a Tamil or Hindi name)."""
+
+    __tablename__ = "product_aliases"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    product_id: Mapped[uuid.UUID]
+    alias_text: Mapped[str]
+    confidence_source: Mapped[str] = mapped_column(server_default="merchant_confirmed")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -68,6 +68,7 @@ async def today_stock(
             ProductVariant.currency,
             DailyStock.available,
             ProductVariant.id,
+            Product.id,
         )
         .join(ProductVariant, ProductVariant.id == DailyStock.variant_id)
         .join(Product, Product.id == ProductVariant.product_id)
@@ -87,8 +88,9 @@ async def today_stock(
             currency=currency,
             available=available,
             variant_id=variant_id,
+            product_id=product_id,
         )
-        for product, variant, price, currency, available, variant_id in rows
+        for product, variant, price, currency, available, variant_id, product_id in rows
     ]
 
 

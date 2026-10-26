@@ -22,9 +22,16 @@ class TurnBrief:
 
 
 class OrderLineDraft(BaseModel):
-    product: str = Field(min_length=1, max_length=200)
+    id: str | None = Field(default=None, max_length=20)  # the item's id from today's stock
+    product: str | None = Field(default=None, max_length=200)
     variant: str | None = Field(default=None, max_length=200)
     quantity: int = Field(ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _identified(self) -> "OrderLineDraft":
+        if not (self.id or "").strip() and not (self.product or "").strip():
+            raise ValueError("each item needs its id from today's stock (or a product name)")
+        return self
 
 
 class OrderDraft(BaseModel):

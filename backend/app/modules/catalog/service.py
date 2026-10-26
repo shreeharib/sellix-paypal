@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.catalog.models import Product, ProductVariant
+from app.modules.catalog.models import Product, ProductAlias, ProductVariant
 
 
 async def upsert_variant(
@@ -55,3 +55,46 @@ async def upsert_variant(
         variant.is_active = True
     product.is_active = True
     return variant
+
+
+async def add_alias(
+    session: AsyncSession, *, merchant_id: uuid.UUID, product_name: str, alias: str
+) -> ProductAlias:
+    """Teach the agent another name for a product, e.g. its Tamil name or a nickname."""
+    alias = " ".join(alias.split())
+    if not alias:
+        raise ValueError("The alias is empty")
+    product = await session.scalar(
+        select(Product).where(
+            Product.merchant_id == merchant_id,
+            func.lower(Product.name) == product_name.strip().lower(),
+        )
+    )
+    if product is None:
+        raise LookupError(f"No product called {product_name!r}")
+    existing = await session.scalar(
+        select(ProductAlias).where(
+            ProductAlias.product_id == product.id,
+            func.lower(ProductAlias.alias_text) == alias.lower(),
+        )
+    )
+    if existing is not None:
+        return existing
+    created = ProductAlias(product_id=product.id, alias_text=alias)
+    session.add(created)
+    await session.flush()
+    return created
+
+
+async def aliases(session: AsyncSession, merchant_id: uuid.UUID) -> dict[uuid.UUID, list[str]]:
+    """Every alias of the merchant's products, by product ID."""
+    rows = await session.execute(
+        select(ProductAlias.product_id, ProductAlias.alias_text)
+        .join(Product, Product.id == ProductAlias.product_id)
+        .where(Product.merchant_id == merchant_id)
+        .order_by(ProductAlias.created_at)
+    )
+    found: dict[uuid.UUID, list[str]] = {}
+    for product_id, alias in rows:
+        found.setdefault(product_id, []).append(alias)
+    return found
