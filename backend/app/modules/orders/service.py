@@ -256,9 +256,7 @@ async def refund_order(
 
     previous = order.status
     if restock and previous in ("paid", "completed", "confirmed"):
-        items = list(
-            await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id))
-        )
+        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
         for item in items:
             await inventory.release(
                 session,
