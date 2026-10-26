@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.modules.agent import service as agent
-from app.modules.agent.schemas import ChatMessage, CustomerReply
+from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.channels import service as channels
 from app.modules.channels.schemas import IncomingMessage
 from app.modules.conversations import actions
@@ -122,7 +122,9 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
     loaded = await _load_turn(conversation_id)
     if loaded is None:
         return
-    context, history = loaded
+    context, recent = loaded
+    brief = agent.new_turn_brief()
+    history = [_as_chat_message(message, brief) for message in recent]
 
     reply: CustomerReply | None = None
     outcomes: list[actions.ActionOutcome] = []
@@ -132,6 +134,7 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
                 merchant_id=context.merchant_id,
                 conversation_id=context.conversation_id,
                 history=history,
+                brief=brief,
             )
         except agent.AgentUnavailable:
             reply = None
@@ -140,7 +143,7 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
             break
         outcome = await actions.perform(context, reply.action)
         outcomes.append(outcome)
-        history = [*history, ChatMessage("user", agent.system_note(outcome.note))]
+        history = [*history, ChatMessage("user", agent.system_note(outcome.note, brief))]
 
     payment_link = next((o.payment_link for o in reversed(outcomes) if o.payment_link), None)
     order_id = next((o.order_id for o in reversed(outcomes) if o.order_id), None)
@@ -205,7 +208,7 @@ async def set_agent_active(session: AsyncSession, conversation_id: uuid.UUID, ac
 
 async def _load_turn(
     conversation_id: uuid.UUID,
-) -> tuple[actions.TurnContext, list[ChatMessage]] | None:
+) -> tuple[actions.TurnContext, list[Message]] | None:
     async with session_scope() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
@@ -229,7 +232,7 @@ async def _load_turn(
             business_date=merchants.business_date(merchant),
             trigger_message_id=recent[-1].id,
         )
-        return context, [_as_chat_message(message) for message in recent]
+        return context, recent
 
 
 async def _send(
@@ -442,16 +445,17 @@ def _inbound_details(message: IncomingMessage) -> dict[str, Any]:
     return details
 
 
-def _as_chat_message(message: Message) -> ChatMessage:
+def _as_chat_message(message: Message, brief: TurnBrief) -> ChatMessage:
     if message.sender == "customer":
         notes = []
         if message.details.get("story_reply_url"):
             notes.append("[The customer replied to one of the shop's stories]")
         if message.details.get("attachments"):
             notes.append(f"[The customer sent: {', '.join(message.details['attachments'])}]")
-        return ChatMessage("user", " ".join([*notes, message.body]).strip())
+        body = agent.customer_text(message.body)
+        return ChatMessage("user", " ".join([*notes, body]).strip())
     if message.sender == "system":
-        return ChatMessage("user", agent.system_note(message.body))
+        return ChatMessage("user", agent.system_note(message.body, brief))
     if message.sender == "merchant":
         return ChatMessage("assistant", f"(Shop owner) {message.body}")
     return ChatMessage("assistant", message.body)

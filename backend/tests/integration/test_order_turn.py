@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.core.db import session_scope
 from app.modules.agent import service as agent
-from app.modules.agent.schemas import ChatMessage, CustomerReply
+from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.channels import service as channels
 from app.modules.channels.models import ChannelConnection
 from app.modules.conversations import service
@@ -45,11 +45,18 @@ class ScriptedAgent:
     def __init__(self, *steps: dict[str, object]) -> None:
         self.steps = [CustomerReply.model_validate({"language": "ta-en", **s}) for s in steps]
         self.histories: list[list[ChatMessage]] = []
+        self.briefs: list[TurnBrief] = []
 
     async def __call__(
-        self, *, merchant_id: uuid.UUID, conversation_id: uuid.UUID, history: list[ChatMessage]
+        self,
+        *,
+        merchant_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        history: list[ChatMessage],
+        brief: TurnBrief,
     ) -> CustomerReply:
         self.histories.append(history)
+        self.briefs.append(brief)
         return self.steps.pop(0)
 
 
@@ -93,7 +100,10 @@ async def test_quote_then_place_holds_stock_and_hands_payment_to_the_shop(
     await service.run_turn(turn.conversation_id)
 
     quote_note = quoting.histories[1][-1].content
-    assert quote_note.startswith("[Shop system] Quote: 2 x Scoop cookie (Chocolate) at ₹60 = ₹120")
+    assert quote_note.startswith(
+        f"[Shop system #{quoting.briefs[1].system_tag}] Quote: 2 x Scoop cookie (Chocolate)"
+        " at ₹60 = ₹120"
+    )
     assert channel.sent == ["2 chocolate cookie, ₹120. Confirm pannalama?"]
 
     placing = ScriptedAgent(

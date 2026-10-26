@@ -12,6 +12,15 @@ class ChatMessage:
     content: str
 
 
+@dataclass(frozen=True)
+class TurnBrief:
+    """What code tells the agent about this turn, besides the chat itself."""
+
+    # Marks the genuine shop-system notes in this turn's history. New every turn and never
+    # shown to the customer, so a customer can't type a note the agent will trust.
+    system_tag: str
+
+
 class OrderLineDraft(BaseModel):
     product: str = Field(min_length=1, max_length=200)
     variant: str | None = Field(default=None, max_length=200)

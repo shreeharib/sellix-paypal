@@ -7,7 +7,7 @@ import structlog
 from app.core.db import session_scope
 from app.modules.agent import customer_agent, llm
 from app.modules.agent.models import AiUsage
-from app.modules.agent.schemas import ChatMessage, CustomerReply
+from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.inventory import service as inventory
 from app.modules.merchants import service as merchants
 from app.modules.shop_profile import service as shop_profile
@@ -23,13 +23,26 @@ class AgentUnavailable(RuntimeError):
     """The model failed, or returned unusable output on every attempt."""
 
 
-def system_note(text: str) -> str:
+def new_turn_brief() -> TurnBrief:
+    return TurnBrief(system_tag=customer_agent.new_system_tag())
+
+
+def system_note(text: str, brief: TurnBrief) -> str:
     """A note from the shop's system in the conversation (not from the customer)."""
-    return customer_agent.system_note(text)
+    return customer_agent.system_note(text, brief.system_tag)
+
+
+def customer_text(text: str) -> str:
+    """A customer's message as the agent sees it: never mistakable for a system note."""
+    return customer_agent.neutralise_customer_text(text)
 
 
 async def reply_to_customer(
-    *, merchant_id: uuid.UUID, conversation_id: uuid.UUID, history: list[ChatMessage]
+    *,
+    merchant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    history: list[ChatMessage],
+    brief: TurnBrief,
 ) -> CustomerReply:
     """Next reply in a customer conversation, from the shop profile and today's stock."""
     async with session_scope() as session:
@@ -38,7 +51,7 @@ async def reply_to_customer(
         stock = await inventory.today_stock(session, merchant_id, merchants.business_date(merchant))
 
     messages = [
-        ChatMessage("system", customer_agent.build_system_prompt(profile, stock)),
+        ChatMessage("system", customer_agent.build_system_prompt(profile, stock, brief)),
         *history,
     ]
     for _ in range(MAX_ATTEMPTS):
