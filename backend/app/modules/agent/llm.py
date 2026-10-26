@@ -29,10 +29,14 @@ class Completion:
     latency_ms: int
 
 
-async def complete(messages: list[ChatMessage], *, json_output: bool = False) -> Completion:
+async def complete(
+    messages: list[ChatMessage], *, json_output: bool = False, model: str | None = None
+) -> Completion:
+    """`model` overrides LLM_MODEL (same provider), e.g. to compare models in evals."""
     settings = get_settings()
+    model = model or settings.llm_model
     body: dict[str, Any] = {
-        "model": settings.llm_model,
+        "model": model,
         "messages": [{"role": m.role, "content": m.content} for m in messages],
     }
     if json_output and settings.llm_json_mode == "json_object":
@@ -63,7 +67,7 @@ async def complete(messages: list[ChatMessage], *, json_output: bool = False) ->
     usage = data.get("usage") or {}
     return Completion(
         content=content.strip(),
-        model=str(data.get("model") or settings.llm_model),
+        model=str(data.get("model") or model),
         input_tokens=usage.get("prompt_tokens"),
         output_tokens=usage.get("completion_tokens"),
         latency_ms=latency_ms,

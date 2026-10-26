@@ -41,3 +41,7 @@ check:
 # Run backend tests (extra arguments go to pytest, e.g. `just test -k meta`)
 test *args:
     cd backend && uv run pytest {{args}}
+
+# Run the eval datasets against the configured model (costs model credits), e.g. `just evals --dataset adversarial`
+evals *args:
+    cd backend && uv run python ../evals/run.py {{args}}

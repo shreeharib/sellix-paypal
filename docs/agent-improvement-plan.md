@@ -186,20 +186,27 @@ Today is 26 Oct; submission is 12 Nov (product plan section 18). Phase 1 makes t
 
 Ordered by risk. Items 1.1–1.4 are each about a day on the current code.
 
-- [ ] **1.1 Separate system notes from customer text** (AI). System events go to the model in a channel customers can't type into; customer text with a `[Shop system]` prefix is neutralised. Fixes B1.
+- [x] **1.1 Separate system notes from customer text** (AI). System events go to the model in a channel customers can't type into; customer text with a `[Shop system]` prefix is neutralised. Fixes B1.
   Done when: a test where the customer sends a spoofed payment note gets no payment confirmation.
-- [ ] **1.2 Add the "Now" line** (AI). Current date, time and open/closed status in the merchant's time zone, from the shop profile hours. Fixes B7.
+  Built: system notes carry a tag that's new every turn; customer look-alikes are marked as the customer's words.
+- [x] **1.2 Add the "Now" line** (AI). Current date, time and open/closed status in the merchant's time zone, from the shop profile hours. Fixes B7.
   Done when: "are you open now?" is answered correctly before, during and after hours.
-- [ ] **1.3 Match by variant ID** (C + AI). The stock list in the prompt carries variant IDs; quotes and orders take IDs; a fuzzy and alias matcher (`pg_trgm`, `product_aliases`) resolves names when the model gives one. Fixes B2.
+  Built: structured opening hours (`PATCH /v1/merchant`, `cli set-hours`) replace the profile's free-text hours; until they're set, the agent checks with the shop. The app still needs a screen for them.
+- [x] **1.3 Match by variant ID** (C + AI). The stock list in the prompt carries variant IDs; quotes and orders take IDs; a fuzzy and alias matcher (`pg_trgm`, `product_aliases`) resolves names when the model gives one. Fixes B2.
   Done when: "choco cookie", "choclate cookie" and "chocolate scoop" all quote the right variant.
-- [ ] **1.4 Conversation state and quote-bound orders** (C + AI). Store the state and draft per conversation; `place_order` takes a `quote_id` and is refused unless the conversation is in `awaiting_confirmation` for that quote. Fixes B3, B5.
+  Built: matching in Python over today's stock (`orders/matching.py`) instead of `pg_trgm`; aliases via `cli add-alias`.
+- [x] **1.4 Conversation state and quote-bound orders** (C + AI). Store the state and draft per conversation; `place_order` takes a `quote_id` and is refused unless the conversation is in `awaiting_confirmation` for that quote. Fixes B3, B5.
   Done when: covered by tests, including a model that calls `place_order` without a quote (refused).
-- [ ] **1.5 Reply validator with safe fallback** (AI). Amounts, links, never-promise list, length, language. One repair, then holding template + Ask me. Fixes B4.
+  Built: the stage is `conversations.order_stage`; `waiting_on_owner` is tracked by open questions instead (1.6), so it never hides the order stage.
+- [x] **1.5 Reply validator with safe fallback** (AI). Amounts, links, never-promise list, length, language. One repair, then holding template + Ask me. Fixes B4.
   Done when: a reply with a wrong total or an invented link is never sent (test).
-- [ ] **1.6 `waiting_on_owner` and holding messages** (C + P). An open question moves the chat to `waiting_on_owner`; the agent sends holding replies instead of guessing; 10- and 30-minute follow-ups. Fixes B6.
+  Built: `agent/validator.py`. The never-promise list is built in (discounts, free delivery, delivery times); the shop's own list from onboarding isn't checked yet.
+- [x] **1.6 `waiting_on_owner` and holding messages** (C + P). An open question moves the chat to `waiting_on_owner`; the agent sends holding replies instead of guessing; 10- and 30-minute follow-ups. Fixes B6.
   Done when: a custom-cake request gets "I'll check", then the merchant's answer, with no guessed answer in between.
+  Built: the 30-minute follow-up. The 10-minute second push to the merchant waits for push notifications.
 - [ ] **1.7 Eval set and chat simulator** (AI + P). 50 anonymised chats plus the adversarial set in `evals/`; `evals/run.py`; the customer chat simulator at `/simulator` running the same pipeline. Judges need the simulator anyway (dev plan section 2).
   Done when: `evals/run.py` reports a score, and a full order works through the simulator.
+  Partly built: `evals/run.py` and 25 synthetic cases (orders + adversarial) score 23/25 on gpt-5.4 (26 Oct); the 2 misses are prompts Azure's content filter blocks. Still to do: the 50 anonymised pilot chats and the `/simulator`.
 
 ### Phase 2: Full harness (6 Nov – 12 Nov, continuing after submission)
 
