@@ -35,6 +35,12 @@ class Conversation(Base):
     agent_active: Mapped[bool] = mapped_column(server_default=text("true"))
     agent_paused_reason: Mapped[str | None]
     last_customer_message_at: Mapped[datetime | None]
+    # Where the chat is in the order flow; code moves it, never the model:
+    # browsing -> collecting_details -> awaiting_confirmation -> payment_pending -> browsing
+    order_stage: Mapped[str] = mapped_column(server_default="browsing")
+    order_draft: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    current_quote_id: Mapped[uuid.UUID | None]
+    current_order_id: Mapped[uuid.UUID | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

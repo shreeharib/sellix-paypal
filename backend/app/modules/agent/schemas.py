@@ -19,6 +19,9 @@ class TurnBrief:
     # Marks the genuine shop-system notes in this turn's history. New every turn and never
     # shown to the customer, so a customer can't type a note the agent will trust.
     system_tag: str
+    # Code's summary of the order in this chat (draft, quote, placed order), so the agent
+    # doesn't rebuild it from the messages.
+    order: str = "No order in progress."
 
 
 class OrderLineDraft(BaseModel):
@@ -46,7 +49,16 @@ class AgentAction(BaseModel):
     """Something the agent asks the system to do before it answers the customer."""
 
     type: Literal["quote_order", "place_order"]
-    order: OrderDraft
+    order: OrderDraft | None = None  # quote_order: what the customer asked for
+    quote_id: str | None = Field(default=None, max_length=20)  # place_order: the confirmed quote
+
+    @model_validator(mode="after")
+    def _complete(self) -> "AgentAction":
+        if self.type == "quote_order" and self.order is None:
+            raise ValueError('"quote_order" needs the "order"')
+        if self.type == "place_order" and not (self.quote_id or "").strip():
+            raise ValueError('"place_order" needs the "quote_id" the customer confirmed')
+        return self
 
 
 class CustomerReply(BaseModel):

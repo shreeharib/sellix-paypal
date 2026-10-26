@@ -87,12 +87,23 @@ def test_action_output_is_parsed() -> None:
         ' "fulfilment": "pickup"}}}'
     )
 
-    assert reply.action is not None
+    assert reply.action is not None and reply.action.order is not None
     assert reply.action.type == "quote_order"
     assert (reply.action.order.items[0].id, reply.action.order.items[0].quantity) == (
         "p0c4a91",
         2,
     )
+
+
+def test_place_order_needs_the_quote_id() -> None:
+    with pytest.raises(customer_agent.AgentOutputError):
+        customer_agent.parse_output(
+            '{"reply": "", "language": "en", "action": {"type": "place_order"}}'
+        )
+    reply = customer_agent.parse_output(
+        '{"reply": "", "language": "en", "action": {"type": "place_order", "quote_id": "q1a2b3c"}}'
+    )
+    assert reply.action is not None and reply.action.quote_id == "q1a2b3c"
 
 
 def test_order_item_without_id_or_name_is_rejected() -> None:

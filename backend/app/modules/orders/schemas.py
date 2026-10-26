@@ -12,6 +12,7 @@ class OrderLineRequest:
     # The item's ID from today's stock (StockItem.ref). When given, it decides the item and
     # the names are only for messages.
     ref: str | None = None
+    variant_id: uuid.UUID | None = None  # decides the item too (orders placed from a quote)
 
     @property
     def label(self) -> str:
@@ -57,6 +58,39 @@ class Quote:
     @property
     def ok(self) -> bool:
         return bool(self.lines) and not self.problems
+
+
+@dataclass(frozen=True)
+class StoredQuote:
+    """A saved quote: what the customer is asked to confirm."""
+
+    id: uuid.UUID
+    lines: tuple[QuoteLine, ...]
+    currency: str
+    total_minor: int
+    fulfilment: Literal["pickup", "delivery"] | None
+    delivery_address: str | None
+    needed_by: str | None
+    notes: str | None
+    status: str  # open | superseded | placed
+    order_id: uuid.UUID | None
+    created_at: datetime
+
+    @property
+    def code(self) -> str:
+        """Short ID the agent uses to place this quote."""
+        return f"q{self.id.hex[:6]}"
+
+
+@dataclass(frozen=True)
+class OrderState:
+    """Where an order stands, for the agent's summary of the conversation."""
+
+    order_id: uuid.UUID
+    number: int
+    status: str
+    currency: str
+    total_minor: int
 
 
 @dataclass(frozen=True)

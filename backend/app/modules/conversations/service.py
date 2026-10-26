@@ -122,8 +122,8 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
     loaded = await _load_turn(conversation_id)
     if loaded is None:
         return
-    context, recent = loaded
-    brief = agent.new_turn_brief()
+    context, recent, order = loaded
+    brief = agent.new_turn_brief(order=order)
     history = [_as_chat_message(message, brief) for message in recent]
 
     reply: CustomerReply | None = None
@@ -208,7 +208,7 @@ async def set_agent_active(session: AsyncSession, conversation_id: uuid.UUID, ac
 
 async def _load_turn(
     conversation_id: uuid.UUID,
-) -> tuple[actions.TurnContext, list[Message]] | None:
+) -> tuple[actions.TurnContext, list[Message], str] | None:
     async with session_scope() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
@@ -232,7 +232,7 @@ async def _load_turn(
             business_date=merchants.business_date(merchant),
             trigger_message_id=recent[-1].id,
         )
-        return context, recent
+        return context, recent, await actions.order_summary(session, conversation)
 
 
 async def _send(

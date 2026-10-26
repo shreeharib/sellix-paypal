@@ -25,8 +25,8 @@ class AgentUnavailable(RuntimeError):
     """The model failed, or returned unusable output on every attempt."""
 
 
-def new_turn_brief() -> TurnBrief:
-    return TurnBrief(system_tag=customer_agent.new_system_tag())
+def new_turn_brief(*, order: str) -> TurnBrief:
+    return TurnBrief(system_tag=customer_agent.new_system_tag(), order=order)
 
 
 def system_note(text: str, brief: TurnBrief) -> str:

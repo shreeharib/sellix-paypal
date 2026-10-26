@@ -59,7 +59,7 @@ async def test_reply_uses_the_shop_profile_and_todays_stock(
         merchant_id=shop.merchant_id,
         conversation_id=turn.conversation_id,
         history=[ChatMessage("user", "2 scoop cookies please")],
-        brief=agent.new_turn_brief(),
+        brief=agent.new_turn_brief(order="No order in progress."),
     )
 
     system_prompt = model.calls[0][0].content
@@ -89,7 +89,7 @@ async def test_invalid_output_gets_one_repair_attempt(
         merchant_id=shop.merchant_id,
         conversation_id=turn.conversation_id,
         history=[],
-        brief=agent.new_turn_brief(),
+        brief=agent.new_turn_brief(order="No order in progress."),
     )
 
     assert reply.reply == "Chocolate or red velvet?"
@@ -110,5 +110,5 @@ async def test_model_failure_raises_agent_unavailable(
             merchant_id=shop.merchant_id,
             conversation_id=turn.conversation_id,
             history=[],
-            brief=agent.new_turn_brief(),
+            brief=agent.new_turn_brief(order="No order in progress."),
         )

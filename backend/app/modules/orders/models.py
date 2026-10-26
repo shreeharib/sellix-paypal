@@ -65,3 +65,26 @@ class OrderEvent(Base):
     actor: Mapped[str]  # agent | customer | merchant | system | paypal
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class SavedQuote(Base):
+    """Prices and a total code worked out and the agent showed the customer. An order can only
+    be placed from one of these, and at most once."""
+
+    __tablename__ = "quotes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    merchant_id: Mapped[uuid.UUID]
+    conversation_id: Mapped[uuid.UUID]
+    lines: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    currency: Mapped[str]
+    total_minor: Mapped[int]
+    fulfilment: Mapped[str | None]
+    delivery_address: Mapped[str | None]
+    needed_by: Mapped[str | None]
+    notes: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="open")  # open | superseded | placed
+    order_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

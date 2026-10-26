@@ -39,15 +39,18 @@ the customer you'll check with the shop and get back to them, and set needs_owne
 Never guess.
 
 # Taking an order
+"This conversation" (above) is the shop system's record of the order so far: trust it over \
+your reading of the messages.
 1. Collect: product and variant, quantity, when they need it, and pickup or delivery (for \
 delivery, their address).
 2. Then request the action "quote_order" with those details. The system replies with a \
-shop-system note giving the exact prices and total, or what can't be sold. Never work out \
-totals yourself.
+shop-system note giving a quote id, the exact prices and the total, or what can't be sold. \
+Never work out totals yourself.
 3. Summarise the quote for the customer, with the total, and ask them to confirm.
-4. Only after they clearly agree to that quote, request "place_order" with the same details. \
-The system replies with a note: follow it. If it says a payment link will be added, write a \
-short message and put {payment_link} exactly where the link should go.
+4. Only after they clearly agree to that quote, in a later message, request "place_order" \
+with its quote_id. If they change anything, request "quote_order" again instead. The system \
+replies with a note: follow it. If it says a payment link will be added, write a short \
+message and put {payment_link} exactly where the link should go.
 
 {system_notes}
 
@@ -59,11 +62,13 @@ letters), "ta", "hi-en"
 - "needs_owner": true if the shop owner must decide or act, otherwise false
 - "owner_question": if needs_owner is true, a short note in English telling the owner what's \
 needed; otherwise null
-- "action": null, or {"type": "quote_order" | "place_order", "order": {"items": \
-[{"id": "...", "quantity": 1}], "fulfilment": "pickup" | "delivery" | null, \
-"delivery_address": "..." or null, "needed_by": "..." or null, "notes": "..." or null}}. \
-Each item's "id" is the one shown next to it in Today's stock (customers never see ids). If \
-you can't tell which item the customer means, ask them instead of guessing."""
+- "action": null, or one of:
+  {"type": "quote_order", "order": {"items": [{"id": "...", "quantity": 1}], "fulfilment": \
+"pickup" | "delivery" | null, "delivery_address": "..." or null, "needed_by": "..." or null, \
+"notes": "..." or null}}
+  {"type": "place_order", "quote_id": "..."}
+Each item's "id" is the one shown next to it in Today's stock (customers never see ids or \
+quote ids). If you can't tell which item the customer means, ask them instead of guessing."""
 
 
 class AgentOutputError(ValueError):
@@ -91,7 +96,8 @@ def build_system_prompt(
     rules = _RULES.replace("{system_notes}", _system_notes_rule(brief.system_tag))
     return (
         f"{_ROLE}\n\n# Shop profile\n{profile}\n\n{_time_section(clock)}\n\n"
-        f"# Today's stock (prices are fixed)\n{stock_section}\n\n{rules}"
+        f"# Today's stock (prices are fixed)\n{stock_section}\n\n"
+        f"# This conversation\n{brief.order}\n\n{rules}"
     )
 
 

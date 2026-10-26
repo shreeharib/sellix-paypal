@@ -7,26 +7,30 @@ expired / cancelled. Every change is written to order_events.
 import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog import service as catalog
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
 from app.modules.orders import matching
-from app.modules.orders.models import Order, OrderEvent, OrderItem
+from app.modules.orders.models import Order, OrderEvent, OrderItem, SavedQuote
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
     OrderItemSummary,
+    OrderLineRequest,
     OrderRequest,
+    OrderState,
     OrderSummary,
     PaymentOutcome,
     PaymentResult,
     PlacedOrder,
     Quote,
     QuoteLine,
+    StoredQuote,
 )
 
 
@@ -36,6 +40,12 @@ class OrderProblem(ValueError):
     def __init__(self, problems: tuple[str, ...]) -> None:
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+class QuoteAlreadyPlaced(Exception):
+    def __init__(self, order_id: uuid.UUID) -> None:
+        super().__init__(f"The quote was already placed as order {order_id}")
+        self.order_id = order_id
 
 
 class _StockShortfall(Exception):
@@ -56,7 +66,9 @@ async def quote(
         if line.quantity < 1:
             problems.append(f"{label}: the quantity must be at least 1")
             continue
-        if line.ref:
+        if line.variant_id:
+            matches = [item for item in stock if item.variant_id == line.variant_id]
+        elif line.ref:
             matches = [item for item in stock if item.ref == line.ref.strip().lower()]
         else:
             matches = list(matching.find(stock, line.product, line.variant, aliases).items)
@@ -117,13 +129,19 @@ async def place_order(
     business_date: date,
     request: OrderRequest,
     hold_minutes: int,
+    expected_total_minor: int | None = None,
 ) -> PlacedOrder:
-    """Hold the stock and create the order, all or nothing (the caller's transaction)."""
+    """Hold the stock and create the order, all or nothing (the caller's transaction).
+
+    With `expected_total_minor` (the total the customer was shown), a changed price stops it.
+    """
     offer = await quote(
         session, merchant_id=merchant_id, business_date=business_date, request=request
     )
     if not offer.ok or offer.currency is None:
         raise OrderProblem(offer.problems or ("The order has no items",))
+    if expected_total_minor is not None and offer.total_minor != expected_total_minor:
+        raise OrderProblem(("Prices have changed since the quote, so it needs a new quote",))
     for line in offer.lines:
         held = await inventory.hold(
             session, variant_id=line.variant_id, business_date=business_date, quantity=line.quantity
@@ -168,6 +186,150 @@ async def place_order(
         total_minor=order.total_minor,
         hold_minutes=hold_minutes,
     )
+
+
+async def save_quote(
+    session: AsyncSession,
+    *,
+    merchant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    offer: Quote,
+    request: OrderRequest,
+) -> StoredQuote:
+    """Store a quote the customer will be asked to confirm; earlier open ones are superseded."""
+    if not offer.ok or offer.currency is None:
+        raise ValueError("Only a quote without problems can be saved")
+    await supersede_quotes(session, conversation_id)
+    saved = SavedQuote(
+        merchant_id=merchant_id,
+        conversation_id=conversation_id,
+        lines=[
+            {
+                "variant_id": str(line.variant_id),
+                "label": line.label,
+                "product": line.product,
+                "variant": line.variant,
+                "unit_price_minor": line.unit_price_minor,
+                "quantity": line.quantity,
+            }
+            for line in offer.lines
+        ],
+        currency=offer.currency,
+        total_minor=offer.total_minor,
+        fulfilment=request.fulfilment,
+        delivery_address=request.delivery_address,
+        needed_by=request.needed_by,
+        notes=request.notes,
+    )
+    session.add(saved)
+    await session.flush()
+    await session.refresh(saved)
+    return _stored(saved)
+
+
+async def supersede_quotes(session: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """The customer's order changed: no earlier quote can be placed any more."""
+    await session.execute(
+        update(SavedQuote)
+        .where(SavedQuote.conversation_id == conversation_id, SavedQuote.status == "open")
+        .values(status="superseded")
+    )
+
+
+async def get_quote(session: AsyncSession, quote_id: uuid.UUID) -> StoredQuote | None:
+    saved = await session.get(SavedQuote, quote_id)
+    return _stored(saved) if saved else None
+
+
+async def place_quote(
+    session: AsyncSession,
+    *,
+    quote_id: uuid.UUID,
+    customer_id: uuid.UUID,
+    business_date: date,
+    hold_minutes: int,
+) -> PlacedOrder:
+    """Place the order a customer confirmed, exactly as quoted. Once only: a quote that was
+    already placed raises QuoteAlreadyPlaced."""
+    saved = await session.scalar(
+        select(SavedQuote).where(SavedQuote.id == quote_id).with_for_update()
+    )
+    if saved is None:
+        raise LookupError(f"No quote {quote_id}")
+    if saved.status == "placed" and saved.order_id is not None:
+        raise QuoteAlreadyPlaced(saved.order_id)
+    if saved.status != "open":
+        raise OrderProblem(("This quote was replaced by a newer one",))
+    quoted = _stored(saved)
+    placed = await place_order(
+        session,
+        merchant_id=saved.merchant_id,
+        customer_id=customer_id,
+        conversation_id=saved.conversation_id,
+        business_date=business_date,
+        request=OrderRequest(
+            lines=tuple(
+                OrderLineRequest(
+                    line.product, line.variant, line.quantity, variant_id=line.variant_id
+                )
+                for line in quoted.lines
+            ),
+            fulfilment=quoted.fulfilment,
+            delivery_address=quoted.delivery_address,
+            needed_by=quoted.needed_by,
+            notes=quoted.notes,
+        ),
+        hold_minutes=hold_minutes,
+        expected_total_minor=quoted.total_minor,
+    )
+    saved.status = "placed"
+    saved.order_id = placed.order_id
+    await session.flush()
+    return placed
+
+
+async def order_state(session: AsyncSession, order_id: uuid.UUID) -> OrderState | None:
+    order = await session.get(Order, order_id)
+    if order is None:
+        return None
+    return OrderState(
+        order_id=order.id,
+        number=order.number,
+        status=order.status,
+        currency=order.currency,
+        total_minor=order.total_minor,
+    )
+
+
+def _stored(saved: SavedQuote) -> StoredQuote:
+    return StoredQuote(
+        id=saved.id,
+        lines=tuple(
+            QuoteLine(
+                variant_id=uuid.UUID(line["variant_id"]),
+                label=line["label"],
+                product=line["product"],
+                variant=line["variant"],
+                unit_price_minor=line["unit_price_minor"],
+                currency=saved.currency,
+                quantity=line["quantity"],
+            )
+            for line in saved.lines
+        ),
+        currency=saved.currency,
+        total_minor=saved.total_minor,
+        fulfilment=_fulfilment(saved.fulfilment),
+        delivery_address=saved.delivery_address,
+        needed_by=saved.needed_by,
+        notes=saved.notes,
+        status=saved.status,
+        order_id=saved.order_id,
+        created_at=saved.created_at,
+    )
+
+
+def _fulfilment(value: str | None) -> Literal["pickup", "delivery"] | None:
+    return value if value in ("pickup", "delivery") else None
 
 
 async def record_payment(
