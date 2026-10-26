@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import structlog
 
 from app.core.db import session_scope
-from app.modules.agent import customer_agent, llm
+from app.modules.agent import customer_agent, llm, validator
 from app.modules.agent.models import AiUsage
 from app.modules.agent.schemas import ChatMessage, CustomerReply, TurnBrief
 from app.modules.inventory import service as inventory
@@ -83,6 +83,37 @@ async def reply_to_customer(
         await _record_usage(merchant_id, conversation_id, completion, succeeded=True)
         return reply
     raise AgentUnavailable("The model returned unusable output on every attempt")
+
+
+async def review_reply(
+    *,
+    merchant_id: uuid.UUID,
+    reply: CustomerReply,
+    history: list[ChatMessage],
+    brief: TurnBrief,
+    customer_text: str,
+) -> list[str]:
+    """What's wrong with a reply, checked against what code knows this turn. Empty: send it."""
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, merchant_id)
+        stock = await inventory.today_stock(session, merchant_id, merchants.business_date(merchant))
+    amounts = {item.price_minor for item in stock}
+    trusted = [brief.order] + [
+        message.content
+        for message in history
+        if customer_agent.is_system_note(message.content, brief.system_tag)
+    ]
+    for text in trusted:
+        amounts |= validator.amounts_in(text)
+    return validator.check(
+        reply.reply,
+        validator.ReplyFacts(amounts_minor=frozenset(amounts), customer_text=customer_text),
+    )
+
+
+def holding_message(language: str | None, customer_text: str) -> str:
+    """A safe reply in the customer's language when no checked reply is available."""
+    return validator.holding_message(language, customer_text)
 
 
 async def _record_usage(

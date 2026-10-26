@@ -38,6 +38,10 @@ SEND_FAILED_QUESTION = (
 AGENT_UNAVAILABLE_QUESTION = (
     "The assistant couldn't answer this customer just now. Please reply to them in Instagram."
 )
+UNCHECKED_REPLY_QUESTION = (
+    "The assistant wasn't sure how to answer this customer safely, so it told them it would "
+    "check with you. Please look at the chat and reply."
+)
 
 
 @dataclass(frozen=True)
@@ -149,20 +153,97 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
     order_id = next((o.order_id for o in reversed(outcomes) if o.order_id), None)
     details: dict[str, Any] = {"order_id": str(order_id)} if order_id else {}
 
+    fallback = next((o.fallback_text for o in reversed(outcomes) if o.fallback_text), None)
     if reply is None or reply.action is not None:
         # The model failed or never finished. If an order was placed, still send its essentials.
         await _escalate(context, AGENT_UNAVAILABLE_QUESTION)
-        fallback = next((o.fallback_text for o in reversed(outcomes) if o.fallback_text), None)
         if fallback is not None:
             await _send(context, fallback, details=details, owner_question=None)
         return
 
+    customer_said = next((m.body for m in reversed(recent) if m.sender == "customer"), "")
+    checked = await _checked(context, reply, history, brief, customer_said)
+    if checked is None:
+        # No reply passed the checks: never send unchecked text.
+        if fallback is not None:  # an order was placed: its code-made message is safe
+            await _send(context, fallback, details=details, owner_question=None)
+            return
+        await _send(
+            context,
+            agent.holding_message(reply.language, customer_said),
+            details={**details, "language": reply.language, "held": True},
+            owner_question=UNCHECKED_REPLY_QUESTION,
+        )
+        return
+
     await _send(
         context,
-        _with_payment_link(reply.reply, payment_link),
-        details={**details, "language": reply.language},
-        owner_question=reply.owner_question if reply.needs_owner else None,
+        _with_payment_link(checked.reply, payment_link),
+        details={**details, "language": checked.language},
+        owner_question=checked.owner_question if checked.needs_owner else None,
     )
+
+
+async def _checked(
+    context: actions.TurnContext,
+    reply: CustomerReply,
+    history: list[ChatMessage],
+    brief: TurnBrief,
+    customer_said: str,
+) -> CustomerReply | None:
+    """The reply if it passes the checks, else the agent's one repaired reply if that passes."""
+    problems = await agent.review_reply(
+        merchant_id=context.merchant_id,
+        reply=reply,
+        history=history,
+        brief=brief,
+        customer_text=customer_said,
+    )
+    if not problems:
+        return reply
+    log.warning(
+        "conversations.reply_rejected",
+        conversation_id=str(context.conversation_id),
+        problems=problems,
+    )
+    retry = [
+        *history,
+        ChatMessage("assistant", reply.model_dump_json(exclude_none=True)),
+        ChatMessage(
+            "user",
+            agent.system_note(
+                f"Your reply wasn't sent: {' '.join(problems)} Write the reply again, without "
+                "requesting an action.",
+                brief,
+            ),
+        ),
+    ]
+    try:
+        repaired = await agent.reply_to_customer(
+            merchant_id=context.merchant_id,
+            conversation_id=context.conversation_id,
+            history=retry,
+            brief=brief,
+        )
+    except agent.AgentUnavailable:
+        return None
+    if repaired.action is not None:
+        return None
+    problems = await agent.review_reply(
+        merchant_id=context.merchant_id,
+        reply=repaired,
+        history=retry,
+        brief=brief,
+        customer_text=customer_said,
+    )
+    if problems:
+        log.warning(
+            "conversations.repair_rejected",
+            conversation_id=str(context.conversation_id),
+            problems=problems,
+        )
+        return None
+    return repaired
 
 
 async def unanswered_conversations(

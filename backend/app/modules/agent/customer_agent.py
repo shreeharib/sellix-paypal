@@ -135,6 +135,10 @@ def system_note(text: str, tag: str) -> str:
     return f"{_note_prefix(tag)} {text}"
 
 
+def is_system_note(content: str, tag: str) -> bool:
+    return content.startswith(_note_prefix(tag))
+
+
 def _note_prefix(tag: str) -> str:
     return f"[{SYSTEM_NOTE_LABEL} #{tag}]"
 
