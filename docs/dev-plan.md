@@ -1,6 +1,9 @@
 # sellix: development plan
 
-> **For the sellix team · 25 Oct 2026.** How we structure the code, split the work, and merge safely while building the Flutter app and the agent backend in parallel. The product itself is described in `product-plan.md`; this document is about *how we build it*.
+> **For the sellix team · 25 Oct 2026.** How we structure the code, split the work, and merge safely while building the Flutter app and the agent backend in parallel.
+>
+> **ARCHITECTURAL STANDARD: Omnichannel Enterprise SaaS**
+> Sellix is built following the **Omnichannel Enterprise SaaS** architecture (`docs/database-schema.md` & `conflicts.md`): unified multi-channel messaging (Instagram DMs, WhatsApp Cloud API, and Counter POS), multi-category relational catalogs, 5 stock modes (`daily`, `inventory`, `made_to_order`, `unlimited`, `serialized`), orthogonal triple-status order pipelines (`status`, `payment_status`, `fulfilment_status`), master CRM customers table, and Citus-ready composite keys `(merchant_id, id)`.
 
 ## Contents
 - [1. Principles](#1-principles)
@@ -29,7 +32,8 @@
 3. **Contract first.** The backend's API is described automatically as an OpenAPI spec, and the Flutter API client is generated from it. App and backend developers agree on an endpoint, merge a stub, and then work in parallel.
 4. **Nobody waits on Meta.** A built-in **customer chat simulator** and recorded webhook payloads let everyone build and test without a live Instagram or WhatsApp connection.
 5. **Small pull requests, merged daily.** Short-lived branches, CI on every PR, one review, squash merge.
-6. **Production quality from day one.** Multi-tenant (every row has a `merchant_id`), tested, logged, no secrets in code. The hackathon build is the first slice of the real product.
+6. **Omnichannel Enterprise SaaS from day one.** Multi-tenant (every row has a `merchant_id` with composite primary keys `(merchant_id, id)` ready for Citus horizontal sharding), triple-status order management, multi-channel inbox (Instagram + WhatsApp + POS), tested, logged, no secrets in code.
+
 
 ---
 

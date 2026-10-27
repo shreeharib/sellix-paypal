@@ -18,6 +18,7 @@ from app.modules.escalations import service as escalations
 from app.modules.orders import service as orders
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest, Quote
 from app.modules.payments import service as payments
+from app.modules.shop_profile import service as shop_profile
 
 log = structlog.get_logger()
 
@@ -76,6 +77,21 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
         )
 
     total = format_money(placed.total_minor, placed.currency)
+    if placed.currency == "INR":
+        async with session_scope() as session:
+            onboarding = await shop_profile.get_onboarding(session, context.merchant_id)
+            vpa = onboarding.answers.get("upi_id") if onboarding and onboarding.answers else None
+        if vpa:
+            upi_link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=context.shop_name)
+            return ActionOutcome(
+                note=f"Order #{placed.number} is placed, total {total}. The items are held for "
+                f"{placed.hold_minutes} minutes. A UPI payment link has been added to your "
+                "message: put {payment_link} where it belongs.",
+                payment_link=upi_link,
+                order_id=placed.order_id,
+                fallback_text=f"Order #{placed.number} ({total}): {upi_link}",
+            )
+
     if payments.accepts(placed.currency):
         try:
             link = await payments.create_checkout(placed, shop_name=context.shop_name)

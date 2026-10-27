@@ -23,9 +23,12 @@ from app.modules.accounts import service as accounts
 from app.modules.accounts.models import Session
 from app.modules.channels import instagram
 from app.modules.channels.models import ChannelConnection
-from app.modules.conversations.models import Message
+from app.modules.conversations.models import Conversation, Message
 from app.modules.escalations import service as escalations
+from app.modules.merchants import service as merchants
 from app.modules.merchants.models import Merchant
+from app.modules.orders import service as orders
+from app.modules.orders.schemas import OrderLineRequest, OrderRequest
 from app.modules.shop_profile import service as shop_profile
 from tests.integration.factories import start_conversation
 
@@ -478,3 +481,99 @@ async def test_one_shop_cannot_see_or_touch_another_shops_data(
     assert questions.json() == []
     assert answer.status_code == 404
     assert messages.status_code == 404
+
+
+async def test_order_lifecycle_and_upi_payment_link_endpoints(
+    api: httpx2.AsyncClient, shop: ChannelConnection, deferred_jobs: InMemoryConnector
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+
+    # 1. Setup stock
+    await api.put(
+        "/v1/today/stock",
+        headers=bearer(token),
+        json={"lines": [{"product": "Sourdough", "price_minor": 15000, "quantity": 10}]},
+    )
+    turn = await start_conversation()
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        day = merchants.business_date(merchant)
+        conversation = await session.get(Conversation, turn.conversation_id)
+        assert conversation is not None
+        placed = await orders.place_order(
+            session,
+            merchant_id=shop.merchant_id,
+            customer_id=conversation.customer_id,
+            conversation_id=conversation.id,
+            business_date=day,
+            request=OrderRequest(
+                lines=(OrderLineRequest("Sourdough", None, 2),), fulfilment="pickup"
+            ),
+            hold_minutes=15,
+        )
+
+    # 2. Get payment link (UPI for INR)
+    link_res = await api.get(f"/v1/orders/{placed.order_id}/payment-link", headers=bearer(token))
+    assert link_res.status_code == 200
+    assert link_res.json()["payment_method"] == "upi"
+    assert link_res.json()["payment_link"].startswith("upi://pay?")
+    assert "am=300.00" in link_res.json()["payment_link"]
+
+    # 3. Mark paid (merchant tap-to-confirm when receiving UPI alert)
+    paid_res = await api.post(f"/v1/orders/{placed.order_id}/mark-paid", headers=bearer(token))
+    assert paid_res.status_code == 200
+    assert paid_res.json()["status"] == "paid"
+    assert paid_res.json()["paid_at"] is not None
+
+    # 4. Complete order (picked up or delivered)
+    complete_res = await api.post(f"/v1/orders/{placed.order_id}/complete", headers=bearer(token))
+    assert complete_res.status_code == 200
+    assert complete_res.json()["status"] == "completed"
+
+    # 5. Place another order and cancel it -> held stock returned
+    async with session_scope() as session:
+        placed2 = await orders.place_order(
+            session,
+            merchant_id=shop.merchant_id,
+            customer_id=conversation.customer_id,
+            conversation_id=conversation.id,
+            business_date=day,
+            request=OrderRequest(
+                lines=(OrderLineRequest("Sourdough", None, 3),), fulfilment="pickup"
+            ),
+            hold_minutes=15,
+        )
+
+    cancel_res = await api.post(
+        f"/v1/orders/{placed2.order_id}/cancel",
+        headers=bearer(token),
+        json={"reason": "Customer cancelled"},
+    )
+    assert cancel_res.status_code == 200
+    assert cancel_res.json()["status"] == "cancelled"
+
+    # 6. Verify HTTP exception responses
+    # 400 on completing an unpaid/cancelled order
+    bad_complete = await api.post(f"/v1/orders/{placed2.order_id}/complete", headers=bearer(token))
+    assert bad_complete.status_code == 400
+    assert "Order must be paid first" in bad_complete.json()["detail"]
+
+    # 400 on cancelling an already completed order
+    bad_cancel = await api.post(f"/v1/orders/{placed.order_id}/cancel", headers=bearer(token))
+    assert bad_cancel.status_code == 400
+    assert "Cannot cancel order with status 'completed'" in bad_cancel.json()["detail"]
+
+    # 404 for non-existent order IDs
+    fake_id = uuid.uuid4()
+    assert (
+        await api.post(f"/v1/orders/{fake_id}/mark-paid", headers=bearer(token))
+    ).status_code == 404
+    assert (
+        await api.post(f"/v1/orders/{fake_id}/complete", headers=bearer(token))
+    ).status_code == 404
+    assert (
+        await api.post(f"/v1/orders/{fake_id}/cancel", headers=bearer(token))
+    ).status_code == 404
+    assert (
+        await api.get(f"/v1/orders/{fake_id}/payment-link", headers=bearer(token))
+    ).status_code == 404

@@ -119,14 +119,10 @@ async def place_order(
     )
     if not offer.ok or offer.currency is None:
         raise OrderProblem(offer.problems or ("The order has no items",))
-    for line in offer.lines:
-        held = await inventory.hold(
-            session, variant_id=line.variant_id, business_date=business_date, quantity=line.quantity
-        )
-        if not held:
-            raise OrderProblem((f"{line.label} just sold out",))
-
+    order_id = uuid.uuid4()
+    hold_expires = datetime.now(UTC) + timedelta(minutes=hold_minutes)
     order = Order(
+        id=order_id,
         merchant_id=merchant_id,
         customer_id=customer_id,
         conversation_id=conversation_id,
@@ -138,10 +134,25 @@ async def place_order(
         delivery_address=request.delivery_address,
         needed_by=request.needed_by,
         notes=request.notes,
-        hold_expires_at=datetime.now(UTC) + timedelta(minutes=hold_minutes),
+        hold_expires_at=hold_expires,
     )
     session.add(order)
     await session.flush()
+
+    for line in offer.lines:
+        held = await inventory.hold(
+            session,
+            variant_id=line.variant_id,
+            business_date=business_date,
+            quantity=line.quantity,
+            order_id=order.id,
+            conversation_id=conversation_id,
+            expires_at=hold_expires,
+        )
+        if not held:
+            raise OrderProblem((f"{line.label} just sold out",))
+
+
     session.add_all(
         OrderItem(
             merchant_id=merchant_id,
@@ -213,8 +224,10 @@ async def record_payment(
                 variant_id=item.variant_id,
                 business_date=order.business_date,
                 quantity=item.quantity,
+                order_id=order.id,
             ):
                 raise RuntimeError(f"Held stock for order {order.id} is missing")
+
     else:
         # The hold had expired (or the order was cancelled): sell again if the stock is still there.
         try:
@@ -278,14 +291,120 @@ async def refund_order(
     _log(session, order, "refunded", previous, "refunded", actor, {"reason": reason})
 
 
+async def mark_order_paid(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+) -> PaymentResult:
+    """Owner tap-to-confirm when receiving a UPI payment alert on their phone.
+
+    Transitions order from awaiting_payment to paid and confirms held stock as sold.
+    """
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+
+    return await record_payment(
+        session,
+        order_id,
+        amount_minor=order.total_minor,
+        currency=order.currency,
+        actor=actor,
+    )
+
+
+async def complete_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+) -> Order:
+    """Mark an order as completed (picked up or delivered)."""
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == "completed":
+        return order
+    if order.status != "paid":
+        raise ValueError(
+            f"Cannot complete order with status '{order.status}'. Order must be paid first."
+        )
+
+    previous = order.status
+    order.status = "completed"
+    _log(session, order, "completed", previous, "completed", actor)
+    return order
+
+
+async def cancel_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+    reason: str | None = None,
+) -> Order:
+    """Cancel an unpaid order and atomically release its held stock back to today's ledger."""
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == "cancelled":
+        return order
+    if order.status in ("completed", "refunded"):
+        raise ValueError(f"Cannot cancel order with status '{order.status}'")
+
+    previous = order.status
+    if previous == "awaiting_payment":
+        # Release the held stock back to available inventory
+        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+        for item in items:
+            await inventory.release(
+                session,
+                variant_id=item.variant_id,
+                business_date=order.business_date,
+                quantity=item.quantity,
+                order_id=order.id,
+                status="cancelled",
+            )
+
+    order.status = "cancelled"
+    order.hold_expires_at = None
+    _log(
+        session,
+        order,
+        "cancelled",
+        previous,
+        "cancelled",
+        actor,
+        {"reason": reason} if reason else None,
+    )
+    return order
+
+
 async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> list[ExpiredOrder]:
     """Release the stock of unpaid orders whose hold has run out."""
+    cutoff = now or datetime.now(UTC)
     due = list(
         await session.scalars(
             select(Order)
             .where(
                 Order.status == "awaiting_payment",
-                Order.hold_expires_at < (now or datetime.now(UTC)),
+                Order.hold_expires_at < cutoff,
             )
             .order_by(Order.hold_expires_at)
             .limit(100)
@@ -300,12 +419,18 @@ async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> l
                 variant_id=item.variant_id,
                 business_date=order.business_date,
                 quantity=item.quantity,
+                order_id=order.id,
+                status="expired",
             )
         order.status = "expired"
         order.hold_expires_at = None
         _log(session, order, "expired", "awaiting_payment", "expired", "system")
         expired.append(ExpiredOrder(order.id, order.number, order.conversation_id))
+
+    # Also release any standalone / unlinked holds in stock_holds table
+    await inventory.release_expired_holds(session, now=cutoff)
     return expired
+
 
 
 def _same(a: str, b: str) -> bool:

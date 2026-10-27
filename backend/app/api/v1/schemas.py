@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -190,6 +191,19 @@ class Order(BaseModel):
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: list[OrderItem]
+
+
+class CancelOrderRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PaymentLinkResponse(BaseModel):
+    order_id: uuid.UUID
+    order_number: int
+    payment_method: Literal["upi", "paypal"]
+    payment_link: str
+    currency: str
+    total_minor: int
 
 
 # Ask me ---------------------------------------------------------------------------------------

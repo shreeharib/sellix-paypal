@@ -1,10 +1,11 @@
-# sellix: an AI sales team for your DMs, run from your phone
+# sellix: Omnichannel Enterprise AI Sales & Commerce SaaS
 
-> **Product plan v3.1 · Built for the PayPal AI Hackathon 2026, launching as a real product either way · 25 Oct 2026**
+> **Product Plan (Omnichannel Enterprise SaaS Edition) · Built for the PayPal AI Hackathon 2026 & Production Scale**
 >
-> Every morning the merchant tells sellix what they have today, by voice, by text, or by uploading the same photo they posted to their Instagram story. AI agents then sell it in Instagram and WhatsApp DMs in the customer's own language mix (Tamil + English, Hinglish, and so on): they answer from today's stock, take the order, collect a payment the payment provider confirms, and ask the merchant whenever they're unsure. The merchant runs everything from one Flutter app.
+> **ARCHITECTURAL DIRECTIVE (OFFICIALLY ADOPTED)**:
+> Sellix is built as an **Omnichannel Enterprise SaaS** platform. It serves multi-category D2C merchants across **Instagram DMs, WhatsApp Cloud API, and Counter POS**, supporting 5 inventory modes (`daily`, `inventory`, `made_to_order`, `unlimited`, `serialized`), orthogonal triple-status order pipelines (`status`, `payment_status`, `fulfilment_status`), master CRM tracking, and Citus-ready sharding.
 >
-> How we build it: `dev-plan.md` (same folder).
+> Every morning or perpetually, merchants set and track stock (voice, text, vision OCR, or ERP sync). Autonomous AI agents sell across channels in code-mixed languages (Tamil + English, Hinglish, etc.), reserve stock with sub-second concurrency, collect payments across dual rails (PayPal & UPI), and route escalations to the merchant app.
 
 ## Contents
 - [1. Summary and ground rules](#1-summary-and-ground-rules)
@@ -37,22 +38,23 @@
 
 | | |
 |---|---|
-| **Who it's for** | Small Indian merchants who sell through Instagram and WhatsApp DMs and whose stock changes daily: home bakers, cloud kitchens, sweet shops, snack makers, florists. Later: resellers and boutiques. |
-| **The pain** | Today's stock lives in the owner's head. DMs pile up while they're working, customers hear "sold out" hours late, payments arrive as screenshots, and nobody knows what sold best or when. |
-| **What sellix does** | 1. The merchant sets today's stock (voice, text, form, or a story photo). 2. The customer agent sells from that stock in DMs, in the customer's language. 3. Payment is confirmed by the provider, never by a screenshot. 4. Stock reduces automatically. 5. Anything unusual goes to the merchant app; the merchant's answer becomes the agent's next move. 6. The dashboard shows what sells, when, and what to make tomorrow. |
+| **Who it's for** | **Omnichannel D2C merchants & makers**: home bakers, cloud kitchens, apparel/boutiques, jewelry, electronics, and multi-location makers selling across Instagram, WhatsApp, and in-person counter POS. |
+| **The pain** | Omnichannel demand causes stock desynchronization. DMs pile up, customers get stale replies, payments arrive without verification, counter sales clash with online holds, and multi-channel customer history is fragmented. |
+| **What sellix does** | 1. **Omnichannel Unified Stock**: Multi-mode inventory (`daily`, `inventory`, `made_to_order`, `unlimited`, `serialized`) unified across IG, WhatsApp, and POS. 2. **Code-Mixed AI Agents**: Autonomous multi-channel sales agents in the customer's preferred language. 3. **Verified Dual-Rail Payments**: Gateway capture (PayPal) and manual merchant verification (UPI). 4. **Enterprise Order Lifecycle**: Independent `status`, `payment_status`, and `fulfilment_status`. 5. **Human-in-the-Loop Escalations**: Questions escalate to the merchant app and save to structured `escalation_rules`. 6. **Full-Funnel Analytics**: Live sales performance, top variants, and channel breakdowns. |
 
-### Ground rules (confirmed 24 Oct)
+### Ground rules (Enterprise Omnichannel Standard)
 
-1. **A real product, not a demo.** The hackathon is the first milestone. Everything is built multi-tenant, tested and production-grade from day one; no throwaway hacks.
-2. **India first.** The agent starts in English. Once the customer writes in Tamil, a Tamil-English mix or any other language, it replies in that same style, as a human shopkeeper would.
+1. **Omnichannel Enterprise SaaS Architecture.** Multi-tenant, multi-channel (Instagram DMs + WhatsApp Cloud API + Counter POS), multi-category catalog, and Citus-ready composite keys `(merchant_id, id)` from day one.
+2. **India first, Global ready.** Starts in English and seamlessly responds in code-mixed Indian languages (Tamil + English, Hinglish, Tanglish) and global languages.
 3. **Lowest possible cost.** Small merchants can't pay much. Every design choice is checked against cost per order (see [8](#8-ai-routing-and-cost) and [20](#20-business-model-and-cost-budget)).
 4. **Flutter** for both the merchant mobile app and the web app (one codebase).
-5. **sellix doesn't handle delivery in v1.** The merchant arranges pickup or delivery directly with the customer. Rider booking (Rapido or similar) is phase 3.
-6. **Official APIs only** (Meta, licensed payment providers). sellix never holds money.
-7. **Business accounts only:** a WhatsApp Business app number and an Instagram professional account.
-8. **Payments:** UPI for customers in India, PayPal for customers abroad. No cash on delivery for now.
-9. **When in doubt, ask the merchant.** Orders for future dates, custom requests, allergen and ingredient questions not in the catalog, and payment problems all go to the merchant.
-10. **The merchant can switch the agent off** (for everything or for one chat). It keeps listening and logging, but doesn't reply.
+5. **Fulfillment Pipeline.** In v1, merchant handles pickup or direct delivery with address capture; built-in table architecture supports zone-based delivery and 3PL/rider dispatches (phase 3).
+6. **Official APIs only** (Meta Instagram Graph API, WhatsApp Cloud API, licensed payment providers). sellix never holds money.
+7. **Multi-Channel Business Accounts:** WhatsApp Business Cloud API and Instagram Professional accounts.
+8. **Payments:** Direct P2P UPI for domestic INR, PayPal for international and automated gateway checkout.
+9. **When in doubt, ask the merchant.** Custom inquiries and out-of-catalog requests escalate via the Ask Me pipeline and persist into `escalation_rules`.
+10. **Merchant Agent Control:** The merchant can pause or resume the agent shop-wide, per-channel, or per-conversation.
+
 
 ---
 

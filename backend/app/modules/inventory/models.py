@@ -26,3 +26,19 @@ class DailyStock(Base):
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class StockHold(Base):
+    __tablename__ = "stock_holds"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    variant_id: Mapped[uuid.UUID]
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    order_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    quantity: Mapped[int]
+    status: Mapped[str] = mapped_column(server_default=text("'held'"))
+    expires_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
