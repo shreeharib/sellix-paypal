@@ -66,6 +66,7 @@
 - [x] **4.4 Counter sale** (C + A). Record a sale made in the shop (`POST /v1/today/counter-sale`). Built & tested.
 - [x] **4.5 Stock by text** (AI + A). Type "10 choc cookies 60rs, 5 brownies 90" and confirm the parsed list (`POST /v1/today/parse-stock-text`). Built & tested.
 - [x] **4.6 Leftovers & Daily Ledger Rollover** (C + DB). Stored procedure `rollover_daily_stock()` auto-rolls forward perpetual `inventory` and multi-day items (`shelf_life_days > 1`). `GET /v1/today/leftovers` and `POST /v1/today/rollover` empower merchants to customize exact carryover quantities (e.g. 4 out of 10 yesterday leftovers) for today's opening stock. Built & tested.
+- [x] **4.7 Dual-Engine Catalog Architecture & Fuzzy AI Search** (C + AI + DB). Bridges fast-path morning stock entries with enterprise multi-category enrichment (`attributes JSONB`, `compare_at_price_minor`, `cost_price_minor`, auto-SKU generation, and `pg_trgm` GIN-indexed fuzzy search `/v1/products/search`). Built & tested.
 
 ## 5. Orders and payments
 
