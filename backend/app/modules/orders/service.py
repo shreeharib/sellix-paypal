@@ -152,7 +152,6 @@ async def place_order(
         if not held:
             raise OrderProblem((f"{line.label} just sold out",))
 
-
     session.add_all(
         OrderItem(
             merchant_id=merchant_id,
@@ -430,7 +429,6 @@ async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> l
     # Also release any standalone / unlinked holds in stock_holds table
     await inventory.release_expired_holds(session, now=cutoff)
     return expired
-
 
 
 def _same(a: str, b: str) -> bool:

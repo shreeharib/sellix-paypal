@@ -180,7 +180,7 @@ async def get_leftovers(shop: Shop) -> schemas.YesterdayLeftoversResponse:
 
 @router.post("/rollover")
 async def apply_rollover(shop: Shop, body: schemas.RolloverRequest) -> schemas.RolloverResponse:
-    """Carry forward merchant-customized leftover stock from yesterday into today's opening stock."""
+    """Carry forward customized leftover stock from yesterday into today's opening stock."""
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, shop.merchant_id)
         day = merchants.business_date(merchant)

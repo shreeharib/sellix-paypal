@@ -4,7 +4,6 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from sqlalchemy import select, text
 
-
 from app.core.db import session_scope
 from app.modules.channels.models import ChannelConnection
 from app.modules.conversations.models import Conversation
@@ -13,7 +12,6 @@ from app.modules.inventory.models import StockHold
 from app.modules.inventory.schemas import OpeningStockLine
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order, OrderEvent
-
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder
 from tests.integration.factories import start_conversation
 
@@ -323,7 +321,9 @@ async def test_stock_holds_source_of_truth_lifecycle(stocked: ChannelConnection)
         assert holds_after_expire[0].status == "expired"
 
 
-async def test_sql_procedure_release_expired_holds_sweeps_and_syncs(stocked: ChannelConnection) -> None:
+async def test_sql_procedure_release_expired_holds_sweeps_and_syncs(
+    stocked: ChannelConnection,
+) -> None:
     # 1. Place an order holding 2 brownies
     placed = await place(stocked, request(("Brownie", None, 2)))
     assert await available(stocked, "Brownie") == 13
@@ -348,12 +348,8 @@ async def test_sql_procedure_release_expired_holds_sweeps_and_syncs(stocked: Cha
 
     # 5. Verify stock_holds and order synced in database
     async with session_scope() as session:
-        hold = await session.scalar(
-            select(StockHold).where(StockHold.order_id == placed.order_id)
-        )
+        hold = await session.scalar(select(StockHold).where(StockHold.order_id == placed.order_id))
         assert hold is not None and hold.status == "expired"
 
         order = await session.get(Order, placed.order_id)
         assert order is not None and order.status == "expired"
-
-

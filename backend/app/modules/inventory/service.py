@@ -26,7 +26,6 @@ from app.modules.inventory.schemas import (
 )
 
 
-
 class StockConflict(ValueError):
     """The change would make stock negative (more promised than made)."""
 
@@ -271,7 +270,6 @@ async def release_expired_holds(
         if hold_rec.order_id is not None:
             affected_order_ids.append(hold_rec.order_id)
     return affected_order_ids
-
 
 
 async def sell_unheld(
@@ -621,7 +619,7 @@ async def _apply(
 async def get_yesterday_leftovers(
     session: AsyncSession, merchant_id: uuid.UUID, business_date: date
 ) -> list[YesterdayLeftover]:
-    """Retrieve all unsold stock from yesterday (available > 0) with stock_mode and shelf_life_days."""
+    """Retrieve unsold stock from yesterday (available > 0) with stock_mode and shelf life."""
     yesterday = business_date - timedelta(days=1)
     rows = await session.execute(
         select(
@@ -671,7 +669,7 @@ async def apply_rollover_selection(
     business_date: date,
     selections: list[RolloverItemSelection],
 ) -> int:
-    """Apply merchant-customized rollover: add chosen leftover quantities into today's opening stock."""
+    """Apply customized rollover: add chosen leftover quantities to today's opening stock."""
     yesterday = business_date - timedelta(days=1)
     applied_count = 0
 
@@ -690,7 +688,8 @@ async def apply_rollover_selection(
         if yesterday_stock is None or yesterday_stock < item.rollover_quantity:
             available_qty = yesterday_stock or 0
             raise StockConflict(
-                f"Cannot roll over {item.rollover_quantity} units: yesterday only had {available_qty} available"
+                f"Cannot roll over {item.rollover_quantity} units: "
+                f"yesterday only had {available_qty} available"
             )
 
         statement = pg_insert(DailyStock).values(
@@ -717,7 +716,7 @@ async def execute_nightly_rollover(
     from_date: date,
     to_date: date,
 ) -> int:
-    """Call stored procedure rollover_daily_stock to auto roll forward perpetual & multi-day stock."""
+    """Call stored procedure rollover_daily_stock to roll forward perpetual/multi-day stock."""
     result = await session.scalar(
         text("SELECT rollover_daily_stock(:merchant_id, :from_date, :to_date)").bindparams(
             merchant_id=merchant_id,

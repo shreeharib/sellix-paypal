@@ -375,7 +375,5 @@ async def test_custom_rollover_exceeds_available_raises_conflict(
                 session,
                 merchant_id=shop.merchant_id,
                 business_date=TODAY,
-                selections=[
-                    RolloverItemSelection(variant_id=cookie_var.id, rollover_quantity=10)
-                ],
+                selections=[RolloverItemSelection(variant_id=cookie_var.id, rollover_quantity=10)],
             )

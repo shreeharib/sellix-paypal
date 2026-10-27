@@ -41,4 +41,3 @@ class StockHold(Base):
     status: Mapped[str] = mapped_column(server_default=text("'held'"))
     expires_at: Mapped[datetime]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
-

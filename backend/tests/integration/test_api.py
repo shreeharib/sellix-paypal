@@ -389,6 +389,7 @@ async def test_today_leftovers_and_rollover_api(
     api: httpx2.AsyncClient, shop: ChannelConnection
 ) -> None:
     from datetime import timedelta
+
     from app.modules.inventory import service as inventory
     from app.modules.inventory.schemas import OpeningStockLine
 

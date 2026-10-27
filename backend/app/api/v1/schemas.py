@@ -185,7 +185,9 @@ class YesterdayLeftoversResponse(BaseModel):
 
 class RolloverItem(BaseModel):
     variant_id: uuid.UUID
-    rollover_quantity: int = Field(ge=0, description="Quantity to roll over into today's opening stock")
+    rollover_quantity: int = Field(
+        ge=0, description="Quantity to roll over into today's opening stock"
+    )
 
 
 class RolloverRequest(BaseModel):
