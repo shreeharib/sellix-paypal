@@ -18,7 +18,7 @@ from app.core.db import session_scope
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order
 from app.modules.orders.schemas import PaymentResult, PlacedOrder
-from app.modules.payments import paypal
+from app.modules.payments import paypal, upi
 from app.modules.payments.models import Payment
 
 log = structlog.get_logger()
@@ -53,8 +53,24 @@ def configured() -> bool:
 
 
 def accepts(currency: str) -> bool:
-    """Whether an online payment link can be offered for an order in this currency."""
+    """Whether an online payment link can be offered for an order in this currency via PayPal."""
     return paypal.configured() and currency in paypal.SUPPORTED_CURRENCIES
+
+
+def create_upi_checkout(
+    placed: PlacedOrder,
+    *,
+    vpa: str,
+    shop_name: str,
+) -> str:
+    """Generate the standard UPI payment link for an INR order (no QR code needed)."""
+    return upi.create_upi_link(
+        vpa=vpa,
+        payee_name=shop_name,
+        amount_minor=placed.total_minor,
+        order_number=placed.number,
+        currency=placed.currency,
+    )
 
 
 async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:

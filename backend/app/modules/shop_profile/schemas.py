@@ -29,3 +29,5 @@ class OnboardingAnswers(BaseModel):
     cancellations: str | None = Field(default=None, max_length=_LONG)
     never_promise: str | None = Field(default=None, max_length=_LONG)
     faqs: str | None = Field(default=None, max_length=_LONG)
+    # Payments
+    upi_id: str | None = Field(default=None, max_length=_SHORT)

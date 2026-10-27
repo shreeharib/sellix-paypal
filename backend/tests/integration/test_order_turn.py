@@ -28,6 +28,8 @@ from app.modules.orders import service as orders
 from app.modules.orders.models import Order
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder
 from app.modules.orders.tasks import expire_unpaid_orders
+from app.modules.shop_profile import service as shop_profile
+from app.modules.shop_profile.schemas import OnboardingAnswers
 from tests.integration.factories import CUSTOMER_ID, start_conversation
 
 pytestmark = pytest.mark.anyio
@@ -121,6 +123,41 @@ async def test_quote_then_place_holds_stock_and_hands_payment_to_the_shop(
     assert "Online payment isn't available" in placing.histories[1][-1].content
     assert escalation is not None and f"Order #{order.number}" in escalation.question
     assert reply is not None and reply.details["order_id"] == str(order.id)
+
+
+async def test_quote_then_place_with_upi_id_generates_and_sends_payment_link(
+    stocked: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Configure UPI ID in shop onboarding
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, stocked.merchant_id)
+        await shop_profile.save_onboarding(
+            session,
+            stocked.merchant_id,
+            shop_name=merchant.name,
+            answers=OnboardingAnswers(upi_id="sweetcrumbs@okhdfcbank"),
+        )
+
+    channel = RecordingChannel()
+    monkeypatch.setattr(channels, "send_text", channel)
+    placing = ScriptedAgent(
+        {"action": {"type": "place_order", "order": ORDER}},
+        {"reply": "Order confirm aachu! Pay here: {payment_link}"},
+    )
+    monkeypatch.setattr(agent, "reply_to_customer", placing)
+    turn = await start_conversation("confirm order", message_id="m-upi-1")
+
+    await service.run_turn(turn.conversation_id)
+
+    # Agent received note with payment_link placeholder instructions
+    history_note = placing.histories[1][-1].content
+    assert "A UPI payment link has been added" in history_note
+
+    # Sent message to customer has real UPI link
+    [sent_msg] = channel.sent
+    assert sent_msg.startswith("Order confirm aachu! Pay here: upi://pay?")
+    assert "pa=sweetcrumbs%40okhdfcbank" in sent_msg
+    assert "am=120.00" in sent_msg
 
 
 async def place_for(shop: ChannelConnection, *, hold_minutes: int = 15) -> PlacedOrder:

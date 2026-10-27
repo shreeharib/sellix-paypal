@@ -66,13 +66,13 @@
 
 - [x] **5.1 Orders, 15-minute holds and expiry** (C). Built.
 - [x] **5.2 PayPal checkout and webhook** (C). Built (sandbox).
-- [ ] **5.3 UPI payment request** (C + AI). For INR orders the agent sends the merchant's UPI ID and the exact amount; the order waits as "payment pending".
+- [x] **5.3 UPI payment request** (C + AI). For INR orders the agent sends the merchant's UPI ID and the exact amount; the order waits as "payment pending".
   Done when: a DM order shows the UPI message.
-- [ ] **5.4 "Paid" button** (C + A). The merchant taps **Paid** in Orders: order paid, stock sold, customer gets a confirmation.
+- [x] **5.4 "Paid" button** (C + A). The merchant taps **Paid** in Orders: order paid, stock sold, customer gets a confirmation.
   Done when: a full UPI sale by DM drops the stock on Today.
 - [ ] **5.5 Customer says "paid"** (C + AI). Keep the hold while waiting for the merchant to check; don't let it expire.
   Done when: covered by a test.
-- [ ] **5.6 Complete and cancel** (C + A). Mark an order completed (picked up or delivered) or cancelled (stock returns).
+- [x] **5.6 Complete and cancel** (C + A). Mark an order completed (picked up or delivered) or cancelled (stock returns).
   Done when: both work from Orders and update Today.
 - [ ] **5.7 PayPal end to end with a real DM** (C). Sandbox buyer pays from the link the agent sent.
   Done when: the order turns paid by the webhook alone.

@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -199,3 +200,73 @@ async def test_payment_after_expiry_flags_a_shortfall_when_stock_is_gone(
 
     assert result.outcome == "paid_stock_short"
     assert await available(stocked, "Scoop cookie (Chocolate)") == 0  # never negative
+
+
+async def test_merchant_marks_order_paid_confirms_stock(stocked: ChannelConnection) -> None:
+    placed = await place(stocked, request(("Brownie", None, 3)))
+    assert await available(stocked, "Brownie") == 12
+
+    async with session_scope() as session:
+        result = await orders.mark_order_paid(
+            session, placed.order_id, merchant_id=stocked.merchant_id
+        )
+        assert result.outcome == "paid"
+        order = await session.get(Order, placed.order_id)
+        assert order is not None
+        assert order.status == "paid"
+        assert order.payment_status == "paid"
+        assert order.paid_at is not None
+
+    # Stock remains decremented because held stock transitioned to sold stock
+    assert await available(stocked, "Brownie") == 12
+
+
+async def test_complete_order_lifecycle(stocked: ChannelConnection) -> None:
+    placed = await place(stocked, request(("Brownie", None, 2)))
+
+    # Cannot complete an unpaid order
+    async with session_scope() as session:
+        with pytest.raises(ValueError, match="Order must be paid first"):
+            await orders.complete_order(session, placed.order_id, merchant_id=stocked.merchant_id)
+
+        # Mark paid first
+        await orders.mark_order_paid(session, placed.order_id, merchant_id=stocked.merchant_id)
+        completed = await orders.complete_order(
+            session, placed.order_id, merchant_id=stocked.merchant_id
+        )
+        assert completed.status == "completed"
+
+
+async def test_cancel_order_releases_held_stock(stocked: ChannelConnection) -> None:
+    placed = await place(stocked, request(("Brownie", None, 5)))
+    assert await available(stocked, "Brownie") == 10
+
+    # Cancel unpaid order -> held stock returns to available
+    async with session_scope() as session:
+        cancelled = await orders.cancel_order(
+            session,
+            placed.order_id,
+            merchant_id=stocked.merchant_id,
+            reason="Customer changed mind",
+        )
+        assert cancelled.status == "cancelled"
+    assert await available(stocked, "Brownie") == 15
+
+    # Cannot cancel an already completed order
+    async with session_scope() as session:
+        placed_done = await place(stocked, request(("Brownie", None, 1)))
+        await orders.mark_order_paid(session, placed_done.order_id, merchant_id=stocked.merchant_id)
+        await orders.complete_order(session, placed_done.order_id, merchant_id=stocked.merchant_id)
+        with pytest.raises(ValueError, match="Cannot cancel order with status 'completed'"):
+            await orders.cancel_order(
+                session, placed_done.order_id, merchant_id=stocked.merchant_id
+            )
+
+        # LookupError on unknown order
+        fake_id = uuid.uuid4()
+        with pytest.raises(LookupError, match=f"No order {fake_id}"):
+            await orders.complete_order(session, fake_id, merchant_id=stocked.merchant_id)
+        with pytest.raises(LookupError, match=f"No order {fake_id}"):
+            await orders.cancel_order(session, fake_id, merchant_id=stocked.merchant_id)
+        with pytest.raises(LookupError, match=f"No order {fake_id}"):
+            await orders.mark_order_paid(session, fake_id, merchant_id=stocked.merchant_id)
