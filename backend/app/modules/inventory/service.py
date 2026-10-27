@@ -6,7 +6,7 @@ can never take stock below zero (the table's check constraint is the last line o
 
 import re
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import ColumnElement, select, update
@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog import service as catalog
 from app.modules.catalog.models import Product, ProductVariant
-from app.modules.inventory.models import DailyStock
+from app.modules.inventory.models import DailyStock, StockHold
 from app.modules.inventory.schemas import LedgerRow, OpeningStockLine, StockItem
+
 
 
 class StockConflict(ValueError):
@@ -134,36 +135,81 @@ async def set_opening_stock(
 
 
 async def hold(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
+    conversation_id: uuid.UUID | None = None,
+    expires_at: datetime | None = None,
 ) -> bool:
-    """Reserve stock for an unpaid order. False if not enough is available."""
-    return await _apply(
+    """Reserve stock for an unpaid order. False if not enough is available.
+
+    Updates daily_stock.held and creates a record in stock_holds as the source of truth.
+    """
+    applied = await _apply(
         session,
         variant_id,
         business_date,
         condition=DailyStock.available >= quantity,
         held=DailyStock.held + quantity,
     )
+    if not applied:
+        return False
+
+    hold_row = StockHold(
+        variant_id=variant_id,
+        conversation_id=conversation_id,
+        order_id=order_id,
+        quantity=quantity,
+        status="held",
+        expires_at=expires_at or (datetime.now(UTC) + timedelta(minutes=15)),
+    )
+    session.add(hold_row)
+    return True
 
 
 async def release(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
+    status: str = "released",
 ) -> bool:
     """Give held stock back (the order expired or was cancelled before payment)."""
-    return await _apply(
+    applied = await _apply(
         session,
         variant_id,
         business_date,
         condition=DailyStock.held >= quantity,
         held=DailyStock.held - quantity,
     )
+    if applied and order_id is not None:
+        await session.execute(
+            update(StockHold)
+            .where(
+                StockHold.order_id == order_id,
+                StockHold.variant_id == variant_id,
+                StockHold.status == "held",
+            )
+            .values(status=status)
+        )
+    return applied
 
 
 async def confirm_sale(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
 ) -> bool:
     """Turn held stock into sold stock (the order was paid)."""
-    return await _apply(
+    applied = await _apply(
         session,
         variant_id,
         business_date,
@@ -171,6 +217,55 @@ async def confirm_sale(
         held=DailyStock.held - quantity,
         sold=DailyStock.sold + quantity,
     )
+    if applied and order_id is not None:
+        await session.execute(
+            update(StockHold)
+            .where(
+                StockHold.order_id == order_id,
+                StockHold.variant_id == variant_id,
+                StockHold.status == "held",
+            )
+            .values(status="converted")
+        )
+    return applied
+
+
+async def release_expired_holds(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    business_date: date | None = None,
+) -> list[uuid.UUID]:
+    """Sweep stock_holds for expired records, decrement daily_stock.held, and mark status='expired'.
+
+    Returns the list of affected order_ids.
+    """
+    cutoff = now or datetime.now(UTC)
+    expired_holds = list(
+        await session.scalars(
+            select(StockHold)
+            .where(
+                StockHold.status == "held",
+                StockHold.expires_at < cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    affected_order_ids: list[uuid.UUID] = []
+    b_date = business_date or cutoff.date()
+    for hold_rec in expired_holds:
+        await _apply(
+            session,
+            hold_rec.variant_id,
+            b_date,
+            condition=DailyStock.held >= hold_rec.quantity,
+            held=DailyStock.held - hold_rec.quantity,
+        )
+        hold_rec.status = "expired"
+        if hold_rec.order_id is not None:
+            affected_order_ids.append(hold_rec.order_id)
+    return affected_order_ids
+
 
 
 async def sell_unheld(
