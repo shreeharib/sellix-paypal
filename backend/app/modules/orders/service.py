@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
-from app.modules.orders.models import Order, OrderEvent, OrderItem, Refund
+from app.modules.orders.models import Order, OrderEvent, OrderItem, OrderTimeline, Refund
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
@@ -127,10 +127,14 @@ async def place_order(
         customer_id=customer_id,
         conversation_id=conversation_id,
         status="awaiting_payment",
+        payment_status="pending",
         business_date=business_date,
         currency=offer.currency,
         total_minor=offer.total_minor,
+        subtotal_minor=offer.total_minor,
+        total_amount_minor=offer.total_minor,
         fulfilment=request.fulfilment,
+        delivery_type=request.fulfilment or "pickup",
         delivery_address=request.delivery_address,
         needed_by=request.needed_by,
         notes=request.notes,
@@ -248,6 +252,7 @@ async def record_payment(
     order.paid_at = datetime.now(UTC)
     order.hold_expires_at = None
     _log(session, order, outcome, previous, target_status, actor)
+    await session.flush()
     return result(outcome)
 
 
@@ -318,6 +323,81 @@ async def mark_order_paid(
     )
 
 
+ENTERPRISE_ORDER_STATUSES = {
+    "draft",
+    "pending",
+    "confirmed",
+    "ready",
+    "delivered",
+    "completed",
+    "awaiting_payment",
+    "paid",
+    "cancelled",
+    "refunded",
+    "expired",
+}
+
+
+async def advance_order_status(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    new_status: str,
+    actor: str = "merchant",
+    comment: str | None = None,
+) -> Order:
+    """Advance an order through enterprise fulfillment / operational stages."""
+    if new_status not in ENTERPRISE_ORDER_STATUSES:
+        raise ValueError(
+            f"Invalid status '{new_status}'. Allowed statuses: {sorted(ENTERPRISE_ORDER_STATUSES)}"
+        )
+
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == new_status:
+        return order
+
+    previous = order.status
+    order.status = new_status
+    _log(
+        session,
+        order,
+        f"status_changed_to_{new_status}",
+        previous,
+        new_status,
+        actor,
+        {"comment": comment} if comment else None,
+    )
+    await session.flush()
+    return order
+
+
+async def get_order_timeline(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    merchant_id: uuid.UUID,
+) -> list[OrderTimeline]:
+    """Fetch order timeline history auto-logged by database triggers."""
+    order = await session.scalar(
+        select(Order).where(Order.id == order_id, Order.merchant_id == merchant_id)
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    return list(
+        await session.scalars(
+            select(OrderTimeline)
+            .where(OrderTimeline.order_id == order_id)
+            .order_by(OrderTimeline.created_at.asc())
+        )
+    )
+
+
 async def complete_order(
     session: AsyncSession,
     order_id: uuid.UUID,
@@ -335,14 +415,17 @@ async def complete_order(
         raise LookupError(f"No order {order_id}")
     if order.status == "completed":
         return order
-    if order.status != "paid":
+
+    valid_pre_complete = ("paid", "confirmed", "ready", "delivered")
+    if order.status not in valid_pre_complete:
         raise ValueError(
-            f"Cannot complete order with status '{order.status}'. Order must be paid first."
+            f"Cannot complete order with status '{order.status}'. Order must be paid first (status in {valid_pre_complete})."
         )
 
     previous = order.status
     order.status = "completed"
     _log(session, order, "completed", previous, "completed", actor)
+    await session.flush()
     return order
 
 
@@ -392,6 +475,7 @@ async def cancel_order(
         actor,
         {"reason": reason} if reason else None,
     )
+    await session.flush()
     return order
 
 
@@ -462,12 +546,15 @@ async def list_orders(
     merchant_id: uuid.UUID,
     *,
     statuses: tuple[str, ...] | None = None,
+    payment_statuses: tuple[str, ...] | None = None,
     limit: int = 50,
 ) -> list[OrderSummary]:
     """Newest first, with their items."""
     query = select(Order).where(Order.merchant_id == merchant_id)
     if statuses:
         query = query.where(Order.status.in_(statuses))
+    if payment_statuses:
+        query = query.where(Order.payment_status.in_(payment_statuses))
     found = list(await session.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
     items: dict[uuid.UUID, list[OrderItemSummary]] = defaultdict(list)
     if found:
@@ -476,7 +563,7 @@ async def list_orders(
         ):
             items[item.order_id].append(
                 OrderItemSummary(
-                    product=item.product_name,
+                    product=item.product_name or "",
                     variant=item.variant_name,
                     quantity=item.quantity,
                     unit_price_minor=item.unit_price_minor,
@@ -499,6 +586,11 @@ async def list_orders(
             paid_at=order.paid_at,
             hold_expires_at=order.hold_expires_at,
             items=tuple(items[order.id]),
+            order_number=order.order_number,
+            payment_status=order.payment_status,
+            delivery_type=order.delivery_type,
+            source_channel=order.source_channel,
+            total_amount_minor=order.total_amount_minor,
         )
         for order in found
     ]

@@ -21,18 +21,36 @@ from app.modules.shop_profile import service as shop_profile
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-OrderStatus = Literal["awaiting_payment", "paid", "expired", "cancelled", "completed", "refunded"]
+OrderStatus = Literal[
+    "awaiting_payment",
+    "paid",
+    "expired",
+    "cancelled",
+    "completed",
+    "refunded",
+    "draft",
+    "pending",
+    "confirmed",
+    "ready",
+    "delivered",
+]
+PaymentStatus = Literal["pending", "paid", "partially_refunded", "refunded", "failed"]
 
 
 @router.get("")
 async def list_orders(
     shop: Shop,
     status: Annotated[list[OrderStatus] | None, Query()] = None,
+    payment_status: Annotated[list[PaymentStatus] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[schemas.Order]:
     async with session_scope() as session:
         found = await orders.list_orders(
-            session, shop.merchant_id, statuses=tuple(status) if status else None, limit=limit
+            session,
+            shop.merchant_id,
+            statuses=tuple(status) if status else None,
+            payment_statuses=tuple(payment_status) if payment_status else None,
+            limit=limit,
         )
     return [
         schemas.Order(
@@ -50,6 +68,11 @@ async def list_orders(
             paid_at=order.paid_at,
             hold_expires_at=order.hold_expires_at,
             items=[schemas.OrderItem(**vars(item)) for item in order.items],
+            order_number=order.order_number,
+            payment_status=order.payment_status,
+            delivery_type=order.delivery_type,
+            source_channel=order.source_channel,
+            total_amount_minor=order.total_amount_minor,
         )
         for order in found
     ]
@@ -281,6 +304,50 @@ async def get_payment_link(shop: Shop, order_id: uuid.UUID) -> schemas.PaymentLi
     )
 
 
+@router.patch("/{order_id}/status", response_model=schemas.Order)
+async def update_order_status(
+    shop: Shop, order_id: uuid.UUID, body: schemas.UpdateOrderStatusRequest
+) -> schemas.Order:
+    """Advance an order through enterprise fulfillment / operational stages."""
+    try:
+        async with session_scope() as session:
+            await orders.advance_order_status(
+                session,
+                order_id,
+                merchant_id=shop.merchant_id,
+                new_status=body.status,
+                actor="merchant",
+                comment=body.comment,
+            )
+            return await _order_response(session, order_id, shop.merchant_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{order_id}/timeline", response_model=list[schemas.OrderTimelineEvent])
+async def get_order_timeline(shop: Shop, order_id: uuid.UUID) -> list[schemas.OrderTimelineEvent]:
+    """Fetch order status timeline history auto-logged by database triggers."""
+    try:
+        async with session_scope() as session:
+            events = await orders.get_order_timeline(session, order_id, shop.merchant_id)
+            return [
+                schemas.OrderTimelineEvent(
+                    id=e.id,
+                    order_id=e.order_id,
+                    from_status=e.from_status,
+                    to_status=e.to_status,
+                    triggered_by=e.triggered_by,
+                    comment=e.comment,
+                    created_at=e.created_at,
+                )
+                for e in events
+            ]
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 async def _order_response(
     session: AsyncSession, order_id: uuid.UUID, merchant_id: uuid.UUID
 ) -> schemas.Order:
@@ -306,11 +373,16 @@ async def _order_response(
         hold_expires_at=order.hold_expires_at,
         items=[
             schemas.OrderItem(
-                product=item.product_name,
+                product=item.product_name or "",
                 variant=item.variant_name,
                 quantity=item.quantity,
                 unit_price_minor=item.unit_price_minor,
             )
             for item in items
         ],
+        order_number=order.order_number,
+        payment_status=order.payment_status,
+        delivery_type=order.delivery_type,
+        source_channel=order.source_channel,
+        total_amount_minor=order.total_amount_minor,
     )

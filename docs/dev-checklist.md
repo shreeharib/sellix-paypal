@@ -79,8 +79,8 @@
   Done when: a full UPI sale by DM drops the stock on Today and updates analytics.
 - [ ] **5.5 Customer says "paid"** (C + AI). Keep the hold while waiting for the merchant to check; don't let it expire.
   Done when: covered by a test.
-- [x] **5.6 Complete and cancel** (C + A). Mark an order completed (picked up or delivered, updating `fulfilment_status`) or cancelled (stock returns).
-  Done when: both work from Orders and update Today.
+- [x] **5.6 Complete, advance stages, and cancel** (C + A). Mark an order through enterprise fulfillment stages (`confirmed` -> `ready` -> `delivered` -> `completed`, via `/v1/orders/{id}/status`) or cancelled (stock returns). Automatically logs transitions in `order_timeline` via `trg_order_timeline` and updates CRM customer lifetime metrics via `trg_order_paid`.
+  Done when: works from Orders, timeline logged, and updates Today.
 - [ ] **5.7 PayPal end to end with a real DM** (C). Sandbox buyer pays from the link the agent sent.
   Done when: the order turns paid by the webhook alone.
 

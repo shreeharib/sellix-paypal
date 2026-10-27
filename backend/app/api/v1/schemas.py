@@ -224,6 +224,26 @@ class Order(BaseModel):
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: list[OrderItem]
+    order_number: str | None = None
+    payment_status: str = "pending"
+    delivery_type: str | None = None
+    source_channel: str = "instagram"
+    total_amount_minor: int = 0
+
+
+class OrderTimelineEvent(BaseModel):
+    id: uuid.UUID
+    order_id: uuid.UUID
+    from_status: str | None
+    to_status: str
+    triggered_by: str
+    comment: str | None
+    created_at: datetime
+
+
+class UpdateOrderStatusRequest(BaseModel):
+    status: str = Field(description="Target status: confirmed, ready, delivered, completed, etc.")
+    comment: str | None = None
 
 
 class CancelOrderRequest(BaseModel):

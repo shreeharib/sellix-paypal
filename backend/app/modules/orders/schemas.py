@@ -108,6 +108,11 @@ class OrderSummary:
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: tuple[OrderItemSummary, ...]
+    order_number: str | None = None
+    payment_status: str = "pending"
+    delivery_type: str | None = None
+    source_channel: str = "instagram"
+    total_amount_minor: int = 0
 
 
 @dataclass(frozen=True)
