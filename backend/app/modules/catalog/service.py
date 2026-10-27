@@ -235,23 +235,27 @@ async def search_catalog_fuzzy(
         return []
 
     sql = text("""
-        SELECT DISTINCT ON (p.id)
-            p.id AS product_id,
-            p.name AS product_name,
-            p.category AS category,
-            p.attributes AS attributes,
-            COALESCE(pa.alias_text, p.name) AS matched_alias,
-            similarity(COALESCE(pa.alias_text, p.name), :query) AS sim
-        FROM products p
-        LEFT JOIN product_aliases pa ON pa.product_id = p.id
-        WHERE p.merchant_id = :merchant_id
-          AND p.is_active = TRUE
-          AND (
-              p.name ILIKE '%' || :query || '%'
-              OR pa.alias_text ILIKE '%' || :query || '%'
-              OR similarity(COALESCE(pa.alias_text, p.name), :query) > 0.2
-          )
-        ORDER BY p.id, sim DESC
+        SELECT *
+        FROM (
+            SELECT DISTINCT ON (p.id)
+                p.id AS product_id,
+                p.name AS product_name,
+                p.category AS category,
+                p.attributes AS attributes,
+                COALESCE(pa.alias_text, p.name) AS matched_alias,
+                similarity(COALESCE(pa.alias_text, p.name), :query) AS sim
+            FROM products p
+            LEFT JOIN product_aliases pa ON pa.product_id = p.id
+            WHERE p.merchant_id = :merchant_id
+              AND p.is_active = TRUE
+              AND (
+                  p.name ILIKE '%' || :query || '%'
+                  OR pa.alias_text ILIKE '%' || :query || '%'
+                  OR similarity(COALESCE(pa.alias_text, p.name), :query) > 0.2
+              )
+            ORDER BY p.id, sim DESC
+        ) sub
+        ORDER BY sim DESC
         LIMIT :limit
     """)
     res = await session.execute(sql, {"merchant_id": merchant_id, "query": q, "limit": limit})
