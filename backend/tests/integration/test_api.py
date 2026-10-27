@@ -288,6 +288,100 @@ async def test_today_shows_the_stock_after_the_morning_update(
     assert today.json()["agent_enabled"] is True
 
 
+async def test_today_restock_counter_sale_and_sold_out_flow(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+
+    # 1. Set morning stock
+    await api.put(
+        "/v1/today/stock",
+        headers=bearer(token),
+        json={
+            "lines": [
+                {"product": "Brownie", "price_minor": 9000, "quantity": 10},
+                {"product": "Croissant", "price_minor": 12000, "quantity": 5},
+            ]
+        },
+    )
+    today = (await api.get("/v1/today", headers=bearer(token))).json()
+    stock_by_product = {row["product"]: row for row in today["stock"]}
+    brownie_variant_id = stock_by_product["Brownie"]["variant_id"]
+    croissant_variant_id = stock_by_product["Croissant"]["variant_id"]
+
+    # 2. Restock Brownie by +5 (e.g. afternoon fresh bake)
+    restock_res = await api.post(
+        "/v1/today/restock",
+        headers=bearer(token),
+        json={"variant_id": brownie_variant_id, "quantity": 5},
+    )
+    assert restock_res.status_code == 200
+    brownie_stock = {row["product"]: row for row in restock_res.json()["stock"]}["Brownie"]
+    assert brownie_stock["opening"] == 10
+    assert brownie_stock["restocked"] == 5
+    assert brownie_stock["available"] == 15
+
+    # 3. Record counter sale of 4 Brownies
+    counter_res = await api.post(
+        "/v1/today/counter-sale",
+        headers=bearer(token),
+        json={"variant_id": brownie_variant_id, "quantity": 4},
+    )
+    assert counter_res.status_code == 200
+    assert counter_res.json()["quantity_sold"] == 4
+    assert counter_res.json()["remaining_available"] == 11
+
+    # Overselling at counter returns 409 Conflict
+    conflict_res = await api.post(
+        "/v1/today/counter-sale",
+        headers=bearer(token),
+        json={"variant_id": brownie_variant_id, "quantity": 20},
+    )
+    assert conflict_res.status_code == 409
+
+    # 4. Mark Croissant as Sold Out
+    sold_out_res = await api.post(
+        "/v1/today/sold-out",
+        headers=bearer(token),
+        json={"variant_id": croissant_variant_id},
+    )
+    assert sold_out_res.status_code == 200
+    croissant_stock = {row["product"]: row for row in sold_out_res.json()["stock"]}["Croissant"]
+    assert croissant_stock["available"] == 0
+    assert croissant_stock["counter_sales"] == 5
+
+
+async def test_today_parse_stock_text_api(api: httpx2.AsyncClient) -> None:
+    res = await api.post(
+        "/v1/today/parse-stock-text",
+        json={"text": "10 choc cookies 60rs, 5 brownies 90"},
+    )
+    assert res.status_code == 200
+    lines = res.json()["lines"]
+    assert len(lines) == 2
+    assert lines[0] == {
+        "product": "choc cookies",
+        "variant": None,
+        "price_minor": 6000,
+        "currency": "INR",
+        "quantity": 10,
+    }
+    assert lines[1] == {
+        "product": "brownies",
+        "variant": None,
+        "price_minor": 9000,
+        "currency": "INR",
+        "quantity": 5,
+    }
+
+    # Invalid text returns 422
+    bad_res = await api.post(
+        "/v1/today/parse-stock-text",
+        json={"text": "# Only comments"},
+    )
+    assert bad_res.status_code == 422
+
+
 async def test_merchant_switches_the_agent_off_for_the_shop(
     api: httpx2.AsyncClient, shop: ChannelConnection
 ) -> None:

@@ -134,6 +134,37 @@ class OpeningStock(BaseModel):
     lines: list[StockLine] = Field(min_length=1, max_length=200)
 
 
+class RestockRequest(BaseModel):
+    variant_id: uuid.UUID
+    quantity: int = Field(
+        gt=0, le=100_000, description="Number of additional units to add to stock"
+    )
+
+
+class SoldOutRequest(BaseModel):
+    variant_id: uuid.UUID
+
+
+class CounterSaleRequest(BaseModel):
+    variant_id: uuid.UUID
+    quantity: int = Field(
+        gt=0, le=100_000, description="Number of units sold at physical store counter"
+    )
+
+
+class CounterSaleResponse(BaseModel):
+    variant_id: uuid.UUID
+    business_date: date
+    quantity_sold: int
+    remaining_available: int
+    today: Today
+
+
+class ParseStockTextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000, description="Raw stock items text")
+    default_currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
+
+
 # Orders ---------------------------------------------------------------------------------------
 
 
