@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -134,6 +135,37 @@ class OpeningStock(BaseModel):
     lines: list[StockLine] = Field(min_length=1, max_length=200)
 
 
+class RestockRequest(BaseModel):
+    variant_id: uuid.UUID
+    quantity: int = Field(
+        gt=0, le=100_000, description="Number of additional units to add to stock"
+    )
+
+
+class SoldOutRequest(BaseModel):
+    variant_id: uuid.UUID
+
+
+class CounterSaleRequest(BaseModel):
+    variant_id: uuid.UUID
+    quantity: int = Field(
+        gt=0, le=100_000, description="Number of units sold at physical store counter"
+    )
+
+
+class CounterSaleResponse(BaseModel):
+    variant_id: uuid.UUID
+    business_date: date
+    quantity_sold: int
+    remaining_available: int
+    today: Today
+
+
+class ParseStockTextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000, description="Raw stock items text")
+    default_currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
+
+
 # Orders ---------------------------------------------------------------------------------------
 
 
@@ -159,6 +191,19 @@ class Order(BaseModel):
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: list[OrderItem]
+
+
+class CancelOrderRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PaymentLinkResponse(BaseModel):
+    order_id: uuid.UUID
+    order_number: int
+    payment_method: Literal["upi", "paypal"]
+    payment_link: str
+    currency: str
+    total_minor: int
 
 
 # Ask me ---------------------------------------------------------------------------------------

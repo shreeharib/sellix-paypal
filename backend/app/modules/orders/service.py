@@ -278,6 +278,109 @@ async def refund_order(
     _log(session, order, "refunded", previous, "refunded", actor, {"reason": reason})
 
 
+async def mark_order_paid(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+) -> PaymentResult:
+    """Owner tap-to-confirm when receiving a UPI payment alert on their phone.
+
+    Transitions order from awaiting_payment to paid and confirms held stock as sold.
+    """
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+
+    return await record_payment(
+        session,
+        order_id,
+        amount_minor=order.total_minor,
+        currency=order.currency,
+        actor=actor,
+    )
+
+
+async def complete_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+) -> Order:
+    """Mark an order as completed (picked up or delivered)."""
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == "completed":
+        return order
+    if order.status != "paid":
+        raise ValueError(
+            f"Cannot complete order with status '{order.status}'. Order must be paid first."
+        )
+
+    previous = order.status
+    order.status = "completed"
+    _log(session, order, "completed", previous, "completed", actor)
+    return order
+
+
+async def cancel_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+    reason: str | None = None,
+) -> Order:
+    """Cancel an unpaid order and atomically release its held stock back to today's ledger."""
+    order = await session.scalar(
+        select(Order)
+        .where(Order.id == order_id, Order.merchant_id == merchant_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status == "cancelled":
+        return order
+    if order.status in ("completed", "refunded"):
+        raise ValueError(f"Cannot cancel order with status '{order.status}'")
+
+    previous = order.status
+    if previous == "awaiting_payment":
+        # Release the held stock back to available inventory
+        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+        for item in items:
+            await inventory.release(
+                session,
+                variant_id=item.variant_id,
+                business_date=order.business_date,
+                quantity=item.quantity,
+            )
+
+    order.status = "cancelled"
+    order.hold_expires_at = None
+    _log(
+        session,
+        order,
+        "cancelled",
+        previous,
+        "cancelled",
+        actor,
+        {"reason": reason} if reason else None,
+    )
+    return order
+
+
 async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> list[ExpiredOrder]:
     """Release the stock of unpaid orders whose hold has run out."""
     due = list(
