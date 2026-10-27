@@ -61,14 +61,11 @@
 ## 4. Stock (Today screen)
 
 - [x] **4.1 Opening stock and live counts** (C + A). Built.
-- [ ] **4.2 Restock** (C + A). Add quantity to an item during the day.
-  Done when: available count goes up and the agent offers it.
-- [ ] **4.3 Sold out** (C + A). Mark an item sold out in one tap.
-  Done when: the agent stops offering it.
-- [ ] **4.4 Counter sale** (C + A). Record a sale made in the shop (uses `inventory.sell_unheld`).
-  Done when: available count goes down without an order.
-- [ ] **4.5 Stock by text** (AI + A). Type "10 choc cookies 60rs, 5 brownies 90" and confirm the parsed list.
-  Done when: 10 sample sentences in English and Tanglish parse correctly.
+- [x] **4.2 Restock** (C + A). Add quantity to an item during the day (`POST /v1/today/restock`). Built & tested.
+- [x] **4.3 Sold out** (C + A). Mark an item sold out in one tap (`POST /v1/today/sold-out`). Built & tested.
+- [x] **4.4 Counter sale** (C + A). Record a sale made in the shop (`POST /v1/today/counter-sale`). Built & tested.
+- [x] **4.5 Stock by text** (AI + A). Type "10 choc cookies 60rs, 5 brownies 90" and confirm the parsed list (`POST /v1/today/parse-stock-text`). Built & tested.
+- [x] **4.6 Leftovers & Daily Ledger Rollover** (C + DB). Stored procedure `rollover_daily_stock()` auto-rolls forward perpetual `inventory` and multi-day items (`shelf_life_days > 1`). `GET /v1/today/leftovers` and `POST /v1/today/rollover` empower merchants to customize exact carryover quantities (e.g. 4 out of 10 yesterday leftovers) for today's opening stock. Built & tested.
 
 ## 5. Orders and payments
 

@@ -385,6 +385,75 @@ async def test_today_parse_stock_text_api(api: httpx2.AsyncClient) -> None:
     assert bad_res.status_code == 422
 
 
+async def test_today_leftovers_and_rollover_api(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    from datetime import timedelta
+    from app.modules.inventory import service as inventory
+    from app.modules.inventory.schemas import OpeningStockLine
+
+    token = await sign_in_as(shop.merchant_id)
+
+    # 1. Establish stock yesterday
+    async with session_scope() as session:
+        merchant = await session.get(Merchant, shop.merchant_id)
+        assert merchant is not None
+        today_date = merchants.business_date(merchant)
+        yesterday_date = today_date - timedelta(days=1)
+
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=yesterday_date,
+            lines=[
+                OpeningStockLine("Almond Biscotti", None, 4500, 10),
+                OpeningStockLine("Strawberry Tart", None, 8500, 4),
+            ],
+        )
+        ledger = await inventory.day_ledger(session, shop.merchant_id, yesterday_date)
+        biscotti_var_id = str(ledger[0].variant_id)
+        tart_var_id = str(ledger[1].variant_id)
+
+    # 2. GET /v1/today/leftovers
+    leftovers_res = await api.get("/v1/today/leftovers", headers=bearer(token))
+    assert leftovers_res.status_code == 200
+    leftovers_data = leftovers_res.json()
+    assert len(leftovers_data["leftovers"]) == 2
+    leftover_items = {item["product"]: item for item in leftovers_data["leftovers"]}
+    assert leftover_items["Almond Biscotti"]["leftover_quantity"] == 10
+    assert leftover_items["Strawberry Tart"]["leftover_quantity"] == 4
+
+    # 3. POST /v1/today/rollover - merchant chooses 4 out of 10 biscotti and 1 out of 4 tarts
+    rollover_res = await api.post(
+        "/v1/today/rollover",
+        headers=bearer(token),
+        json={
+            "items": [
+                {"variant_id": biscotti_var_id, "rollover_quantity": 4},
+                {"variant_id": tart_var_id, "rollover_quantity": 1},
+            ]
+        },
+    )
+    assert rollover_res.status_code == 200
+    res_data = rollover_res.json()
+    assert res_data["rolled_count"] == 2
+    today_stock = {row["product"]: row for row in res_data["today"]["stock"]}
+    assert today_stock["Almond Biscotti"]["opening"] == 4
+    assert today_stock["Strawberry Tart"]["opening"] == 1
+
+    # 4. POST /v1/today/rollover - trying to roll over more than yesterday's available gives 409
+    bad_rollover_res = await api.post(
+        "/v1/today/rollover",
+        headers=bearer(token),
+        json={"items": [{"variant_id": biscotti_var_id, "rollover_quantity": 50}]},
+    )
+    assert bad_rollover_res.status_code == 409
+
+    # 5. POST /v1/today/rollover/auto
+    auto_res = await api.post("/v1/today/rollover/auto", headers=bearer(token))
+    assert auto_res.status_code == 200
+
+
 async def test_merchant_switches_the_agent_off_for_the_shop(
     api: httpx2.AsyncClient, shop: ChannelConnection
 ) -> None:

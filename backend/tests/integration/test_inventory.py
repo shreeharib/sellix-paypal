@@ -200,3 +200,182 @@ async def test_inventory_operations_reject_invalid_inputs_and_missing_variants(
 
         with pytest.raises(LookupError):
             await inventory.mark_sold_out(session, variant_id=fake_variant_id, business_date=TODAY)
+
+
+async def test_nightly_rollover_perpetual_and_multi_day(shop: ChannelConnection) -> None:
+    from datetime import timedelta
+
+    from app.modules.catalog import service as catalog
+
+    yesterday = TODAY - timedelta(days=1)
+    async with session_scope() as session:
+        # 1. Dress: perpetual inventory mode
+        dress_var = await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Floral Summer Dress",
+            variant_name="Medium",
+            price_minor=249900,
+            stock_mode="inventory",
+        )
+        # 2. Cookies: daily mode but shelf_life_days=3
+        cookie_var = await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Matcha Cookie",
+            variant_name=None,
+            price_minor=8000,
+            stock_mode="daily",
+            shelf_life_days=3,
+        )
+        # 3. Cake: daily perishable, shelf_life_days=1
+        await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Fresh Cream Cake",
+            variant_name=None,
+            price_minor=65000,
+            stock_mode="daily",
+            shelf_life_days=1,
+        )
+
+        # Set yesterday's stock
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=yesterday,
+            lines=[
+                OpeningStockLine("Floral Summer Dress", "Medium", 249900, 10),
+                OpeningStockLine("Matcha Cookie", None, 8000, 20),
+                OpeningStockLine("Fresh Cream Cake", None, 65000, 5),
+            ],
+        )
+
+        # Counter sale yesterday: 2 dresses sold, 8 cookies sold
+        await inventory.record_counter_sale(
+            session, variant_id=dress_var.id, business_date=yesterday, quantity=2
+        )
+        await inventory.record_counter_sale(
+            session, variant_id=cookie_var.id, business_date=yesterday, quantity=8
+        )
+
+        # Nightly rollover executes from yesterday to today
+        rolled = await inventory.execute_nightly_rollover(
+            session,
+            merchant_id=shop.merchant_id,
+            from_date=yesterday,
+            to_date=TODAY,
+        )
+        assert rolled == 2  # Dress (inventory) + Cookie (shelf_life=3)
+
+    async with session_scope() as session:
+        today_stock = await inventory.today_stock(session, shop.merchant_id, TODAY)
+        stock_map = {item.label: item.available for item in today_stock}
+        assert stock_map["Floral Summer Dress (Medium)"] == 8
+        assert stock_map["Matcha Cookie"] == 12
+        assert "Fresh Cream Cake" not in stock_map
+
+
+async def test_yesterday_leftovers_and_merchant_custom_rollover(
+    shop: ChannelConnection,
+) -> None:
+    from datetime import timedelta
+
+    from app.modules.catalog import service as catalog
+    from app.modules.inventory.schemas import RolloverItemSelection
+
+    yesterday = TODAY - timedelta(days=1)
+    async with session_scope() as session:
+        cookie_var = await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Choc Chip Cookie",
+            variant_name=None,
+            price_minor=6000,
+            stock_mode="daily",
+            shelf_life_days=2,
+        )
+        cake_var = await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Pastry Slice",
+            variant_name=None,
+            price_minor=12000,
+            stock_mode="daily",
+            shelf_life_days=1,
+        )
+
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=yesterday,
+            lines=[
+                OpeningStockLine("Choc Chip Cookie", None, 6000, 10),
+                OpeningStockLine("Pastry Slice", None, 12000, 6),
+            ],
+        )
+
+        # Fetch leftovers
+        leftovers = await inventory.get_yesterday_leftovers(
+            session, merchant_id=shop.merchant_id, business_date=TODAY
+        )
+        assert len(leftovers) == 2
+        leftover_map = {item.product: item.leftover_quantity for item in leftovers}
+        assert leftover_map["Choc Chip Cookie"] == 10
+        assert leftover_map["Pastry Slice"] == 6
+
+        # Merchant customizes:
+        # Out of 10 cookies, only 4 roll over to today's online stock (6 kept for counter/personal)
+        # Out of 6 pastry slices, only 2 roll over
+        rolled_count = await inventory.apply_rollover_selection(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=TODAY,
+            selections=[
+                RolloverItemSelection(variant_id=cookie_var.id, rollover_quantity=4),
+                RolloverItemSelection(variant_id=cake_var.id, rollover_quantity=2),
+            ],
+        )
+        assert rolled_count == 2
+
+    async with session_scope() as session:
+        today_stock = await inventory.today_stock(session, shop.merchant_id, TODAY)
+        stock_map = {item.label: item.available for item in today_stock}
+        assert stock_map["Choc Chip Cookie"] == 4
+        assert stock_map["Pastry Slice"] == 2
+
+
+async def test_custom_rollover_exceeds_available_raises_conflict(
+    shop: ChannelConnection,
+) -> None:
+    from datetime import timedelta
+
+    from app.modules.catalog import service as catalog
+    from app.modules.inventory.schemas import RolloverItemSelection
+
+    yesterday = TODAY - timedelta(days=1)
+    async with session_scope() as session:
+        cookie_var = await catalog.upsert_variant(
+            session,
+            merchant_id=shop.merchant_id,
+            product_name="Oatmeal Cookie",
+            variant_name=None,
+            price_minor=5000,
+        )
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=yesterday,
+            lines=[OpeningStockLine("Oatmeal Cookie", None, 5000, 5)],
+        )
+
+        # Merchant requests 10 when yesterday only had 5 available
+        with pytest.raises(inventory.StockConflict):
+            await inventory.apply_rollover_selection(
+                session,
+                merchant_id=shop.merchant_id,
+                business_date=TODAY,
+                selections=[
+                    RolloverItemSelection(variant_id=cookie_var.id, rollover_quantity=10)
+                ],
+            )

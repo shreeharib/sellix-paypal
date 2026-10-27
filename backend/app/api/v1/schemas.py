@@ -166,6 +166,37 @@ class ParseStockTextRequest(BaseModel):
     default_currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
 
 
+class YesterdayLeftoverItem(BaseModel):
+    variant_id: uuid.UUID
+    product: str
+    variant: str | None
+    price_minor: int
+    currency: str
+    leftover_quantity: int
+    stock_mode: str
+    shelf_life_days: int | None
+
+
+class YesterdayLeftoversResponse(BaseModel):
+    business_date: date
+    yesterday_date: date
+    leftovers: list[YesterdayLeftoverItem]
+
+
+class RolloverItem(BaseModel):
+    variant_id: uuid.UUID
+    rollover_quantity: int = Field(ge=0, description="Quantity to roll over into today's opening stock")
+
+
+class RolloverRequest(BaseModel):
+    items: list[RolloverItem] = Field(min_length=1)
+
+
+class RolloverResponse(BaseModel):
+    rolled_count: int
+    today: Today
+
+
 # Orders ---------------------------------------------------------------------------------------
 
 

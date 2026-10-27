@@ -44,3 +44,25 @@ class OpeningStockLine:
     price_minor: int
     quantity: int
     currency: str = "INR"
+
+
+@dataclass(frozen=True)
+class YesterdayLeftover:
+    """Unsold stock from yesterday available for rollover decision."""
+
+    variant_id: uuid.UUID
+    product: str
+    variant: str | None
+    price_minor: int
+    currency: str
+    leftover_quantity: int
+    stock_mode: str
+    shelf_life_days: int | None
+
+
+@dataclass(frozen=True)
+class RolloverItemSelection:
+    """Merchant's choice for carrying forward leftovers into today's opening stock."""
+
+    variant_id: uuid.UUID
+    rollover_quantity: int

@@ -15,6 +15,8 @@ class Product(Base):
     )
     merchant_id: Mapped[uuid.UUID]
     name: Mapped[str]
+    stock_mode: Mapped[str] = mapped_column(server_default=text("'daily'"))
+    shelf_life_days: Mapped[int | None] = mapped_column(nullable=True, server_default=text("null"))
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
@@ -31,6 +33,8 @@ class ProductVariant(Base):
     name: Mapped[str | None]  # None when the product has no variants
     price_minor: Mapped[int]  # paise for INR
     currency: Mapped[str] = mapped_column(server_default="INR")
+    stock_mode: Mapped[str | None] = mapped_column(nullable=True, server_default=text("null"))
+    shelf_life_days: Mapped[int | None] = mapped_column(nullable=True, server_default=text("null"))
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
