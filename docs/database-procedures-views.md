@@ -257,10 +257,11 @@ Database triggers guarantee business rules and data consistency regardless of wh
 
 #### 2.3 `fn_update_customer_stats()`
 * **Schema Location**: Section 6 (`fn_update_customer_stats`)
-* **Trigger**: `trg_order_paid AFTER UPDATE OF payment_status ON orders`
+* **Trigger**: `trg_order_paid AFTER UPDATE OF status ON orders` (supporting both `status` and `payment_status` settlement in lockstep)
 * **Mechanism**:
   ```sql
-  IF (OLD.payment_status <> 'paid' AND NEW.payment_status = 'paid') THEN
+  IF (OLD.payment_status <> 'paid' AND NEW.payment_status = 'paid') OR
+     (OLD.status <> 'paid' AND NEW.status = 'paid') THEN
       UPDATE customers
       SET lifetime_orders_count = lifetime_orders_count + 1,
           lifetime_spent_minor = lifetime_spent_minor + NEW.total_amount_minor
