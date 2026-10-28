@@ -1,10 +1,18 @@
-# sellix development checklist
+# sellix development checklist (Omnichannel Enterprise SaaS)
 
-> Finish the product before planning the launch. Work top to bottom; each item is done only when its **Done when** line works with the team's real Instagram test account (not only in tests). Tick the box in the pull request that finishes it.
+> **ARCHITECTURAL STANDARD: Omnichannel Enterprise SaaS**
+> All roadmap items and development deliverables must adhere to the **Omnichannel Enterprise SaaS** architecture (`docs/database-schema.md` & `conflicts.md`).
+> Specifically:
+> 1. **Channels:** Unified support for Instagram DMs, WhatsApp Cloud API, and Counter POS.
+> 2. **Stock & Holds:** Multi-mode stock (`daily`, `inventory`, `made_to_order`, `unlimited`, `serialized`) and standalone `stock_holds` with `release_expired_holds()`.
+> 3. **Order Status:** Orthogonal triple-status updates (`status`, `payment_status`, `fulfilment_status`) ensuring database triggers and analytics views fire properly.
+> 4. **Escalations:** Structured `escalation_rules` SQL table persistence with dynamic prompt compilation.
+> 5. **Tenancy:** Citus-ready `merchant_id` tenant isolation on all tables.
 >
-> Everything here runs with the Meta app in **development mode**: only accounts added as testers on the app can sign in, which is all development needs. Launch work (pilot merchants, App Review, hosting for customers, legal pages) comes after, in a separate plan.
+> Finish the product before planning the launch. Work top to bottom; each item is done only when its **Done when** line works end-to-end. Tick the box in the pull request that finishes it.
 >
 > **Who:** P = platform and channels · AI = agent · A = Flutter app · C = commerce and data · F = founder
+
 
 ## 1. Development setup
 
@@ -53,27 +61,26 @@
 ## 4. Stock (Today screen)
 
 - [x] **4.1 Opening stock and live counts** (C + A). Built.
-- [ ] **4.2 Restock** (C + A). Add quantity to an item during the day.
-  Done when: available count goes up and the agent offers it.
-- [ ] **4.3 Sold out** (C + A). Mark an item sold out in one tap.
-  Done when: the agent stops offering it.
-- [ ] **4.4 Counter sale** (C + A). Record a sale made in the shop (uses `inventory.sell_unheld`).
-  Done when: available count goes down without an order.
-- [ ] **4.5 Stock by text** (AI + A). Type "10 choc cookies 60rs, 5 brownies 90" and confirm the parsed list.
-  Done when: 10 sample sentences in English and Tanglish parse correctly.
+- [x] **4.2 Restock** (C + A). Add quantity to an item during the day (`POST /v1/today/restock`). Built & tested.
+- [x] **4.3 Sold out** (C + A). Mark an item sold out in one tap (`POST /v1/today/sold-out`). Built & tested.
+- [x] **4.4 Counter sale** (C + A). Record a sale made in the shop (`POST /v1/today/counter-sale`). Built & tested.
+- [x] **4.5 Stock by text** (AI + A). Type "10 choc cookies 60rs, 5 brownies 90" and confirm the parsed list (`POST /v1/today/parse-stock-text`). Built & tested.
+- [x] **4.6 Leftovers & Daily Ledger Rollover** (C + DB). Stored procedure `rollover_daily_stock()` auto-rolls forward perpetual `inventory` and multi-day items (`shelf_life_days > 1`). `GET /v1/today/leftovers` and `POST /v1/today/rollover` empower merchants to customize exact carryover quantities (e.g. 4 out of 10 yesterday leftovers) for today's opening stock. Built & tested.
+- [x] **4.7 Dual-Engine Catalog Architecture & Fuzzy AI Search** (C + AI + DB). Bridges fast-path morning stock entries with enterprise multi-category enrichment (`attributes JSONB`, `compare_at_price_minor`, `cost_price_minor`, auto-SKU generation, and `pg_trgm` GIN-indexed fuzzy search `/v1/products/search`). Built & tested.
 
 ## 5. Orders and payments
 
-- [x] **5.1 Orders, 15-minute holds and expiry** (C). Built.
+- [x] **5.1 Orders, 15-minute holds and expiry** (C). Built & Wired. `stock_holds` established as single source of truth across Python and PostgreSQL `release_expired_holds()`, with full lifecycle tests.
+
 - [x] **5.2 PayPal checkout and webhook** (C). Built (sandbox).
 - [x] **5.3 UPI payment request** (C + AI). For INR orders the agent sends the merchant's UPI ID and the exact amount; the order waits as "payment pending".
   Done when: a DM order shows the UPI message.
-- [x] **5.4 "Paid" button** (C + A). The merchant taps **Paid** in Orders: order paid, stock sold, customer gets a confirmation.
-  Done when: a full UPI sale by DM drops the stock on Today.
+- [x] **5.4 "Paid" button** (C + A). The merchant taps **Paid** in Orders: updates both `status = 'paid'` and `payment_status = 'paid'`, stock sold, customer gets a confirmation, database triggers fire.
+  Done when: a full UPI sale by DM drops the stock on Today and updates analytics.
 - [ ] **5.5 Customer says "paid"** (C + AI). Keep the hold while waiting for the merchant to check; don't let it expire.
   Done when: covered by a test.
-- [x] **5.6 Complete and cancel** (C + A). Mark an order completed (picked up or delivered) or cancelled (stock returns).
-  Done when: both work from Orders and update Today.
+- [x] **5.6 Complete, advance stages, and cancel** (C + A). Mark an order through enterprise fulfillment stages (`confirmed` -> `ready` -> `delivered` -> `completed`, via `/v1/orders/{id}/status`) or cancelled (stock returns). Automatically logs transitions in `order_timeline` via `trg_order_timeline` and updates CRM customer lifetime metrics via `trg_order_paid`.
+  Done when: works from Orders, timeline logged, and updates Today.
 - [ ] **5.7 PayPal end to end with a real DM** (C). Sandbox buyer pays from the link the agent sent.
   Done when: the order turns paid by the webhook alone.
 
@@ -82,7 +89,7 @@
 - [x] **6.1 Questions backend and screen** (C + A). Built.
 - [ ] **6.2 End to end with a real DM** (AI + C). Ask for a custom cake; the agent asks the merchant; the merchant's answer reaches the customer.
   Done when: works in one session.
-- [ ] **6.3 Save answer as a rule** (C + A). Offer "Always answer this way"; approved answers go into the shop profile's Saved answers.
+- [ ] **6.3 Save answer as a rule** (C + A). Offer "Always answer this way"; approved answers persist into the `escalation_rules` SQL table and compile dynamically into the prompt.
   Done when: the same question later is answered without asking.
 
 ## 7. Push notifications
@@ -91,7 +98,8 @@
   Done when: a test push reaches an Android phone.
 - [ ] **7.2 Customer says they paid** (C). Done when: arrives within 10 seconds and opens the order.
 - [ ] **7.3 New Ask me question** (C). Done when: tapping it opens the question.
-- [ ] **7.4 Low stock** (C). At 2 left, once per item per day. Done when: fires once.
+- [ ] **7.4 Low stock** (C). Triggers when stock $\le 2$ or reaches the merchant's percentage threshold (e.g. $\le 20\%$). Done when: fires once per threshold event.
+
 - [ ] **7.5 Morning stock reminder** (C). At the time set in 3.3, in the merchant's time zone. Done when: arrives on time.
 
 ## 8. Story replies

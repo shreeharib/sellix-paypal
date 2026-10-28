@@ -187,6 +187,34 @@ SELECT record_counter_sale(
 
 ---
 
+### 1.5 `rollover_daily_stock(p_merchant_id, p_from_date, p_to_date)`
+
+* **Schema Location**: Migration `20261027210000_stock_modes_and_rollover.sql`
+* **Return Type**: `INT` (Number of variants rolled forward into tomorrow's opening stock)
+
+#### What It Does
+Carries forward unsold available stock from yesterday (`p_from_date`) into today's opening stock (`p_to_date`) for perpetual items (`stock_mode = 'inventory'`) and multi-day goods (`shelf_life_days > 1`).
+
+#### What Is the Use of This?
+Home bakers, cloud kitchens, and D2C boutique merchants have both single-day perishable items (fresh cream cakes, cut flowers) and shelf-stable goods (cookies, brownies, jarred treats, apparel, plants, slippers).
+1. At the merchant's closing time or midnight cron, `rollover_daily_stock` sweeps all active variants with `available > 0` on `p_from_date`.
+2. For items configured with `stock_mode = 'inventory'` (perpetual non-perishables) or multi-day perishables (`shelf_life_days > 1`), it inserts or updates tomorrow's `daily_stock` row with:
+   $$\text{opening} = \text{daily\_stock.opening} + \text{available}_{\text{yesterday}}$$
+3. Pure 1-day perishables (fresh cream cakes, daily specials with `shelf_life_days = 1`) are untouched and left at 0 opening stock until fresh morning bakes are entered.
+4. Paired with `GET /v1/today/leftovers` and `POST /v1/today/rollover`, merchants can also interactively customize exact leftover counts (e.g., choose 4 out of 10 cookies to sell online today while saving 6 for counter/personal use).
+
+#### Practical SQL Example
+```sql
+SELECT rollover_daily_stock(
+    p_merchant_id := 'c3d4e5f6-3333-4444-5555-666677778888',
+    p_from_date   := CURRENT_DATE - INTERVAL '1 day',
+    p_to_date     := CURRENT_DATE
+);
+-- Returns: 7 (7 perpetual and multi-day variants rolled over into today's opening ledger)
+```
+
+---
+
 ## 2. Database Triggers & Trigger Functions
 
 Database triggers guarantee business rules and data consistency regardless of which service or API modifies the database.
@@ -229,10 +257,11 @@ Database triggers guarantee business rules and data consistency regardless of wh
 
 #### 2.3 `fn_update_customer_stats()`
 * **Schema Location**: Section 6 (`fn_update_customer_stats`)
-* **Trigger**: `trg_order_paid AFTER UPDATE OF payment_status ON orders`
+* **Trigger**: `trg_order_paid AFTER UPDATE OF status ON orders` (supporting both `status` and `payment_status` settlement in lockstep)
 * **Mechanism**:
   ```sql
-  IF (OLD.payment_status <> 'paid' AND NEW.payment_status = 'paid') THEN
+  IF (OLD.payment_status <> 'paid' AND NEW.payment_status = 'paid') OR
+     (OLD.status <> 'paid' AND NEW.status = 'paid') THEN
       UPDATE customers
       SET lifetime_orders_count = lifetime_orders_count + 1,
           lifetime_spent_minor = lifetime_spent_minor + NEW.total_amount_minor

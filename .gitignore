@@ -16,6 +16,14 @@ __pycache__/
 .ruff_cache/
 backend/var/
 test_live.py
+yet-to-complete.txt
+demo_stock_holds.py
+demo_rollover.py
+demo_catalog.py
+demo_triple_status.py
+conflicts.md
+
+
 
 # Flutter / Dart
 app/.dart_tool/

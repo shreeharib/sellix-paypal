@@ -147,6 +147,96 @@ async def parse_stock_text(body: schemas.ParseStockTextRequest) -> schemas.Openi
     )
 
 
+@router.get("/leftovers")
+async def get_leftovers(shop: Shop) -> schemas.YesterdayLeftoversResponse:
+    """Get yesterday's unsold stock leftovers available for rollover."""
+    from datetime import timedelta
+
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        today_date = merchants.business_date(merchant)
+        yesterday_date = today_date - timedelta(days=1)
+        leftovers = await inventory.get_yesterday_leftovers(
+            session, merchant_id=merchant.id, business_date=today_date
+        )
+        return schemas.YesterdayLeftoversResponse(
+            business_date=today_date,
+            yesterday_date=yesterday_date,
+            leftovers=[
+                schemas.YesterdayLeftoverItem(
+                    variant_id=item.variant_id,
+                    product=item.product,
+                    variant=item.variant,
+                    price_minor=item.price_minor,
+                    currency=item.currency,
+                    leftover_quantity=item.leftover_quantity,
+                    stock_mode=item.stock_mode,
+                    shelf_life_days=item.shelf_life_days,
+                )
+                for item in leftovers
+            ],
+        )
+
+
+@router.post("/rollover")
+async def apply_rollover(shop: Shop, body: schemas.RolloverRequest) -> schemas.RolloverResponse:
+    """Carry forward customized leftover stock from yesterday into today's opening stock."""
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        day = merchants.business_date(merchant)
+        selections = [
+            inventory.RolloverItemSelection(
+                variant_id=item.variant_id,
+                rollover_quantity=item.rollover_quantity,
+            )
+            for item in body.items
+        ]
+        try:
+            rolled_count = await inventory.apply_rollover_selection(
+                session,
+                merchant_id=merchant.id,
+                business_date=day,
+                selections=selections,
+            )
+        except inventory.StockConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    async with session_scope() as session:
+        today_state = await _today(session, shop.merchant_id)
+
+    return schemas.RolloverResponse(
+        rolled_count=rolled_count,
+        today=today_state,
+    )
+
+
+@router.post("/rollover/auto")
+async def auto_rollover(shop: Shop) -> schemas.RolloverResponse:
+    """Automatically roll forward perpetual inventory and multi-day goods from yesterday."""
+    from datetime import timedelta
+
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        today_date = merchants.business_date(merchant)
+        yesterday_date = today_date - timedelta(days=1)
+        rolled_count = await inventory.execute_nightly_rollover(
+            session,
+            merchant_id=merchant.id,
+            from_date=yesterday_date,
+            to_date=today_date,
+        )
+
+    async with session_scope() as session:
+        today_state = await _today(session, shop.merchant_id)
+
+    return schemas.RolloverResponse(
+        rolled_count=rolled_count,
+        today=today_state,
+    )
+
+
 async def _today(session: AsyncSession, merchant_id: uuid.UUID) -> schemas.Today:
     merchant = await merchants.get_merchant(session, merchant_id)
     day = merchants.business_date(merchant)

@@ -6,18 +6,24 @@ can never take stock below zero (the table's check constraint is the last line o
 
 import re
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import ColumnElement, select, update
+from sqlalchemy import ColumnElement, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog import service as catalog
 from app.modules.catalog.models import Product, ProductVariant
-from app.modules.inventory.models import DailyStock
-from app.modules.inventory.schemas import LedgerRow, OpeningStockLine, StockItem
+from app.modules.inventory.models import DailyStock, StockHold
+from app.modules.inventory.schemas import (
+    LedgerRow,
+    OpeningStockLine,
+    RolloverItemSelection,
+    StockItem,
+    YesterdayLeftover,
+)
 
 
 class StockConflict(ValueError):
@@ -134,36 +140,81 @@ async def set_opening_stock(
 
 
 async def hold(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
+    conversation_id: uuid.UUID | None = None,
+    expires_at: datetime | None = None,
 ) -> bool:
-    """Reserve stock for an unpaid order. False if not enough is available."""
-    return await _apply(
+    """Reserve stock for an unpaid order. False if not enough is available.
+
+    Updates daily_stock.held and creates a record in stock_holds as the source of truth.
+    """
+    applied = await _apply(
         session,
         variant_id,
         business_date,
         condition=DailyStock.available >= quantity,
         held=DailyStock.held + quantity,
     )
+    if not applied:
+        return False
+
+    hold_row = StockHold(
+        variant_id=variant_id,
+        conversation_id=conversation_id,
+        order_id=order_id,
+        quantity=quantity,
+        status="held",
+        expires_at=expires_at or (datetime.now(UTC) + timedelta(minutes=15)),
+    )
+    session.add(hold_row)
+    return True
 
 
 async def release(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
+    status: str = "released",
 ) -> bool:
     """Give held stock back (the order expired or was cancelled before payment)."""
-    return await _apply(
+    applied = await _apply(
         session,
         variant_id,
         business_date,
         condition=DailyStock.held >= quantity,
         held=DailyStock.held - quantity,
     )
+    if applied and order_id is not None:
+        await session.execute(
+            update(StockHold)
+            .where(
+                StockHold.order_id == order_id,
+                StockHold.variant_id == variant_id,
+                StockHold.status == "held",
+            )
+            .values(status=status)
+        )
+    return applied
 
 
 async def confirm_sale(
-    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+    session: AsyncSession,
+    *,
+    variant_id: uuid.UUID,
+    business_date: date,
+    quantity: int,
+    order_id: uuid.UUID | None = None,
 ) -> bool:
     """Turn held stock into sold stock (the order was paid)."""
-    return await _apply(
+    applied = await _apply(
         session,
         variant_id,
         business_date,
@@ -171,6 +222,54 @@ async def confirm_sale(
         held=DailyStock.held - quantity,
         sold=DailyStock.sold + quantity,
     )
+    if applied and order_id is not None:
+        await session.execute(
+            update(StockHold)
+            .where(
+                StockHold.order_id == order_id,
+                StockHold.variant_id == variant_id,
+                StockHold.status == "held",
+            )
+            .values(status="converted")
+        )
+    return applied
+
+
+async def release_expired_holds(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+    business_date: date | None = None,
+) -> list[uuid.UUID]:
+    """Sweep stock_holds for expired records, decrement daily_stock.held, and mark status='expired'.
+
+    Returns the list of affected order_ids.
+    """
+    cutoff = now or datetime.now(UTC)
+    expired_holds = list(
+        await session.scalars(
+            select(StockHold)
+            .where(
+                StockHold.status == "held",
+                StockHold.expires_at < cutoff,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    )
+    affected_order_ids: list[uuid.UUID] = []
+    b_date = business_date or cutoff.date()
+    for hold_rec in expired_holds:
+        await _apply(
+            session,
+            hold_rec.variant_id,
+            b_date,
+            condition=DailyStock.held >= hold_rec.quantity,
+            held=DailyStock.held - hold_rec.quantity,
+        )
+        hold_rec.status = "expired"
+        if hold_rec.order_id is not None:
+            affected_order_ids.append(hold_rec.order_id)
+    return affected_order_ids
 
 
 async def sell_unheld(
@@ -515,3 +614,114 @@ async def _apply(
         .returning(DailyStock.id)
     )
     return updated is not None
+
+
+async def get_yesterday_leftovers(
+    session: AsyncSession, merchant_id: uuid.UUID, business_date: date
+) -> list[YesterdayLeftover]:
+    """Retrieve unsold stock from yesterday (available > 0) with stock_mode and shelf life."""
+    yesterday = business_date - timedelta(days=1)
+    rows = await session.execute(
+        select(
+            DailyStock.variant_id,
+            Product.name,
+            ProductVariant.name,
+            ProductVariant.price_minor,
+            ProductVariant.currency,
+            DailyStock.available,
+            func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily").label(
+                "effective_mode"
+            ),
+            func.coalesce(ProductVariant.shelf_life_days, Product.shelf_life_days).label(
+                "effective_shelf_life"
+            ),
+        )
+        .join(ProductVariant, ProductVariant.id == DailyStock.variant_id)
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(
+            DailyStock.merchant_id == merchant_id,
+            DailyStock.business_date == yesterday,
+            DailyStock.available > 0,
+            Product.is_active.is_(True),
+            ProductVariant.is_active.is_(True),
+        )
+        .order_by(Product.name, ProductVariant.name)
+    )
+    return [
+        YesterdayLeftover(
+            variant_id=row[0],
+            product=row[1],
+            variant=row[2],
+            price_minor=row[3],
+            currency=row[4],
+            leftover_quantity=row[5],
+            stock_mode=row[6],
+            shelf_life_days=row[7],
+        )
+        for row in rows
+    ]
+
+
+async def apply_rollover_selection(
+    session: AsyncSession,
+    *,
+    merchant_id: uuid.UUID,
+    business_date: date,
+    selections: list[RolloverItemSelection],
+) -> int:
+    """Apply customized rollover: add chosen leftover quantities to today's opening stock."""
+    yesterday = business_date - timedelta(days=1)
+    applied_count = 0
+
+    for item in selections:
+        if item.rollover_quantity <= 0:
+            continue
+
+        # Validate that leftover actually had at least rollover_quantity available yesterday
+        yesterday_stock = await session.scalar(
+            select(DailyStock.available).where(
+                DailyStock.merchant_id == merchant_id,
+                DailyStock.variant_id == item.variant_id,
+                DailyStock.business_date == yesterday,
+            )
+        )
+        if yesterday_stock is None or yesterday_stock < item.rollover_quantity:
+            available_qty = yesterday_stock or 0
+            raise StockConflict(
+                f"Cannot roll over {item.rollover_quantity} units: "
+                f"yesterday only had {available_qty} available"
+            )
+
+        statement = pg_insert(DailyStock).values(
+            merchant_id=merchant_id,
+            variant_id=item.variant_id,
+            business_date=business_date,
+            opening=item.rollover_quantity,
+        )
+        await session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[DailyStock.variant_id, DailyStock.business_date],
+                set_={"opening": DailyStock.opening + statement.excluded.opening},
+            )
+        )
+        applied_count += 1
+
+    return applied_count
+
+
+async def execute_nightly_rollover(
+    session: AsyncSession,
+    *,
+    merchant_id: uuid.UUID,
+    from_date: date,
+    to_date: date,
+) -> int:
+    """Call stored procedure rollover_daily_stock to roll forward perpetual/multi-day stock."""
+    result = await session.scalar(
+        text("SELECT rollover_daily_stock(:merchant_id, :from_date, :to_date)").bindparams(
+            merchant_id=merchant_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    )
+    return int(result or 0)

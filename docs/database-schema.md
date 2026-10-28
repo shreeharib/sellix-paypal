@@ -205,6 +205,7 @@ create table products (
   kind text not null default 'standard' check (kind in ('standard', 'bundle')),
   stock_mode text not null default 'inventory'
     check (stock_mode in ('daily', 'inventory', 'made_to_order', 'unlimited')),
+  shelf_life_days integer,                     -- e.g. 1 for fresh cream cakes, 3-5 for cookies, null for non-perishable
   track_units boolean not null default false,  -- serial numbers / IMEI per unit
   track_batches boolean not null default false,-- batches with expiry dates
   pricing_mode text not null default 'fixed'
@@ -268,6 +269,8 @@ create table product_variants (
   compare_at_price_minor integer,              -- MRP / strike-through price
   cost_minor integer,                          -- for profit insights
   currency char(3) not null default 'INR',
+  stock_mode text check (stock_mode is null or stock_mode in ('daily', 'inventory', 'made_to_order', 'unlimited')),
+  shelf_life_days integer,                     -- variant override (e.g. eggless bake vs regular)
   attributes jsonb not null default '{}',      -- variant-specific: weight_g of this ring, shade code
   status text not null default 'active' check (status in ('active', 'archived')),
   position integer not null default 0,

@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -166,6 +166,39 @@ class ParseStockTextRequest(BaseModel):
     default_currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
 
 
+class YesterdayLeftoverItem(BaseModel):
+    variant_id: uuid.UUID
+    product: str
+    variant: str | None
+    price_minor: int
+    currency: str
+    leftover_quantity: int
+    stock_mode: str
+    shelf_life_days: int | None
+
+
+class YesterdayLeftoversResponse(BaseModel):
+    business_date: date
+    yesterday_date: date
+    leftovers: list[YesterdayLeftoverItem]
+
+
+class RolloverItem(BaseModel):
+    variant_id: uuid.UUID
+    rollover_quantity: int = Field(
+        ge=0, description="Quantity to roll over into today's opening stock"
+    )
+
+
+class RolloverRequest(BaseModel):
+    items: list[RolloverItem] = Field(min_length=1)
+
+
+class RolloverResponse(BaseModel):
+    rolled_count: int
+    today: Today
+
+
 # Orders ---------------------------------------------------------------------------------------
 
 
@@ -191,6 +224,26 @@ class Order(BaseModel):
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: list[OrderItem]
+    order_number: str | None = None
+    payment_status: str = "pending"
+    delivery_type: str | None = None
+    source_channel: str = "instagram"
+    total_amount_minor: int = 0
+
+
+class OrderTimelineEvent(BaseModel):
+    id: uuid.UUID
+    order_id: uuid.UUID
+    from_status: str | None
+    to_status: str
+    triggered_by: str
+    comment: str | None
+    created_at: datetime
+
+
+class UpdateOrderStatusRequest(BaseModel):
+    status: str = Field(description="Target status: confirmed, ready, delivered, completed, etc.")
+    comment: str | None = None
 
 
 class CancelOrderRequest(BaseModel):
@@ -248,3 +301,71 @@ class ChatMessage(BaseModel):
 
 class AgentSwitch(BaseModel):
     active: bool
+
+
+# Catalog --------------------------------------------------------------------------------------
+
+
+class ProductVariantDetail(BaseModel):
+    id: uuid.UUID
+    sku: str | None
+    name: str | None
+    price_minor: int
+    compare_at_price_minor: int | None = None
+    cost_price_minor: int | None = None
+    currency: str
+    stock_mode: str | None = None
+    shelf_life_days: int | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool
+
+
+class ProductAliasDetail(BaseModel):
+    id: uuid.UUID
+    alias_text: str
+    confidence_source: str
+    created_at: datetime
+
+
+class ProductDetail(BaseModel):
+    id: uuid.UUID
+    name: str
+    title: str | None = None
+    description: str | None = None
+    category: str | None = None
+    base_image_url: str | None = None
+    stock_mode: str
+    shelf_life_days: int | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool
+    variants: list[ProductVariantDetail] = Field(default_factory=list)
+    aliases: list[ProductAliasDetail] = Field(default_factory=list)
+
+
+class ProductUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    category: str | None = Field(default=None, max_length=100)
+    base_image_url: str | None = Field(default=None, max_length=500)
+    attributes: dict[str, Any] | None = None
+
+
+class CreateAliasRequest(BaseModel):
+    alias_text: str = Field(min_length=1, max_length=150)
+
+
+class CatalogSearchItem(BaseModel):
+    product_id: uuid.UUID
+    product_name: str
+    category: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    matched_alias: str | None = None
+    similarity: float = 0.0
+    variants: list[ProductVariantDetail] = Field(default_factory=list)
+
+
+class CatalogSearchResponse(BaseModel):
+    query: str
+    total_results: int
+    items: list[CatalogSearchItem]

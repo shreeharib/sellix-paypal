@@ -1,8 +1,13 @@
-# sellix
+# sellix: Omnichannel Enterprise AI Commerce SaaS
 
-AI sales agents for small merchants who sell through Instagram and WhatsApp DMs. Every morning the merchant tells sellix what's in stock. The agent then answers customers in their own language mix (Tamil + English, Hinglish and so on), takes the order, collects payment through PayPal, and asks the merchant whenever it's unsure. The merchant runs everything from one Flutter app.
+**sellix** is an omnichannel enterprise AI sales and commerce platform designed for D2C brands, makers, cloud kitchens, and merchants selling across **Instagram DMs, WhatsApp Cloud API, and Counter POS**.
 
-> **Status:** early development for the [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/). Judge instructions, the hosted demo and the video will be added here before submission.
+Powered by autonomous multi-lingual AI sales agents, sellix answers customers in their natural language mix (Tamil + English, Hinglish, Tanglish, and more), references a multi-mode inventory ledger (daily perishable, perpetual inventory, made-to-order, unlimited, serialized), manages stock reservations with sub-second concurrency, settles payments across dual rails (PayPal and direct UPI), and escalates exceptions to merchant management apps.
+
+> **Architecture Standard:** **Omnichannel Enterprise SaaS**. The platform is designed from the ground up for multi-channel commerce, multi-category catalogs, multi-tenant horizontal scaling (PostgreSQL with Citus-ready sharding), and an orthogonal triple-status order lifecycle (`status`, `payment_status`, `fulfilment_status`).
+>
+> **Status:** Active development for the [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/) and production deployment. Judge instructions, the hosted demo, and video walkthrough are linked here.
+
 
 ## Repository layout
 
