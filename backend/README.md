@@ -70,9 +70,10 @@ app/
   worker.py        standalone worker
   cli.py           operator commands
   core/            settings, database, job queue, encryption, signing, logging, event loop
-  webhooks/        Meta webhooks and the webhook inbox
-  modules/         business modules: models.py, schemas.py, service.py, tasks.py, router.py
+  api/v1/          REST API routers for the merchant app (thin; call module services only)
+  webhooks/        Meta and PayPal webhooks and the webhook inbox
+  modules/         business modules: models.py, schemas.py, service.py (public boundary), tasks.py
 tests/
-  unit/            no database
+  unit/            no database (includes AST modular monolith boundary enforcement)
   integration/     real Postgres, built from supabase/migrations
 ```

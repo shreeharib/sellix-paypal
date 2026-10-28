@@ -191,8 +191,8 @@ sellix/
 
 ### Module rules
 
-1. Each module has the same shape: `models.py` (tables) · `schemas.py` (types other modules may use) · `service.py` (**the public interface**) · `tasks.py` (job entry points, if any) · `router.py` (endpoints, if any).
-2. A module may use another module's `service.py`, `schemas.py` and `tasks.py`. It may read another module's tables through its `models.py` in a query (e.g. a join), but **every change goes through the owning module's service**. Other internal files are off limits. This keeps changes local and merge conflicts rare. (The `merchants` module holds accounts and the global agent switch.)
+1. Each module has the same shape: `models.py` (tables) · `schemas.py` (types other modules may use) · `service.py` (**the public interface**) · `tasks.py` (job entry points, if any) · `router.py` (oauth/payment return endpoints, if any).
+2. A module or API router may only import another module's `service.py` and `schemas.py` ([ADR 0001](adr/0001-modular-monolith.md)). Other modules and routers **never** import another module's `models.py`, `tasks.py`, or internal files. Every table read, join, or mutation goes through the owning module's `service.py` (enforced in CI by `tests/unit/test_module_boundaries.py`). This keeps changes local and merge conflicts rare. (The `merchants` module holds shop settings and the global agent switch; `accounts` holds users, identities, and sessions.)
 3. Shared vocabulary (order states, channel names, money and time helpers) lives in `core/` and changes only through a PR reviewed by its owner.
 4. **Money is stored as integer minor units** (paise / cents) with a currency code. Never floats.
 5. **Times are stored in UTC**, and shown in the merchant's time zone (IST). The "business day" follows the merchant's closing time.

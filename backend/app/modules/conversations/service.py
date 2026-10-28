@@ -21,7 +21,8 @@ from app.modules.conversations.models import Conversation, Customer, Message
 from app.modules.conversations.schemas import ConversationSummary, MessageView
 from app.modules.escalations import service as escalations
 from app.modules.merchants import service as merchants
-from app.modules.merchants.models import Merchant
+from app.modules.orders.schemas import ExpiredOrder, PaymentResult
+from app.modules.payments.service import PaymentFailed
 
 log = structlog.get_logger()
 
@@ -179,16 +180,18 @@ async def unanswered_conversations(
         .where(Message.created_at > now - max_age)
         .subquery()
     )
+    enabled_merchant_ids = await merchants.list_enabled_merchant_ids(session)
+    if not enabled_merchant_ids:
+        return []
     rows = await session.scalars(
         select(Conversation.id)
         .join(latest, latest.c.conversation_id == Conversation.id)
-        .join(Merchant, Merchant.id == Conversation.merchant_id)
         .where(
             latest.c.position == 1,
             latest.c.sender.in_(REPLY_SENDERS),
             latest.c.created_at < now - waiting_longer_than,
             Conversation.agent_active,
-            Merchant.agent_enabled,
+            Conversation.merchant_id.in_(enabled_merchant_ids),
         )
     )
     return list(rows)
@@ -210,7 +213,7 @@ async def _load_turn(
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None:
             return None
-        merchant = await session.get(Merchant, conversation.merchant_id)
+        merchant = await merchants.find_merchant(session, conversation.merchant_id)
         if merchant is None or not merchant.agent_enabled or not conversation.agent_active:
             return None
         recent = await _recent_messages(session, conversation_id, get_settings().history_messages)
@@ -305,7 +308,7 @@ async def _escalate(context: actions.TurnContext, question: str) -> None:
 async def _turn_if_agent_active(
     session: AsyncSession, conversation: Conversation
 ) -> TurnRequest | None:
-    merchant = await session.get(Merchant, conversation.merchant_id)
+    merchant = await merchants.find_merchant(session, conversation.merchant_id)
     if merchant is None or not merchant.agent_enabled or not conversation.agent_active:
         return None
     return TurnRequest(conversation.id)
@@ -532,3 +535,37 @@ async def get_conversation(
     if conversation is None or conversation.merchant_id != merchant_id:
         raise LookupError(f"No conversation {conversation_id}")
     return conversation
+
+
+async def get_customer_display_name(session: AsyncSession, customer_id: uuid.UUID) -> str | None:
+    """Return the customer's display name if known."""
+    customer = await session.get(Customer, customer_id)
+    return customer.display_name if customer else None
+
+
+async def request_turn(turn: TurnRequest) -> None:
+    """Queue an agent reply turn for a conversation."""
+    from app.modules.conversations import tasks
+
+    await tasks.request_turn(turn)
+
+
+async def inform_customer(conversation_id: uuid.UUID | None, note: str) -> None:
+    """Have the agent tell the customer something, in their language, in their chat."""
+    from app.modules.conversations import tasks
+
+    await tasks.inform_customer(conversation_id, note)
+
+
+async def after_payment(result: PaymentResult | PaymentFailed) -> None:
+    """Tell the customer (and, if needed, the merchant) what a payment event means."""
+    from app.modules.conversations import tasks
+
+    await tasks.after_payment(result)
+
+
+async def after_expiry(order: ExpiredOrder) -> None:
+    """Notify the customer in chat when their unpaid order hold expires."""
+    from app.modules.conversations import tasks
+
+    await tasks.after_expiry(order)

@@ -6,9 +6,9 @@ from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
 from app.modules.channels import service as channels
-from app.modules.channels.models import ChannelConnection
+from app.modules.channels.schemas import ChannelConnectionInfo
 from app.modules.merchants import service as merchants
-from app.modules.merchants.models import Merchant
+from app.modules.merchants.schemas import MerchantInfo
 from app.modules.shop_profile import service as shop_profile
 
 router = APIRouter(tags=["shop"])
@@ -71,7 +71,7 @@ async def save_shop_profile(shop: Shop, body: schemas.ShopProfileUpdate) -> sche
     )
 
 
-def channel_list(connections: list[ChannelConnection]) -> list[schemas.Channel]:
+def channel_list(connections: list[ChannelConnectionInfo]) -> list[schemas.Channel]:
     return [
         schemas.Channel(
             channel=connection.channel,
@@ -83,7 +83,7 @@ def channel_list(connections: list[ChannelConnection]) -> list[schemas.Channel]:
     ]
 
 
-def _merchant(merchant: Merchant) -> schemas.Merchant:
+def _merchant(merchant: MerchantInfo) -> schemas.Merchant:
     return schemas.Merchant(
         id=merchant.id,
         name=merchant.name,

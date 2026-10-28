@@ -26,7 +26,6 @@ from app.modules.orders.schemas import (
     Quote,
     QuoteLine,
 )
-from app.modules.payments.models import Payment
 
 
 class OrderProblem(ValueError):
@@ -267,6 +266,7 @@ async def record_payment(
     target_status = "paid"
     order.status = target_status
     order.payment_status = "paid"
+    order.amount_paid_minor = amount_minor
     order.paid_at = datetime.now(UTC)
     order.hold_expires_at = None
     _log(session, order, outcome, previous, target_status, actor)
@@ -324,38 +324,17 @@ async def mark_order_paid(
 ) -> PaymentResult:
     """Owner tap-to-confirm when receiving a UPI payment alert on their phone or counter checkout.
 
-    Transitions order from awaiting_payment to paid, records a Payment ledger entry,
-    and confirms held stock as sold.
+    Delegates to payments.mark_order_paid so the payments->orders relationship remains one-way.
     """
-    order = await session.scalar(
-        select(Order)
-        .where(Order.id == order_id, Order.merchant_id == merchant_id)
-        .with_for_update()
-    )
-    if order is None:
-        raise LookupError(f"No order {order_id}")
+    from app.modules.payments import service as payments
 
-    provider = "upi_manual" if method == "upi" else ("cash" if method == "cash" else "manual")
-    payment = Payment(
-        merchant_id=order.merchant_id,
-        order_id=order.id,
-        provider=provider,
-        method=method,
-        kind="full",
-        provider_order_id=reference_id or f"MANUAL-{order.number}",
-        status="completed",
-        currency=order.currency,
-        amount_minor=order.total_minor,
-        paid_at=datetime.now(UTC),
-    )
-    session.add(payment)
-
-    return await record_payment(
+    return await payments.mark_order_paid(
         session,
         order_id,
-        amount_minor=order.total_minor,
-        currency=order.currency,
+        merchant_id=merchant_id,
         actor=actor,
+        method=method,
+        reference_id=reference_id,
     )
 
 
@@ -636,9 +615,56 @@ async def list_orders(
             customer_note=order.customer_note,
             scheduled_date=order.scheduled_date,
             scheduled_window=order.scheduled_window,
+            merchant_id=order.merchant_id,
         )
         for order in found
     ]
+
+
+async def get_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    merchant_id: uuid.UUID | None = None,
+) -> OrderSummary | None:
+    """Fetch a single order summary with its items, optionally scoped to a merchant."""
+    query = select(Order).where(Order.id == order_id)
+    if merchant_id is not None:
+        query = query.where(Order.merchant_id == merchant_id)
+    order = await session.scalar(query)
+    if order is None:
+        return None
+    items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+    return OrderSummary(
+        id=order.id,
+        number=order.number,
+        status=order.status,
+        currency=order.currency,
+        total_minor=order.total_minor,
+        customer_id=order.customer_id,
+        conversation_id=order.conversation_id,
+        created_at=order.created_at,
+        paid_at=order.paid_at,
+        hold_expires_at=order.hold_expires_at,
+        items=tuple(
+            OrderItemSummary(
+                product=item.product_name or "",
+                variant=item.variant_name,
+                quantity=item.quantity,
+                unit_price_minor=item.unit_price_minor,
+            )
+            for item in items
+        ),
+        order_number=order.order_number,
+        payment_status=order.payment_status,
+        fulfilment_status=order.fulfilment_status,
+        fulfilment_method=order.fulfilment_method,
+        channel=order.channel,
+        delivery_address=order.delivery_address,
+        customer_note=order.customer_note,
+        scheduled_date=order.scheduled_date,
+        scheduled_window=order.scheduled_window,
+        merchant_id=order.merchant_id,
+    )
 
 
 async def day_summary(

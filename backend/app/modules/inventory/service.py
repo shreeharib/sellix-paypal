@@ -9,13 +9,12 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import ColumnElement, func, select, text, update
+from sqlalchemy import ColumnElement, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog import service as catalog
-from app.modules.catalog.models import Product, ProductVariant
 from app.modules.inventory.models import DailyStock, StockHold
 from app.modules.inventory.schemas import (
     LedgerRow,
@@ -34,69 +33,61 @@ async def day_ledger(
     session: AsyncSession, merchant_id: uuid.UUID, business_date: date
 ) -> list[LedgerRow]:
     """Every variant's stock for the day: opening, restocked, held, sold, counter, left."""
-    rows = await session.execute(
-        select(
-            DailyStock,
-            Product.name,
-            ProductVariant.name,
-            ProductVariant.price_minor,
-            ProductVariant.currency,
+    stocks = {
+        s.variant_id: s
+        for s in await session.scalars(
+            select(DailyStock).where(
+                DailyStock.merchant_id == merchant_id,
+                DailyStock.business_date == business_date,
+            )
         )
-        .join(ProductVariant, ProductVariant.id == DailyStock.variant_id)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(DailyStock.merchant_id == merchant_id, DailyStock.business_date == business_date)
-        .order_by(Product.name, ProductVariant.name)
+    }
+    variants = await catalog.list_variants_by_ids(
+        session, merchant_id, stocks.keys(), active_only=False
     )
     return [
         LedgerRow(
-            variant_id=stock.variant_id,
-            product=product,
-            variant=variant,
-            price_minor=price,
-            currency=currency,
-            opening=stock.opening,
-            restocked=stock.restocked,
-            held=stock.held,
-            sold=stock.sold,
-            counter_sales=stock.counter_sales,
-            available=stock.available,
+            variant_id=v.variant_id,
+            product=v.product_name,
+            variant=v.variant_name,
+            price_minor=v.price_minor,
+            currency=v.currency,
+            opening=stocks[v.variant_id].opening,
+            restocked=stocks[v.variant_id].restocked,
+            held=stocks[v.variant_id].held,
+            sold=stocks[v.variant_id].sold,
+            counter_sales=stocks[v.variant_id].counter_sales,
+            available=stocks[v.variant_id].available,
         )
-        for stock, product, variant, price, currency in rows
+        for v in variants
     ]
 
 
 async def today_stock(
     session: AsyncSession, merchant_id: uuid.UUID, business_date: date
 ) -> list[StockItem]:
-    rows = await session.execute(
-        select(
-            Product.name,
-            ProductVariant.name,
-            ProductVariant.price_minor,
-            ProductVariant.currency,
-            DailyStock.available,
-            ProductVariant.id,
+    stocks = {
+        s.variant_id: s
+        for s in await session.scalars(
+            select(DailyStock).where(
+                DailyStock.merchant_id == merchant_id,
+                DailyStock.business_date == business_date,
+            )
         )
-        .join(ProductVariant, ProductVariant.id == DailyStock.variant_id)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(
-            DailyStock.merchant_id == merchant_id,
-            DailyStock.business_date == business_date,
-            Product.is_active,
-            ProductVariant.is_active,
-        )
-        .order_by(Product.name, ProductVariant.name)
+    }
+    variants = await catalog.list_variants_by_ids(
+        session, merchant_id, stocks.keys(), active_only=True
     )
     return [
         StockItem(
-            product=product,
-            variant=variant,
-            price_minor=price,
-            currency=currency,
-            available=available,
-            variant_id=variant_id,
+            product=v.product_name,
+            variant=v.variant_name,
+            price_minor=v.price_minor,
+            currency=v.currency,
+            available=stocks[v.variant_id].available,
+            variant_id=v.variant_id,
         )
-        for product, variant, price, currency, available, variant_id in rows
+        for v in variants
     ]
 
 
@@ -621,44 +612,31 @@ async def get_yesterday_leftovers(
 ) -> list[YesterdayLeftover]:
     """Retrieve unsold stock from yesterday (available > 0) with stock_mode and shelf life."""
     yesterday = business_date - timedelta(days=1)
-    rows = await session.execute(
-        select(
-            DailyStock.variant_id,
-            Product.name,
-            ProductVariant.name,
-            ProductVariant.price_minor,
-            ProductVariant.currency,
-            DailyStock.available,
-            func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily").label(
-                "effective_mode"
-            ),
-            func.coalesce(ProductVariant.shelf_life_days, Product.shelf_life_days).label(
-                "effective_shelf_life"
-            ),
+    stocks = {
+        s.variant_id: s
+        for s in await session.scalars(
+            select(DailyStock).where(
+                DailyStock.merchant_id == merchant_id,
+                DailyStock.business_date == yesterday,
+                DailyStock.available > 0,
+            )
         )
-        .join(ProductVariant, ProductVariant.id == DailyStock.variant_id)
-        .join(Product, Product.id == ProductVariant.product_id)
-        .where(
-            DailyStock.merchant_id == merchant_id,
-            DailyStock.business_date == yesterday,
-            DailyStock.available > 0,
-            Product.is_active.is_(True),
-            ProductVariant.is_active.is_(True),
-        )
-        .order_by(Product.name, ProductVariant.name)
+    }
+    variants = await catalog.list_variants_by_ids(
+        session, merchant_id, stocks.keys(), active_only=True
     )
     return [
         YesterdayLeftover(
-            variant_id=row[0],
-            product=row[1],
-            variant=row[2],
-            price_minor=row[3],
-            currency=row[4],
-            leftover_quantity=row[5],
-            stock_mode=row[6],
-            shelf_life_days=row[7],
+            variant_id=v.variant_id,
+            product=v.product_name,
+            variant=v.variant_name,
+            price_minor=v.price_minor,
+            currency=v.currency,
+            leftover_quantity=stocks[v.variant_id].available,
+            stock_mode=v.effective_stock_mode,
+            shelf_life_days=v.effective_shelf_life_days,
         )
-        for row in rows
+        for v in variants
     ]
 
 

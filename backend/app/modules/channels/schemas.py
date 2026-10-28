@@ -1,4 +1,21 @@
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True)
+class ChannelConnectionInfo:
+    id: uuid.UUID
+    merchant_id: uuid.UUID
+    channel: str
+    external_account_id: str
+    username: str | None
+    status: str
+    token_expires_at: datetime | None
+    token_refreshed_at: datetime | None
+    scopes: tuple[str, ...]
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True)

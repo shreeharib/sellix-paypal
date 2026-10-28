@@ -4,9 +4,23 @@ import uuid
 from datetime import date, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.merchants.models import Merchant
+from app.modules.merchants.schemas import MerchantInfo
+
+__all__ = [
+    "MerchantInfo",
+    "MerchantNotFound",
+    "business_date",
+    "create_merchant",
+    "find_merchant",
+    "get_merchant",
+    "list_enabled_merchant_ids",
+    "set_agent_enabled",
+    "update_settings",
+]
 
 
 class MerchantNotFound(LookupError):
@@ -15,7 +29,7 @@ class MerchantNotFound(LookupError):
 
 async def create_merchant(
     session: AsyncSession, *, name: str, timezone: str = "Asia/Kolkata"
-) -> Merchant:
+) -> MerchantInfo:
     try:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
@@ -23,22 +37,30 @@ async def create_merchant(
     merchant = Merchant(name=name.strip(), timezone=timezone)
     session.add(merchant)
     await session.flush()
-    return merchant
+    return _to_info(merchant)
 
 
-async def get_merchant(session: AsyncSession, merchant_id: uuid.UUID) -> Merchant:
+async def find_merchant(session: AsyncSession, merchant_id: uuid.UUID) -> MerchantInfo | None:
     merchant = await session.get(Merchant, merchant_id)
-    if merchant is None:
-        raise MerchantNotFound(f"No merchant {merchant_id}")
-    return merchant
+    return _to_info(merchant) if merchant is not None else None
+
+
+async def get_merchant(session: AsyncSession, merchant_id: uuid.UUID) -> MerchantInfo:
+    merchant = await _get_model(session, merchant_id)
+    return _to_info(merchant)
+
+
+async def list_enabled_merchant_ids(session: AsyncSession) -> list[uuid.UUID]:
+    """Return IDs of merchants whose AI agent is currently enabled."""
+    return list(await session.scalars(select(Merchant.id).where(Merchant.agent_enabled)))
 
 
 async def set_agent_enabled(session: AsyncSession, merchant_id: uuid.UUID, enabled: bool) -> None:
-    merchant = await get_merchant(session, merchant_id)
+    merchant = await _get_model(session, merchant_id)
     merchant.agent_enabled = enabled
 
 
-def business_date(merchant: Merchant, at: datetime | None = None) -> date:
+def business_date(merchant: MerchantInfo | Merchant, at: datetime | None = None) -> date:
     """The merchant's local calendar date (closing-time cut-off comes with the stock ledger)."""
     moment = at or datetime.now(tz=ZoneInfo("UTC"))
     return moment.astimezone(ZoneInfo(merchant.timezone)).date()
@@ -51,8 +73,8 @@ async def update_settings(
     name: str | None = None,
     timezone: str | None = None,
     agent_enabled: bool | None = None,
-) -> Merchant:
-    merchant = await get_merchant(session, merchant_id)
+) -> MerchantInfo:
+    merchant = await _get_model(session, merchant_id)
     if name is not None:
         if not name.strip():
             raise ValueError("The shop name can't be empty")
@@ -65,4 +87,22 @@ async def update_settings(
         merchant.timezone = timezone
     if agent_enabled is not None:
         merchant.agent_enabled = agent_enabled
+    return _to_info(merchant)
+
+
+async def _get_model(session: AsyncSession, merchant_id: uuid.UUID) -> Merchant:
+    merchant = await session.get(Merchant, merchant_id)
+    if merchant is None:
+        raise MerchantNotFound(f"No merchant {merchant_id}")
     return merchant
+
+
+def _to_info(merchant: Merchant) -> MerchantInfo:
+    return MerchantInfo(
+        id=merchant.id,
+        name=merchant.name,
+        timezone=merchant.timezone,
+        agent_enabled=merchant.agent_enabled,
+        created_at=merchant.created_at,
+        updated_at=merchant.updated_at,
+    )

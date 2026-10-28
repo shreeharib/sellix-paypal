@@ -4,20 +4,15 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
-from app.modules.conversations.models import Customer
-from app.modules.conversations.tasks import after_payment
-from app.modules.merchants import service as merchants
+from app.modules.conversations import service as conversations
 from app.modules.orders import service as orders
-from app.modules.orders.models import Order, OrderItem
-from app.modules.orders.schemas import PlacedOrder
+from app.modules.orders.schemas import OrderSummary
 from app.modules.payments import service as payments
-from app.modules.shop_profile import service as shop_profile
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -52,34 +47,7 @@ async def list_orders(
             payment_statuses=tuple(payment_status) if payment_status else None,
             limit=limit,
         )
-    return [
-        schemas.Order(
-            id=order.id,
-            number=order.number,
-            status=order.status,
-            payment_status=order.payment_status,
-            fulfilment_status=order.fulfilment_status,
-            fulfilment_method=order.fulfilment_method,
-            channel=order.channel,
-            currency=order.currency,
-            total_minor=order.total_minor,
-            delivery_address=order.delivery_address,
-            customer_note=order.customer_note,
-            conversation_id=order.conversation_id,
-            created_at=order.created_at,
-            paid_at=order.paid_at,
-            hold_expires_at=order.hold_expires_at,
-            items=[schemas.OrderItem(**vars(item)) for item in order.items],
-            order_number=order.order_number,
-            fulfilment=order.fulfilment,
-            delivery_type=order.delivery_type,
-            source_channel=order.source_channel,
-            total_amount_minor=order.total_amount_minor,
-            needed_by=order.needed_by,
-            notes=order.notes,
-        )
-        for order in found
-    ]
+    return [_to_order_schema(order) for order in found]
 
 
 class RefundRequest(schemas.BaseModel):
@@ -136,64 +104,30 @@ async def create_order_invoice(
     payload: CreateInvoiceRequest | None = None,
 ) -> CreateInvoiceResponse:
     """Generate and send a PayPal invoice for an order, returning the invoice payment link."""
-    async with session_scope() as session:
-        order = await session.scalar(
-            select(Order).where(Order.id == order_id, Order.merchant_id == shop.merchant_id)
-        )
-        if order is None:
-            raise HTTPException(status_code=404, detail="Order not found")
-        if order.status in ("paid", "completed", "refunded"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot generate invoice for order with status '{order.status}'",
-            )
-
-        merchant = await merchants.get_merchant(session, shop.merchant_id)
-        shop_name = merchant.name if merchant else "Sellix Shop"
-
-        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
-        item_dicts = [
-            {
-                "name": (
-                    f"{item.product_name} ({item.variant_name})"
-                    if item.variant_name
-                    else item.product_name
-                ),
-                "unit_price_minor": item.unit_price_minor,
-                "quantity": item.quantity,
-            }
-            for item in items
-        ]
-
-        customer = await session.get(Customer, order.customer_id)
-        cust_name = (
-            payload.customer_name
-            if (payload and payload.customer_name)
-            else (customer.display_name if customer else None)
-        )
-        cust_email = payload.customer_email if payload else None
-
-        placed = PlacedOrder(
-            order_id=order.id,
-            number=order.number,
-            currency=order.currency,
-            total_minor=order.total_minor,
-            hold_minutes=15,
-        )
+    cust_name = payload.customer_name if payload else None
+    cust_email = payload.customer_email if payload else None
+    if not cust_name:
+        async with session_scope() as session:
+            order = await orders.get_order(session, order_id, shop.merchant_id)
+            if order is not None:
+                cust_name = await conversations.get_customer_display_name(
+                    session, order.customer_id
+                )
 
     try:
-        created = await payments.create_invoice_checkout(
-            placed,
-            shop_name=shop_name,
+        created = await payments.create_order_invoice(
+            order_id,
+            merchant_id=shop.merchant_id,
             customer_name=cust_name,
             customer_email=cust_email,
-            items=item_dicts,
         )
-    except payments.PaymentUnavailable as exc:
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Order not found") from exc
+    except (ValueError, payments.PaymentUnavailable) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return CreateInvoiceResponse(
-        order_id=str(order.id),
+        order_id=str(order_id),
         invoice_id=created.invoice_id,
         payer_view_url=created.payer_view_url,
     )
@@ -210,7 +144,7 @@ async def mark_order_paid(
     ref_id = payload.reference_id if payload else None
     try:
         async with session_scope() as session:
-            result = await orders.mark_order_paid(
+            result = await payments.mark_order_paid(
                 session,
                 order_id,
                 merchant_id=shop.merchant_id,
@@ -225,7 +159,7 @@ async def mark_order_paid(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if result.outcome in ("paid", "paid_stock_short"):
-        await after_payment(result)
+        await conversations.after_payment(result)
     return order_res
 
 
@@ -269,53 +203,20 @@ async def cancel_order(
 @router.get("/{order_id}/payment-link", response_model=schemas.PaymentLinkResponse)
 async def get_payment_link(shop: Shop, order_id: uuid.UUID) -> schemas.PaymentLinkResponse:
     """Get the payment link for an order: dynamic UPI link for INR, PayPal for cross-border."""
-    async with session_scope() as session:
-        order = await session.scalar(
-            select(Order).where(Order.id == order_id, Order.merchant_id == shop.merchant_id)
-        )
-        if order is None:
-            raise HTTPException(status_code=404, detail="Order not found")
-
-        merchant = await merchants.get_merchant(session, shop.merchant_id)
-        shop_name = merchant.name if merchant else "Sellix Shop"
-
-        placed = PlacedOrder(
-            order_id=order.id,
-            number=order.number,
-            currency=order.currency,
-            total_minor=order.total_minor,
-            hold_minutes=15,
-        )
-
-        if order.currency == "INR":
-            onboarding = await shop_profile.get_onboarding(session, shop.merchant_id)
-            vpa = (
-                onboarding.answers.get("upi_id") if onboarding and onboarding.answers else None
-            ) or f"{shop_name.lower().replace(' ', '')}@upi"
-            try:
-                link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=shop_name)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            method: Literal["upi", "paypal"] = "upi"
-        elif payments.accepts(order.currency):
-            try:
-                link = await payments.create_checkout(placed, shop_name=shop_name)
-                method = "paypal"
-            except payments.PaymentUnavailable as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No online payment method available for currency {order.currency}",
-            )
+    try:
+        outcome = await payments.get_order_payment_link(order_id, merchant_id=shop.merchant_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Order not found") from exc
+    except (ValueError, payments.PaymentUnavailable) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return schemas.PaymentLinkResponse(
-        order_id=order.id,
-        order_number=order.number,
-        payment_method=method,
-        payment_link=link,
-        currency=order.currency,
-        total_minor=order.total_minor,
+        order_id=outcome.order_id,
+        order_number=outcome.order_number,
+        payment_method=outcome.payment_method,
+        payment_link=outcome.payment_link,
+        currency=outcome.currency,
+        total_minor=outcome.total_minor,
     )
 
 
@@ -366,12 +267,13 @@ async def get_order_timeline(shop: Shop, order_id: uuid.UUID) -> list[schemas.Or
 async def _order_response(
     session: AsyncSession, order_id: uuid.UUID, merchant_id: uuid.UUID
 ) -> schemas.Order:
-    order = await session.scalar(
-        select(Order).where(Order.id == order_id, Order.merchant_id == merchant_id)
-    )
+    order = await orders.get_order(session, order_id, merchant_id)
     if order is None:
         raise HTTPException(status_code=404, detail="Order not found")
-    items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+    return _to_order_schema(order)
+
+
+def _to_order_schema(order: OrderSummary) -> schemas.Order:
     return schemas.Order(
         id=order.id,
         number=order.number,
@@ -388,15 +290,7 @@ async def _order_response(
         created_at=order.created_at,
         paid_at=order.paid_at,
         hold_expires_at=order.hold_expires_at,
-        items=[
-            schemas.OrderItem(
-                product=item.product_name or "",
-                variant=item.variant_label,
-                quantity=item.quantity,
-                unit_price_minor=item.unit_price_minor,
-            )
-            for item in items
-        ],
+        items=[schemas.OrderItem(**vars(item)) for item in order.items],
         order_number=order.order_number,
         fulfilment=order.fulfilment,
         delivery_type=order.delivery_type,

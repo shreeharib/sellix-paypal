@@ -4,7 +4,7 @@ import structlog
 
 from app.core.db import session_scope
 from app.core.jobs import jobs
-from app.modules.conversations.tasks import after_expiry
+from app.modules.conversations import service as conversations
 from app.modules.orders import service
 
 log = structlog.get_logger()
@@ -17,6 +17,6 @@ async def expire_unpaid_orders(timestamp: int) -> None:
     async with session_scope() as session:
         expired = await service.expire_due(session)
     for order in expired:
-        await after_expiry(order)
+        await conversations.after_expiry(order)
     if expired:
         log.info("orders.expired", count=len(expired))
