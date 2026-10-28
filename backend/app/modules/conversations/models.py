@@ -18,11 +18,13 @@ class Customer(Base):
     merchant_id: Mapped[uuid.UUID]
     channel: Mapped[str]
     external_id: Mapped[str]
-    display_name: Mapped[str | None] = None
-    primary_name: Mapped[str | None] = None
-    primary_phone: Mapped[str | None] = None
-    primary_email: Mapped[str | None] = None
-    default_address: Mapped[dict[str, Any] | None] = mapped_column(JSONB, server_default=None)
+    display_name: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    primary_name: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    primary_phone: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    primary_email: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    default_address: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
     lifetime_orders_count: Mapped[int] = mapped_column(server_default=text("0"))
     lifetime_spent_minor: Mapped[int] = mapped_column(server_default=text("0"))
     custom_attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")

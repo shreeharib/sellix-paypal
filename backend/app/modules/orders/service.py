@@ -419,7 +419,8 @@ async def complete_order(
     valid_pre_complete = ("paid", "confirmed", "ready", "delivered")
     if order.status not in valid_pre_complete:
         raise ValueError(
-            f"Cannot complete order with status '{order.status}'. Order must be paid first (status in {valid_pre_complete})."
+            f"Cannot complete order with status '{order.status}'."
+            f" Order must be paid first (status in {valid_pre_complete})."
         )
 
     previous = order.status
