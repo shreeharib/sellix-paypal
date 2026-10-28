@@ -4,6 +4,7 @@ An order counts as paid only when PayPal confirms the capture: never from a scre
 and never from the buyer merely returning to our page.
 """
 
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -132,7 +133,7 @@ async def create_invoice_checkout(
     try:
         invoice_id = await paypal.create_invoice(
             reference_id=str(placed.order_id),
-            invoice_number=f"INV-{placed.number}",
+            invoice_number=f"INV-{placed.number}-{int(time.time()) % 100000}",
             description=f"{shop_name} order #{placed.number}",
             items=items or [],
             total_minor=placed.total_minor,
@@ -221,6 +222,7 @@ async def record_invoice_payment(
     invoice_id: str,
     paid_amount_minor: int,
     currency: str,
+    provider_capture_id: str | None = None,
 ) -> PaymentResult | None:
     async with session_scope() as session:
         payment = await session.scalar(
@@ -232,6 +234,8 @@ async def record_invoice_payment(
             log.warning("payments.unknown_paypal_invoice", invoice_id=invoice_id)
             return None
         payment.status = "completed"
+        if provider_capture_id:
+            payment.provider_capture_id = provider_capture_id
         return await orders.record_payment(
             session,
             payment.order_id,
@@ -275,8 +279,8 @@ async def refund_order(
     return RefundOutcome(
         order_id=order_id,
         refund_id=result.refund_id,
-        amount_minor=result.amount_minor,
-        currency=result.currency,
+        amount_minor=result.amount_minor or payment.amount_minor,
+        currency=result.currency or payment.currency,
         status=result.status,
     )
 
@@ -295,13 +299,24 @@ async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFai
             return None
         return await record_capture(str(paypal_order_id), paypal.capture_from_resource(resource))
     if event_type == "INVOICING.INVOICE.PAID":
-        invoice_id = str(resource.get("id", ""))
-        amount_data = resource.get("amount") or (
-            resource.get("payments", [{}])[-1].get("amount") if resource.get("payments") else {}
+        inv = resource.get("invoice") or resource
+        invoice_id = str(inv.get("id", ""))
+        amount_data = (
+            inv.get("amount")
+            or inv.get("payments", {}).get("paid_amount")
+            or (
+                inv.get("payments", [{}])[-1].get("amount")
+                if isinstance(inv.get("payments"), list) and inv.get("payments")
+                else {}
+            )
         )
         paid_amount_minor = paypal.to_minor(str(amount_data.get("value", "0")))
         currency = str(amount_data.get("currency_code", ""))
-        return await record_invoice_payment(invoice_id, paid_amount_minor, currency)
+        txns = inv.get("payments", {}).get("transactions") or []
+        capture_id = str(txns[0].get("payment_id", "")) if txns else None
+        return await record_invoice_payment(
+            invoice_id, paid_amount_minor, currency, provider_capture_id=capture_id
+        )
     log.info("payments.webhook_ignored", event_type=event_type)
     return None
 

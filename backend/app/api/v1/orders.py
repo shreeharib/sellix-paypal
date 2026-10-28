@@ -15,7 +15,8 @@ from app.modules.conversations.tasks import after_payment
 from app.modules.merchants import service as merchants
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order, OrderItem
-from app.modules.orders.schemas import PlacedOrder
+from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder
+from app.modules.orders.service import OrderProblem
 from app.modules.payments import service as payments
 from app.modules.shop_profile import service as shop_profile
 
@@ -80,6 +81,90 @@ async def list_orders(
         )
         for order in found
     ]
+
+
+class CreateOrderItemRequest(schemas.BaseModel):
+    product: str
+    variant: str | None = None
+    quantity: int = 1
+
+
+class CreateOrderRequest(schemas.BaseModel):
+    customer_name: str = "Test Customer"
+    customer_email: str | None = None
+    items: list[CreateOrderItemRequest]
+    fulfilment: Literal["pickup", "delivery"] = "pickup"
+    delivery_address: str | None = None
+    needed_by: str | None = None
+    notes: str | None = None
+
+
+class CreateOrderResponse(schemas.BaseModel):
+    id: str
+    number: int
+    status: str
+    currency: str
+    total_minor: int
+    hold_minutes: int
+
+
+@router.post("", response_model=CreateOrderResponse)
+async def create_order(shop: Shop, payload: CreateOrderRequest) -> CreateOrderResponse:
+    """Manually place an order, holding inventory stock and placing the order
+    in awaiting_payment state."""
+    async with session_scope() as session:
+        customer = await session.scalar(
+            select(Customer).where(Customer.merchant_id == shop.merchant_id).limit(1)
+        )
+        if customer is None:
+            customer = Customer(
+                merchant_id=shop.merchant_id,
+                channel="manual",
+                external_id=f"cust-{uuid.uuid4().hex[:8]}",
+                display_name=payload.customer_name,
+            )
+            session.add(customer)
+            await session.flush()
+
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        b_date = merchants.business_date(merchant)
+
+        order_request = OrderRequest(
+            lines=tuple(
+                OrderLineRequest(
+                    product=item.product,
+                    variant=item.variant,
+                    quantity=item.quantity,
+                )
+                for item in payload.items
+            ),
+            fulfilment=payload.fulfilment,
+            delivery_address=payload.delivery_address,
+            needed_by=payload.needed_by,
+            notes=payload.notes,
+        )
+
+        try:
+            placed = await orders.place_order(
+                session,
+                merchant_id=shop.merchant_id,
+                customer_id=customer.id,
+                conversation_id=None,
+                business_date=b_date,
+                request=order_request,
+                hold_minutes=15,
+            )
+        except OrderProblem as exc:
+            raise HTTPException(status_code=400, detail=", ".join(exc.problems)) from exc
+
+    return CreateOrderResponse(
+        id=str(placed.order_id),
+        number=placed.number,
+        status="awaiting_payment",
+        currency=placed.currency,
+        total_minor=placed.total_minor,
+        hold_minutes=placed.hold_minutes,
+    )
 
 
 class RefundRequest(schemas.BaseModel):
