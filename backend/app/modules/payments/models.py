@@ -18,7 +18,8 @@ class Payment(Base):
     merchant_id: Mapped[uuid.UUID]
     order_id: Mapped[uuid.UUID]
     provider: Mapped[str]  # paypal | razorpay | cashfree | upi_manual | manual | cash | stripe
-    method: Mapped[str | None] = mapped_column(nullable=True, default="upi")  # upi | card | paypal_wallet | cash
+    # upi | card | paypal_wallet | cash
+    method: Mapped[str | None] = mapped_column(nullable=True, default="upi")
     kind: Mapped[str] = mapped_column(server_default=text("'full'"))  # full | deposit | balance
     provider_order_id: Mapped[str | None] = mapped_column(nullable=True, default=None)
     provider_capture_id: Mapped[str | None] = mapped_column(nullable=True, default=None)

@@ -205,7 +205,7 @@ async def mark_order_paid(
     order_id: uuid.UUID,
     payload: schemas.MarkPaidRequest | None = None,
 ) -> schemas.Order:
-    """Owner tap-to-confirm when receiving a UPI payment notification on their phone or counter cash."""
+    """Owner tap-to-confirm when receiving a UPI payment alert or counter cash."""
     method = payload.method if payload else "upi"
     ref_id = payload.reference_id if payload else None
     try:

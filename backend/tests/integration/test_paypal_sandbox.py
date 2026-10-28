@@ -159,6 +159,7 @@ async def test_placed_order_gets_a_real_sandbox_checkout(
         payment = await session.scalar(select(Payment).where(Payment.order_id == placed.order_id))
     assert "sandbox.paypal.com" in link
     assert payment is not None
+    assert payment.provider_order_id is not None
     assert (payment.status, payment.amount_minor, payment.currency) == ("created", 1250, "USD")
     assert payment.approve_url == link
     # Not approved by a buyer yet: capturing does nothing, the order still awaits payment.

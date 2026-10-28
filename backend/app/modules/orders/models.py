@@ -20,16 +20,16 @@ class Order(Base):
     merchant_id: Mapped[uuid.UUID]
     customer_id: Mapped[uuid.UUID]
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, default=None)
-    
+
     # Omnichannel Origin & Actor
     channel: Mapped[str] = mapped_column(server_default=text("'instagram'"))
     placed_by: Mapped[str] = mapped_column(server_default=text("'customer'"))
-    
+
     # Orthogonal Triple Status
     status: Mapped[str]
     payment_status: Mapped[str] = mapped_column(server_default=text("'unpaid'"))
     fulfilment_status: Mapped[str] = mapped_column(server_default=text("'unfulfilled'"))
-    
+
     # Logistics Handover (Canonical fulfilment_method)
     fulfilment_method: Mapped[str | None] = mapped_column(
         nullable=True, server_default=text("'pickup'")
@@ -39,7 +39,7 @@ class Order(Base):
     scheduled_date: Mapped[date | None] = mapped_column(nullable=True, default=None)
     scheduled_window: Mapped[str | None] = mapped_column(nullable=True, default=None)
     customer_note: Mapped[str | None] = mapped_column(nullable=True, default=None)
-    
+
     # Financials (All in integer minor units)
     business_date: Mapped[date]
     currency: Mapped[str]
@@ -51,7 +51,7 @@ class Order(Base):
     amount_paid_minor: Mapped[int] = mapped_column(server_default=text("0"))
     deposit_required_minor: Mapped[int] = mapped_column(server_default=text("0"))
     total_cost_minor: Mapped[int] = mapped_column(server_default=text("0"))
-    
+
     # Lifecycle & Timestamps
     hold_expires_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     cancelled_reason: Mapped[str | None] = mapped_column(nullable=True, default=None)

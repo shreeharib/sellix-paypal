@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
 from app.modules.orders.models import Order, OrderEvent, OrderItem, OrderTimeline, Refund
-from app.modules.payments.models import Payment
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
@@ -27,6 +26,7 @@ from app.modules.orders.schemas import (
     Quote,
     QuoteLine,
 )
+from app.modules.payments.models import Payment
 
 
 class OrderProblem(ValueError):
@@ -122,7 +122,11 @@ async def place_order(
         raise OrderProblem(offer.problems or ("The order has no items",))
     order_id = uuid.uuid4()
     hold_expires = datetime.now(UTC) + timedelta(minutes=hold_minutes)
-    fulfilment_method = getattr(request, "fulfilment_method", None) or getattr(request, "fulfilment", None) or "pickup"
+    fulfilment_method = (
+        getattr(request, "fulfilment_method", None)
+        or getattr(request, "fulfilment", None)
+        or "pickup"
+    )
     customer_note = getattr(request, "customer_note", None) or getattr(request, "notes", None)
     channel = getattr(request, "channel", "instagram")
     placed_by = getattr(request, "placed_by", "customer")
@@ -320,7 +324,8 @@ async def mark_order_paid(
 ) -> PaymentResult:
     """Owner tap-to-confirm when receiving a UPI payment alert on their phone or counter checkout.
 
-    Transitions order from awaiting_payment to paid, records a Payment ledger entry, and confirms held stock as sold.
+    Transitions order from awaiting_payment to paid, records a Payment ledger entry,
+    and confirms held stock as sold.
     """
     order = await session.scalar(
         select(Order)
