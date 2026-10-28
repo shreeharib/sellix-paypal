@@ -41,3 +41,7 @@ paypal-certificate*
 *.pem
 *.p12
 *.crt
+
+# Local design files: only the merchant UI mock-up goes to GitHub
+/frontend/*
+!/frontend/sellix-merchant-ui.html
