@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.escalations.models import Escalation
+from app.modules.escalations.schemas import EscalationItem
 
 __all__ = [
-    "Escalation",
+    "EscalationItem",
     "EscalationNotFound",
     "answer",
     "close",
@@ -28,7 +29,7 @@ async def open_escalation(
     conversation_id: uuid.UUID,
     question: str,
     trigger_message_id: uuid.UUID | None = None,
-) -> Escalation:
+) -> EscalationItem:
     escalation = Escalation(
         merchant_id=merchant_id,
         conversation_id=conversation_id,
@@ -45,7 +46,7 @@ async def open_escalation(
         conversation_id=str(conversation_id),
         question=escalation.question,
     )
-    return escalation
+    return _to_item(escalation)
 
 
 class EscalationNotFound(LookupError):
@@ -54,16 +55,17 @@ class EscalationNotFound(LookupError):
 
 async def list_escalations(
     session: AsyncSession, merchant_id: uuid.UUID, *, status: str | None = "open", limit: int = 100
-) -> list[Escalation]:
+) -> list[EscalationItem]:
     query = select(Escalation).where(Escalation.merchant_id == merchant_id)
     if status:
         query = query.where(Escalation.status == status)
-    return list(await session.scalars(query.order_by(Escalation.created_at.desc()).limit(limit)))
+    rows = await session.scalars(query.order_by(Escalation.created_at.desc()).limit(limit))
+    return [_to_item(e) for e in rows]
 
 
 async def answer(
     session: AsyncSession, merchant_id: uuid.UUID, escalation_id: uuid.UUID, text: str
-) -> Escalation:
+) -> EscalationItem:
     """Record the merchant's answer. The caller passes it on to the customer."""
     escalation = await _get(session, merchant_id, escalation_id)
     if escalation.status != "open":
@@ -73,16 +75,16 @@ async def answer(
     escalation.answer = text.strip()
     escalation.status = "answered"
     escalation.answered_at = datetime.now(UTC)
-    return escalation
+    return _to_item(escalation)
 
 
 async def close(
     session: AsyncSession, merchant_id: uuid.UUID, escalation_id: uuid.UUID
-) -> Escalation:
+) -> EscalationItem:
     """Dismiss a question without passing anything on (e.g. handled in the chat directly)."""
     escalation = await _get(session, merchant_id, escalation_id)
     escalation.status = "closed"
-    return escalation
+    return _to_item(escalation)
 
 
 async def _get(
@@ -96,3 +98,17 @@ async def _get(
     if escalation is None:
         raise EscalationNotFound(f"No question {escalation_id}")
     return escalation
+
+
+def _to_item(escalation: Escalation) -> EscalationItem:
+    return EscalationItem(
+        id=escalation.id,
+        merchant_id=escalation.merchant_id,
+        conversation_id=escalation.conversation_id,
+        trigger_message_id=escalation.trigger_message_id,
+        question=escalation.question,
+        status=escalation.status,
+        answer=escalation.answer,
+        created_at=escalation.created_at,
+        answered_at=escalation.answered_at,
+    )

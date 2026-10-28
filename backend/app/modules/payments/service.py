@@ -17,10 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
+from app.modules.merchants import service as merchants
 from app.modules.orders import service as orders
 from app.modules.orders.schemas import PaymentResult, PlacedOrder
 from app.modules.payments import paypal, upi
 from app.modules.payments.models import Payment
+from app.modules.shop_profile import service as shop_profile
 
 log = structlog.get_logger()
 
@@ -48,6 +50,16 @@ class RefundOutcome:
     amount_minor: int
     currency: str
     status: str
+
+
+@dataclass(frozen=True)
+class OrderPaymentLink:
+    order_id: uuid.UUID
+    order_number: int
+    payment_method: Literal["upi", "paypal"]
+    payment_link: str
+    currency: str
+    total_minor: int
 
 
 def configured() -> bool:
@@ -107,6 +119,7 @@ async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
                 merchant_id=order.merchant_id,
                 order_id=order.id,
                 provider="paypal",
+                method="paypal_wallet",
                 provider_order_id=created.paypal_order_id,
                 status="created",
                 currency=placed.currency,
@@ -144,6 +157,43 @@ def record_manual_payment(
         paid_at=datetime.now(UTC),
     )
     session.add(payment)
+
+
+async def mark_order_paid(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    actor: str = "merchant",
+    method: str = "upi",
+    reference_id: str | None = None,
+) -> PaymentResult:
+    """Confirm a manual UPI or counter cash payment and mark the order paid."""
+    order = await orders.get_order(session, order_id, merchant_id)
+    if order is None:
+        raise LookupError(f"No order {order_id}")
+    if order.status in ("cancelled", "expired"):
+        raise ValueError(f"Cannot mark order as paid when status is '{order.status}'")
+
+    if order.status not in ("paid", "completed", "refunded"):
+        record_manual_payment(
+            session,
+            merchant_id=merchant_id,
+            order_id=order.id,
+            order_number=order.number,
+            currency=order.currency,
+            amount_minor=order.total_minor,
+            method=method,
+            reference_id=reference_id,
+        )
+
+    return await orders.record_payment(
+        session,
+        order_id,
+        amount_minor=order.total_minor,
+        currency=order.currency,
+        actor=actor,
+    )
 
 
 async def create_invoice_checkout(
@@ -186,6 +236,7 @@ async def create_invoice_checkout(
                 merchant_id=order.merchant_id,
                 order_id=order.id,
                 provider="paypal",
+                method="paypal_wallet",
                 provider_order_id=invoice_id,
                 status="created",
                 currency=placed.currency,
@@ -195,6 +246,96 @@ async def create_invoice_checkout(
             .on_conflict_do_nothing(index_elements=[Payment.provider, Payment.provider_order_id])
         )
     return paypal.CreatedInvoice(invoice_id=invoice_id, payer_view_url=payer_view_url)
+
+
+async def create_order_invoice(
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+    customer_name: str | None = None,
+    customer_email: str | None = None,
+) -> paypal.CreatedInvoice:
+    """Validate order state, build line items, and create/send a PayPal invoice for an order."""
+    async with session_scope() as session:
+        order = await orders.get_order(session, order_id, merchant_id)
+        if order is None:
+            raise LookupError(f"No order {order_id}")
+        if order.status in ("paid", "completed", "refunded"):
+            raise ValueError(f"Cannot generate invoice for order with status '{order.status}'")
+
+        merchant = await merchants.find_merchant(session, merchant_id)
+        shop_name = merchant.name if merchant else "Sellix Shop"
+
+        item_dicts = [
+            {
+                "name": (f"{item.product} ({item.variant})" if item.variant else item.product),
+                "unit_price_minor": item.unit_price_minor,
+                "quantity": item.quantity,
+            }
+            for item in order.items
+        ]
+        placed = PlacedOrder(
+            order_id=order.id,
+            number=order.number,
+            currency=order.currency,
+            total_minor=order.total_minor,
+            hold_minutes=15,
+        )
+
+    return await create_invoice_checkout(
+        placed,
+        shop_name=shop_name,
+        customer_name=customer_name,
+        customer_email=customer_email,
+        items=item_dicts,
+    )
+
+
+async def get_order_payment_link(
+    order_id: uuid.UUID,
+    *,
+    merchant_id: uuid.UUID,
+) -> OrderPaymentLink:
+    """Resolve and create the payment link for an order (UPI for INR, PayPal otherwise)."""
+    async with session_scope() as session:
+        order = await orders.get_order(session, order_id, merchant_id)
+        if order is None:
+            raise LookupError(f"No order {order_id}")
+
+        merchant = await merchants.find_merchant(session, merchant_id)
+        shop_name = merchant.name if merchant else "Sellix Shop"
+
+        placed = PlacedOrder(
+            order_id=order.id,
+            number=order.number,
+            currency=order.currency,
+            total_minor=order.total_minor,
+            hold_minutes=15,
+        )
+
+        if order.currency == "INR":
+            onboarding = await shop_profile.get_onboarding(session, merchant_id)
+            vpa = (
+                onboarding.answers.get("upi_id") if onboarding and onboarding.answers else None
+            ) or f"{shop_name.lower().replace(' ', '')}@upi"
+            link = create_upi_checkout(placed, vpa=vpa, shop_name=shop_name)
+            method: Literal["upi", "paypal"] = "upi"
+        elif accepts(order.currency):
+            link = await create_checkout(placed, shop_name=shop_name)
+            method = "paypal"
+        else:
+            raise PaymentUnavailable(
+                f"No online payment method available for currency {order.currency}"
+            )
+
+    return OrderPaymentLink(
+        order_id=order.id,
+        order_number=order.number,
+        payment_method=method,
+        payment_link=link,
+        currency=order.currency,
+        total_minor=order.total_minor,
+    )
 
 
 async def capture(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
@@ -231,6 +372,7 @@ async def record_capture(
         if result.status == "COMPLETED":
             payment.status = "completed"
             payment.provider_capture_id = result.capture_id or None
+            payment.paid_at = datetime.now(UTC)
             return await orders.record_payment(
                 session,
                 payment.order_id,
@@ -263,6 +405,7 @@ async def record_invoice_payment(
             log.warning("payments.unknown_paypal_invoice", invoice_id=invoice_id)
             return None
         payment.status = "completed"
+        payment.paid_at = datetime.now(UTC)
         return await orders.record_payment(
             session,
             payment.order_id,

@@ -26,7 +26,6 @@ from app.modules.orders.schemas import (
     Quote,
     QuoteLine,
 )
-from app.modules.payments import service as payments
 
 
 class OrderProblem(ValueError):
@@ -267,6 +266,7 @@ async def record_payment(
     target_status = "paid"
     order.status = target_status
     order.payment_status = "paid"
+    order.amount_paid_minor = amount_minor
     order.paid_at = datetime.now(UTC)
     order.hold_expires_at = None
     _log(session, order, outcome, previous, target_status, actor)
@@ -324,34 +324,17 @@ async def mark_order_paid(
 ) -> PaymentResult:
     """Owner tap-to-confirm when receiving a UPI payment alert on their phone or counter checkout.
 
-    Transitions order from awaiting_payment to paid, records a Payment ledger entry,
-    and confirms held stock as sold.
+    Delegates to payments.mark_order_paid so the payments->orders relationship remains one-way.
     """
-    order = await session.scalar(
-        select(Order)
-        .where(Order.id == order_id, Order.merchant_id == merchant_id)
-        .with_for_update()
-    )
-    if order is None:
-        raise LookupError(f"No order {order_id}")
+    from app.modules.payments import service as payments
 
-    payments.record_manual_payment(
-        session,
-        merchant_id=order.merchant_id,
-        order_id=order.id,
-        order_number=order.number,
-        currency=order.currency,
-        amount_minor=order.total_minor,
-        method=method,
-        reference_id=reference_id,
-    )
-
-    return await record_payment(
+    return await payments.mark_order_paid(
         session,
         order_id,
-        amount_minor=order.total_minor,
-        currency=order.currency,
+        merchant_id=merchant_id,
         actor=actor,
+        method=method,
+        reference_id=reference_id,
     )
 
 

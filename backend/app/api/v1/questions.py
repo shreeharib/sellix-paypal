@@ -10,6 +10,7 @@ from app.api.v1.deps import Shop
 from app.core.db import session_scope
 from app.modules.conversations import service as conversations
 from app.modules.escalations import service as escalations
+from app.modules.escalations.schemas import EscalationItem
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -56,7 +57,7 @@ async def close_question(shop: Shop, question_id: uuid.UUID) -> schemas.Question
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-def _question(escalation: escalations.Escalation) -> schemas.Question:
+def _question(escalation: EscalationItem) -> schemas.Question:
     return schemas.Question(
         id=escalation.id,
         conversation_id=escalation.conversation_id,

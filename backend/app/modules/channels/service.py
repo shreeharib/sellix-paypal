@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crypto, signing
 from app.core.config import get_settings
 from app.modules.channels import instagram
-from app.modules.channels.models import ChannelConnection as ChannelConnection
-from app.modules.channels.schemas import IncomingMessage
+from app.modules.channels.models import ChannelConnection
+from app.modules.channels.schemas import ChannelConnectionInfo, IncomingMessage
 from app.modules.merchants import service as merchants
 
 log = structlog.get_logger()
@@ -36,7 +36,7 @@ class SendFailed(RuntimeError):
 
 @dataclass(frozen=True)
 class InstagramOAuthResult:
-    connection: ChannelConnection
+    connection: ChannelConnectionInfo
     account_id: str
     username: str
     is_login: bool  # an app login ("Continue with Instagram"), not an operator connect
@@ -58,14 +58,15 @@ def parse_webhook(payload: dict[str, Any]) -> list[IncomingMessage]:
 
 async def get_active_connection(
     session: AsyncSession, channel: str, external_account_id: str
-) -> ChannelConnection | None:
-    return await session.scalar(
+) -> ChannelConnectionInfo | None:
+    connection = await session.scalar(
         select(ChannelConnection).where(
             ChannelConnection.channel == channel,
             ChannelConnection.external_account_id == external_account_id,
             ChannelConnection.status == "active",
         )
     )
+    return _to_info(connection) if connection is not None else None
 
 
 async def get_send_credentials(session: AsyncSession, connection_id: uuid.UUID) -> SendCredentials:
@@ -246,7 +247,7 @@ async def complete_instagram_oauth(
     )
     is_login = purpose == _LOGIN_PURPOSE
     return InstagramOAuthResult(
-        connection=connection,
+        connection=_to_info(connection),
         account_id=account.account_id,
         username=account.username,
         is_login=is_login,
@@ -257,13 +258,28 @@ async def complete_instagram_oauth(
 
 async def list_connections(
     session: AsyncSession, merchant_id: uuid.UUID
-) -> list[ChannelConnection]:
-    return list(
-        await session.scalars(
-            select(ChannelConnection)
-            .where(ChannelConnection.merchant_id == merchant_id)
-            .order_by(ChannelConnection.created_at)
-        )
+) -> list[ChannelConnectionInfo]:
+    rows = await session.scalars(
+        select(ChannelConnection)
+        .where(ChannelConnection.merchant_id == merchant_id)
+        .order_by(ChannelConnection.created_at)
+    )
+    return [_to_info(c) for c in rows]
+
+
+def _to_info(connection: ChannelConnection) -> ChannelConnectionInfo:
+    return ChannelConnectionInfo(
+        id=connection.id,
+        merchant_id=connection.merchant_id,
+        channel=connection.channel,
+        external_account_id=connection.external_account_id,
+        username=connection.username,
+        status=connection.status,
+        token_expires_at=connection.token_expires_at,
+        token_refreshed_at=connection.token_refreshed_at,
+        scopes=tuple(connection.scopes or ()),
+        created_at=connection.created_at,
+        updated_at=connection.updated_at,
     )
 
 

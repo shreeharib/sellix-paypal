@@ -180,6 +180,9 @@ async def unanswered_conversations(
         .where(Message.created_at > now - max_age)
         .subquery()
     )
+    enabled_merchant_ids = await merchants.list_enabled_merchant_ids(session)
+    if not enabled_merchant_ids:
+        return []
     rows = await session.scalars(
         select(Conversation.id)
         .join(latest, latest.c.conversation_id == Conversation.id)
@@ -188,7 +191,7 @@ async def unanswered_conversations(
             latest.c.sender.in_(REPLY_SENDERS),
             latest.c.created_at < now - waiting_longer_than,
             Conversation.agent_active,
-            Conversation.merchant_id.in_(merchants.enabled_merchant_ids_select()),
+            Conversation.merchant_id.in_(enabled_merchant_ids),
         )
     )
     return list(rows)
