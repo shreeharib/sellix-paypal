@@ -83,7 +83,8 @@ class CreateOrderResponse(schemas.BaseModel):
 
 @router.post("", response_model=CreateOrderResponse)
 async def create_order(shop: Shop, payload: CreateOrderRequest) -> CreateOrderResponse:
-    """Manually place an order, holding inventory stock and placing the order in awaiting_payment state."""
+    """Manually place an order, holding inventory stock and placing the order
+    in awaiting_payment state."""
     async with session_scope() as session:
         customer = await session.scalar(
             select(Customer).where(Customer.merchant_id == shop.merchant_id).limit(1)

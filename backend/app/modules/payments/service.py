@@ -4,6 +4,7 @@ An order counts as paid only when PayPal confirms the capture: never from a scre
 and never from the buyer merely returning to our page.
 """
 
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -130,7 +131,6 @@ async def create_invoice_checkout(
         raise PaymentUnavailable(f"PayPal can't take payments in {placed.currency}")
 
     try:
-        import time
         invoice_id = await paypal.create_invoice(
             reference_id=str(placed.order_id),
             invoice_number=f"INV-{placed.number}-{int(time.time()) % 100000}",
@@ -304,7 +304,11 @@ async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFai
         amount_data = (
             inv.get("amount")
             or inv.get("payments", {}).get("paid_amount")
-            or (inv.get("payments", [{}])[-1].get("amount") if isinstance(inv.get("payments"), list) and inv.get("payments") else {})
+            or (
+                inv.get("payments", [{}])[-1].get("amount")
+                if isinstance(inv.get("payments"), list) and inv.get("payments")
+                else {}
+            )
         )
         paid_amount_minor = paypal.to_minor(str(amount_data.get("value", "0")))
         currency = str(amount_data.get("currency_code", ""))

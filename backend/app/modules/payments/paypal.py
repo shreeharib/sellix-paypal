@@ -365,7 +365,9 @@ async def _request(
     if response.is_error:
         details = body.get("details") or [{}]
         first_issue = details[0].get("issue") if isinstance(details, list) and details else None
-        first_desc = details[0].get("description") if isinstance(details, list) and details else None
+        first_desc = (
+            details[0].get("description") if isinstance(details, list) and details else None
+        )
         err_msg = str(body.get("message") or response.text[:300])
         if first_issue:
             err_msg += f" - {first_issue}: {first_desc or ''}"
