@@ -75,8 +75,8 @@
 - [x] **5.2 PayPal checkout and webhook** (C). Built (sandbox).
 - [x] **5.3 UPI payment request** (C + AI). For INR orders the agent sends the merchant's UPI ID and the exact amount; the order waits as "payment pending".
   Done when: a DM order shows the UPI message.
-- [x] **5.4 "Paid" button** (C + A). The merchant taps **Paid** in Orders: updates both `status = 'paid'` and `payment_status = 'paid'`, stock sold, customer gets a confirmation, database triggers fire.
-  Done when: a full UPI sale by DM drops the stock on Today and updates analytics.
+- [x] **5.4 "Paid" button & Dual-Rail Settlement** (C + A). The merchant taps **Paid** in Orders (with optional payment method e.g. 'upi' or 'cash' and reference ID): creates a formal `payments` record (`provider IN ('upi_manual', 'cash', 'manual')`, `method`, `kind = 'full'`), sets `status = 'paid'` and `payment_status = 'paid'`, stock sold, customer gets a confirmation, database triggers fire (`trg_order_paid` CRM customer metrics, `trg_order_timeline` audit logging).
+  Done when: full UPI and cash counter sales drop stock, persist Payment records, and update CRM analytics.
 - [ ] **5.5 Customer says "paid"** (C + AI). Keep the hold while waiting for the merchant to check; don't let it expire.
   Done when: covered by a test.
 - [x] **5.6 Complete, advance stages, and cancel** (C + A). Mark an order through enterprise fulfillment stages (`confirmed` -> `ready` -> `delivered` -> `completed`, via `/v1/orders/{id}/status`) or cancelled (stock returns). Automatically logs transitions in `order_timeline` via `trg_order_timeline` and updates CRM customer lifetime metrics via `trg_order_paid`.

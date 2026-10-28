@@ -57,22 +57,26 @@ async def list_orders(
             id=order.id,
             number=order.number,
             status=order.status,
+            payment_status=order.payment_status,
+            fulfilment_status=order.fulfilment_status,
+            fulfilment_method=order.fulfilment_method,
+            channel=order.channel,
             currency=order.currency,
             total_minor=order.total_minor,
-            fulfilment=order.fulfilment,
             delivery_address=order.delivery_address,
-            needed_by=order.needed_by,
-            notes=order.notes,
+            customer_note=order.customer_note,
             conversation_id=order.conversation_id,
             created_at=order.created_at,
             paid_at=order.paid_at,
             hold_expires_at=order.hold_expires_at,
             items=[schemas.OrderItem(**vars(item)) for item in order.items],
             order_number=order.order_number,
-            payment_status=order.payment_status,
+            fulfilment=order.fulfilment,
             delivery_type=order.delivery_type,
             source_channel=order.source_channel,
             total_amount_minor=order.total_amount_minor,
+            needed_by=order.needed_by,
+            notes=order.notes,
         )
         for order in found
     ]
@@ -196,12 +200,23 @@ async def create_order_invoice(
 
 
 @router.post("/{order_id}/mark-paid", response_model=schemas.Order)
-async def mark_order_paid(shop: Shop, order_id: uuid.UUID) -> schemas.Order:
-    """Owner tap-to-confirm when receiving a UPI payment notification on their phone."""
+async def mark_order_paid(
+    shop: Shop,
+    order_id: uuid.UUID,
+    payload: schemas.MarkPaidRequest | None = None,
+) -> schemas.Order:
+    """Owner tap-to-confirm when receiving a UPI payment notification on their phone or counter cash."""
+    method = payload.method if payload else "upi"
+    ref_id = payload.reference_id if payload else None
     try:
         async with session_scope() as session:
             result = await orders.mark_order_paid(
-                session, order_id, merchant_id=shop.merchant_id, actor="merchant"
+                session,
+                order_id,
+                merchant_id=shop.merchant_id,
+                actor="merchant",
+                method=method,
+                reference_id=ref_id,
             )
             order_res = await _order_response(session, order_id, shop.merchant_id)
     except LookupError as exc:
@@ -361,12 +376,14 @@ async def _order_response(
         id=order.id,
         number=order.number,
         status=order.status,
+        payment_status=order.payment_status,
+        fulfilment_status=order.fulfilment_status,
+        fulfilment_method=order.fulfilment_method,
+        channel=order.channel,
         currency=order.currency,
         total_minor=order.total_minor,
-        fulfilment=order.fulfilment,
         delivery_address=order.delivery_address,
-        needed_by=order.needed_by,
-        notes=order.notes,
+        customer_note=order.customer_note,
         conversation_id=order.conversation_id,
         created_at=order.created_at,
         paid_at=order.paid_at,
@@ -374,15 +391,17 @@ async def _order_response(
         items=[
             schemas.OrderItem(
                 product=item.product_name or "",
-                variant=item.variant_name,
+                variant=item.variant_label,
                 quantity=item.quantity,
                 unit_price_minor=item.unit_price_minor,
             )
             for item in items
         ],
         order_number=order.order_number,
-        payment_status=order.payment_status,
+        fulfilment=order.fulfilment,
         delivery_type=order.delivery_type,
         source_channel=order.source_channel,
         total_amount_minor=order.total_amount_minor,
+        needed_by=order.needed_by,
+        notes=order.notes,
     )

@@ -17,12 +17,16 @@ class Payment(Base):
     )
     merchant_id: Mapped[uuid.UUID]
     order_id: Mapped[uuid.UUID]
-    provider: Mapped[str]
-    provider_order_id: Mapped[str]
-    provider_capture_id: Mapped[str | None]
+    provider: Mapped[str]  # paypal | razorpay | cashfree | upi_manual | manual | cash | stripe
+    method: Mapped[str | None] = mapped_column(nullable=True, default="upi")  # upi | card | paypal_wallet | cash
+    kind: Mapped[str] = mapped_column(server_default=text("'full'"))  # full | deposit | balance
+    provider_order_id: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    provider_capture_id: Mapped[str | None] = mapped_column(nullable=True, default=None)
     status: Mapped[str]  # created | approved | completed | denied | refunded | failed
     currency: Mapped[str]
     amount_minor: Mapped[int]
-    approve_url: Mapped[str | None]
+    fee_minor: Mapped[int] = mapped_column(server_default=text("0"))
+    approve_url: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    paid_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())

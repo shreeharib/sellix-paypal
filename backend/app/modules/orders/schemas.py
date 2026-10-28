@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 
@@ -16,10 +16,16 @@ class OrderRequest:
     """What the customer asked for, as the agent understood it."""
 
     lines: tuple[OrderLineRequest, ...]
-    fulfilment: Literal["pickup", "delivery"] | None = None
+    fulfilment_method: str | None = None
+    fulfilment: str | None = None  # alias for backwards compatibility
     delivery_address: str | None = None
-    needed_by: str | None = None
-    notes: str | None = None
+    scheduled_date: date | None = None
+    scheduled_window: str | None = None
+    customer_note: str | None = None
+    needed_by: str | None = None  # alias for backwards compatibility
+    notes: str | None = None  # alias for backwards compatibility
+    channel: str = "instagram"
+    placed_by: str = "customer"
 
 
 @dataclass(frozen=True)
@@ -98,21 +104,50 @@ class OrderSummary:
     status: str
     currency: str
     total_minor: int
-    fulfilment: str | None
-    delivery_address: str | None
-    needed_by: str | None
-    notes: str | None
     customer_id: uuid.UUID
     conversation_id: uuid.UUID | None
     created_at: datetime
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: tuple[OrderItemSummary, ...]
+    payment_status: str = "unpaid"
+    fulfilment_status: str = "unfulfilled"
+    fulfilment_method: str | None = "pickup"
+    channel: str = "instagram"
+    delivery_address: str | None = None
+    customer_note: str | None = None
+    scheduled_date: date | None = None
+    scheduled_window: str | None = None
     order_number: str | None = None
-    payment_status: str = "pending"
-    delivery_type: str | None = None
-    source_channel: str = "instagram"
-    total_amount_minor: int = 0
+
+    # Backward compatibility properties
+    @property
+    def fulfilment(self) -> str | None:
+        return self.fulfilment_method
+
+    @property
+    def delivery_type(self) -> str | None:
+        return self.fulfilment_method
+
+    @property
+    def source_channel(self) -> str:
+        return self.channel
+
+    @property
+    def total_amount_minor(self) -> int:
+        return self.total_minor
+
+    @property
+    def notes(self) -> str | None:
+        return self.customer_note
+
+    @property
+    def needed_by(self) -> str | None:
+        if self.scheduled_date and self.scheduled_window:
+            return f"{self.scheduled_date} {self.scheduled_window}"
+        if self.scheduled_date:
+            return str(self.scheduled_date)
+        return self.scheduled_window
 
 
 @dataclass(frozen=True)

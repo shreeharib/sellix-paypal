@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
 from app.modules.orders.models import Order, OrderEvent, OrderItem, OrderTimeline, Refund
+from app.modules.payments.models import Payment
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
@@ -121,23 +122,34 @@ async def place_order(
         raise OrderProblem(offer.problems or ("The order has no items",))
     order_id = uuid.uuid4()
     hold_expires = datetime.now(UTC) + timedelta(minutes=hold_minutes)
+    fulfilment_method = getattr(request, "fulfilment_method", None) or getattr(request, "fulfilment", None) or "pickup"
+    customer_note = getattr(request, "customer_note", None) or getattr(request, "notes", None)
+    channel = getattr(request, "channel", "instagram")
+    placed_by = getattr(request, "placed_by", "customer")
+    scheduled_date = getattr(request, "scheduled_date", None)
+    scheduled_window = getattr(request, "scheduled_window", None)
+    if not scheduled_window and getattr(request, "needed_by", None):
+        scheduled_window = request.needed_by
+
     order = Order(
         id=order_id,
         merchant_id=merchant_id,
         customer_id=customer_id,
         conversation_id=conversation_id,
+        channel=channel,
+        placed_by=placed_by,
         status="awaiting_payment",
-        payment_status="pending",
+        payment_status="unpaid",
+        fulfilment_status="unfulfilled",
+        fulfilment_method=fulfilment_method,
+        delivery_address=request.delivery_address,
+        scheduled_date=scheduled_date,
+        scheduled_window=scheduled_window,
+        customer_note=customer_note,
         business_date=business_date,
         currency=offer.currency,
         total_minor=offer.total_minor,
         subtotal_minor=offer.total_minor,
-        total_amount_minor=offer.total_minor,
-        fulfilment=request.fulfilment,
-        delivery_type=request.fulfilment or "pickup",
-        delivery_address=request.delivery_address,
-        needed_by=request.needed_by,
-        notes=request.notes,
         hold_expires_at=hold_expires,
     )
     session.add(order)
@@ -162,9 +174,11 @@ async def place_order(
             order_id=order.id,
             variant_id=line.variant_id,
             product_name=line.product,
-            variant_name=line.variant,
+            variant_label=line.variant,
             unit_price_minor=line.unit_price_minor,
+            line_total_minor=line.unit_price_minor * line.quantity,
             quantity=line.quantity,
+            fulfilment_status="unfulfilled",
         )
         for line in offer.lines
     )
@@ -301,10 +315,12 @@ async def mark_order_paid(
     *,
     merchant_id: uuid.UUID,
     actor: str = "merchant",
+    method: str = "upi",
+    reference_id: str | None = None,
 ) -> PaymentResult:
-    """Owner tap-to-confirm when receiving a UPI payment alert on their phone.
+    """Owner tap-to-confirm when receiving a UPI payment alert on their phone or counter checkout.
 
-    Transitions order from awaiting_payment to paid and confirms held stock as sold.
+    Transitions order from awaiting_payment to paid, records a Payment ledger entry, and confirms held stock as sold.
     """
     order = await session.scalar(
         select(Order)
@@ -313,6 +329,21 @@ async def mark_order_paid(
     )
     if order is None:
         raise LookupError(f"No order {order_id}")
+
+    provider = "upi_manual" if method == "upi" else ("cash" if method == "cash" else "manual")
+    payment = Payment(
+        merchant_id=order.merchant_id,
+        order_id=order.id,
+        provider=provider,
+        method=method,
+        kind="full",
+        provider_order_id=reference_id or f"MANUAL-{order.number}",
+        status="completed",
+        currency=order.currency,
+        amount_minor=order.total_minor,
+        paid_at=datetime.now(UTC),
+    )
+    session.add(payment)
 
     return await record_payment(
         session,
@@ -365,6 +396,13 @@ async def advance_order_status(
 
     previous = order.status
     order.status = new_status
+    if new_status in ("delivered", "completed"):
+        order.fulfilment_status = "fulfilled"
+    elif new_status == "ready":
+        order.fulfilment_status = "ready"
+    elif new_status in ("confirmed", "in_production"):
+        order.fulfilment_status = "in_production"
+
     _log(
         session,
         order,
@@ -425,6 +463,7 @@ async def complete_order(
 
     previous = order.status
     order.status = "completed"
+    order.fulfilment_status = "fulfilled"
     _log(session, order, "completed", previous, "completed", actor)
     await session.flush()
     return order
@@ -577,10 +616,6 @@ async def list_orders(
             status=order.status,
             currency=order.currency,
             total_minor=order.total_minor,
-            fulfilment=order.fulfilment,
-            delivery_address=order.delivery_address,
-            needed_by=order.needed_by,
-            notes=order.notes,
             customer_id=order.customer_id,
             conversation_id=order.conversation_id,
             created_at=order.created_at,
@@ -589,9 +624,13 @@ async def list_orders(
             items=tuple(items[order.id]),
             order_number=order.order_number,
             payment_status=order.payment_status,
-            delivery_type=order.delivery_type,
-            source_channel=order.source_channel,
-            total_amount_minor=order.total_amount_minor,
+            fulfilment_status=order.fulfilment_status,
+            fulfilment_method=order.fulfilment_method,
+            channel=order.channel,
+            delivery_address=order.delivery_address,
+            customer_note=order.customer_note,
+            scheduled_date=order.scheduled_date,
+            scheduled_window=order.scheduled_window,
         )
         for order in found
     ]
