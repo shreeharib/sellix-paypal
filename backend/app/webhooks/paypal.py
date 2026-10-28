@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.modules.payments import paypal
 from app.modules.payments import service as payments
 from app.webhooks import service
 from app.webhooks.tasks import enqueue_paypal_event
@@ -30,7 +29,7 @@ async def receive_event(request: Request) -> dict[str, str]:
 
     try:
         genuine = await payments.verify_webhook(dict(request.headers), event)
-    except paypal.PayPalError as exc:
+    except payments.PayPalError as exc:
         raise HTTPException(status_code=503, detail="Couldn't verify with PayPal") from exc
     if not genuine:
         log.warning("paypal.webhook_unverified", event_type=event.get("event_type"))

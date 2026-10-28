@@ -9,6 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.escalations.models import Escalation
 
+__all__ = [
+    "Escalation",
+    "EscalationNotFound",
+    "answer",
+    "close",
+    "list_escalations",
+    "open_escalation",
+]
+
 log = structlog.get_logger()
 
 

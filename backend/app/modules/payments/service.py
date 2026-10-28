@@ -7,21 +7,24 @@ and never from the buyer merely returning to our page.
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.modules.orders import service as orders
-from app.modules.orders.models import Order
 from app.modules.orders.schemas import PaymentResult, PlacedOrder
 from app.modules.payments import paypal, upi
 from app.modules.payments.models import Payment
 
 log = structlog.get_logger()
+
+PayPalError = paypal.PayPalError
 
 
 class PaymentUnavailable(RuntimeError):
@@ -95,8 +98,8 @@ async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
         raise PaymentUnavailable(str(exc)) from exc
 
     async with session_scope() as session:
-        order = await session.get(Order, placed.order_id)
-        if order is None:
+        order = await orders.get_order(session, placed.order_id)
+        if order is None or order.merchant_id is None:
             raise LookupError(f"No order {placed.order_id}")
         await session.execute(
             pg_insert(Payment)
@@ -113,6 +116,34 @@ async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
             .on_conflict_do_nothing(index_elements=[Payment.provider, Payment.provider_order_id])
         )
     return created.approve_url
+
+
+def record_manual_payment(
+    session: AsyncSession,
+    *,
+    merchant_id: uuid.UUID,
+    order_id: uuid.UUID,
+    order_number: int,
+    currency: str,
+    amount_minor: int,
+    method: str = "upi",
+    reference_id: str | None = None,
+) -> None:
+    """Record a manual UPI or counter cash payment in the payments ledger."""
+    provider = "upi_manual" if method == "upi" else ("cash" if method == "cash" else "manual")
+    payment = Payment(
+        merchant_id=merchant_id,
+        order_id=order_id,
+        provider=provider,
+        method=method,
+        kind="full",
+        provider_order_id=reference_id or f"MANUAL-{order_number}",
+        status="completed",
+        currency=currency,
+        amount_minor=amount_minor,
+        paid_at=datetime.now(UTC),
+    )
+    session.add(payment)
 
 
 async def create_invoice_checkout(
@@ -146,8 +177,8 @@ async def create_invoice_checkout(
         raise PaymentUnavailable(str(exc)) from exc
 
     async with session_scope() as session:
-        order = await session.get(Order, placed.order_id)
-        if order is None:
+        order = await orders.get_order(session, placed.order_id)
+        if order is None or order.merchant_id is None:
             raise LookupError(f"No order {placed.order_id}")
         await session.execute(
             pg_insert(Payment)
@@ -209,7 +240,7 @@ async def record_capture(
             )
         if result.status in ("DECLINED", "FAILED"):
             payment.status = "denied"
-            order = await session.get(Order, payment.order_id)
+            order = await orders.get_order(session, payment.order_id)
             if order is None:
                 return None
             return PaymentFailed(order.id, order.number, order.conversation_id)
@@ -249,7 +280,7 @@ async def refund_order(
 ) -> RefundOutcome:
     """Refund a paid order through PayPal and update local records."""
     async with session_scope() as session:
-        order = await session.get(Order, order_id)
+        order = await orders.get_order(session, order_id)
         if order is None:
             raise LookupError(f"No order {order_id}")
         payment = await session.scalar(

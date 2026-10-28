@@ -6,12 +6,72 @@ attributes (dietary, allergens, categories, MRP, and AI search aliases).
 
 import re
 import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog.models import Product, ProductAlias, ProductVariant
+
+
+@dataclass(frozen=True)
+class VariantCatalogInfo:
+    variant_id: uuid.UUID
+    product_id: uuid.UUID
+    product_name: str
+    variant_name: str | None
+    price_minor: int
+    currency: str
+    effective_stock_mode: str
+    effective_shelf_life_days: int | None
+
+
+async def list_variants_by_ids(
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    variant_ids: Iterable[uuid.UUID],
+    *,
+    active_only: bool = False,
+) -> list[VariantCatalogInfo]:
+    """Fetch variant & parent product catalog metadata for a set of variant IDs, ordered by name."""
+    ids = list(variant_ids)
+    if not ids:
+        return []
+    query = (
+        select(
+            ProductVariant.id,
+            Product.id,
+            Product.name,
+            ProductVariant.name,
+            ProductVariant.price_minor,
+            ProductVariant.currency,
+            func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily"),
+            func.coalesce(ProductVariant.shelf_life_days, Product.shelf_life_days),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(
+            Product.merchant_id == merchant_id,
+            ProductVariant.id.in_(ids),
+        )
+    )
+    if active_only:
+        query = query.where(Product.is_active.is_(True), ProductVariant.is_active.is_(True))
+    rows = await session.execute(query.order_by(Product.name, ProductVariant.name))
+    return [
+        VariantCatalogInfo(
+            variant_id=row[0],
+            product_id=row[1],
+            product_name=row[2],
+            variant_name=row[3],
+            price_minor=row[4],
+            currency=row[5],
+            effective_stock_mode=row[6],
+            effective_shelf_life_days=row[7],
+        )
+        for row in rows
+    ]
 
 
 def _generate_sku(product_name: str, variant_name: str | None) -> str:

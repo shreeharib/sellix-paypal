@@ -119,6 +119,7 @@ class OrderSummary:
     scheduled_date: date | None = None
     scheduled_window: str | None = None
     order_number: str | None = None
+    merchant_id: uuid.UUID | None = None
 
     # Backward compatibility properties
     @property

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crypto, signing
 from app.core.config import get_settings
 from app.modules.channels import instagram
-from app.modules.channels.models import ChannelConnection
+from app.modules.channels.models import ChannelConnection as ChannelConnection
 from app.modules.channels.schemas import IncomingMessage
 from app.modules.merchants import service as merchants
 

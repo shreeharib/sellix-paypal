@@ -8,9 +8,8 @@ from fastapi import APIRouter, HTTPException, Query
 from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
-from app.modules.conversations.tasks import inform_customer
+from app.modules.conversations import service as conversations
 from app.modules.escalations import service as escalations
-from app.modules.escalations.models import Escalation
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -40,7 +39,7 @@ async def answer_question(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await inform_customer(
+    await conversations.inform_customer(
         result.conversation_id,
         f'The shop owner answered your question "{result.question}": "{result.answer}". '
         "Pass this on to the customer and continue helping them.",
@@ -57,7 +56,7 @@ async def close_question(shop: Shop, question_id: uuid.UUID) -> schemas.Question
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-def _question(escalation: Escalation) -> schemas.Question:
+def _question(escalation: escalations.Escalation) -> schemas.Question:
     return schemas.Question(
         id=escalation.id,
         conversation_id=escalation.conversation_id,

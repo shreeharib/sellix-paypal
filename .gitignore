@@ -23,7 +23,8 @@ demo_catalog.py
 demo_triple_status.py
 demo_enterprise_order.py
 conflicts.md
-
+improvements.md
+AGENTS.MD
 
 # Flutter / Dart
 app/.dart_tool/
@@ -49,3 +50,7 @@ paypal-certificate*
 *.pem
 *.p12
 *.crt
+
+# Agent-specific files
+.agents/
+.agents-local/

@@ -11,7 +11,6 @@ from app.core.db import session_scope
 from app.core.jobs import jobs
 from app.modules.channels import service as channels
 from app.modules.conversations import service as conversations
-from app.modules.conversations.tasks import after_payment, request_turn
 from app.modules.payments import service as payments
 from app.webhooks import service
 
@@ -40,7 +39,7 @@ async def process_meta_event(event_id: str) -> None:
 
     # Only after the messages are committed, so the turn can see them.
     for turn in turns:
-        await request_turn(turn)
+        await conversations.request_turn(turn)
 
 
 @jobs.task(name="process_paypal_event", queue="webhooks", retry=_RETRY)
@@ -61,7 +60,7 @@ async def process_paypal_event(event_id: str) -> None:
     async with session_scope() as session:
         await service.mark_processed_by_id(session, uuid.UUID(event_id))
     if result is not None:
-        await after_payment(result)
+        await conversations.after_payment(result)
 
 
 async def enqueue_meta_event(event_id: uuid.UUID) -> None:

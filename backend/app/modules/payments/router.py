@@ -7,8 +7,8 @@ import structlog
 from fastapi import APIRouter, Query
 from fastapi.responses import HTMLResponse
 
-from app.modules.conversations.tasks import after_payment
-from app.modules.payments import paypal, service
+from app.modules.conversations import service as conversations
+from app.modules.payments import service
 
 router = APIRouter(prefix="/payments/paypal", tags=["payments"])
 log = structlog.get_logger()
@@ -22,7 +22,7 @@ async def paypal_return(token: Annotated[str | None, Query()] = None) -> HTMLRes
         return _page("Payment", "Something went wrong. Please go back to the chat.", 400)
     try:
         result = await service.capture(token)
-    except paypal.PayPalError as exc:
+    except service.PayPalError as exc:
         log.error("payments.capture_failed", paypal_order_id=token, error=str(exc))
         return _page(
             "Payment processing",
@@ -30,7 +30,7 @@ async def paypal_return(token: Annotated[str | None, Query()] = None) -> HTMLRes
             200,
         )
     if result is not None:
-        await after_payment(result)
+        await conversations.after_payment(result)
     if isinstance(result, service.PaymentFailed):
         return _page(
             "Payment not completed",

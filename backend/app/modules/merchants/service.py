@@ -4,9 +4,22 @@ import uuid
 from datetime import date, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.merchants.models import Merchant
+
+__all__ = [
+    "Merchant",
+    "MerchantNotFound",
+    "business_date",
+    "create_merchant",
+    "enabled_merchant_ids_select",
+    "find_merchant",
+    "get_merchant",
+    "set_agent_enabled",
+    "update_settings",
+]
 
 
 class MerchantNotFound(LookupError):
@@ -26,11 +39,20 @@ async def create_merchant(
     return merchant
 
 
+async def find_merchant(session: AsyncSession, merchant_id: uuid.UUID) -> Merchant | None:
+    return await session.get(Merchant, merchant_id)
+
+
 async def get_merchant(session: AsyncSession, merchant_id: uuid.UUID) -> Merchant:
-    merchant = await session.get(Merchant, merchant_id)
+    merchant = await find_merchant(session, merchant_id)
     if merchant is None:
         raise MerchantNotFound(f"No merchant {merchant_id}")
     return merchant
+
+
+def enabled_merchant_ids_select() -> Select[uuid.UUID]:
+    """Subquery selecting IDs of merchants whose AI agent is enabled."""
+    return select(Merchant.id).where(Merchant.agent_enabled)
 
 
 async def set_agent_enabled(session: AsyncSession, merchant_id: uuid.UUID, enabled: bool) -> None:
