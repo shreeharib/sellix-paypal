@@ -215,20 +215,31 @@ class Order(BaseModel):
     status: str
     currency: str
     total_minor: int
-    fulfilment: str | None
-    delivery_address: str | None
-    needed_by: str | None
-    notes: str | None
     conversation_id: uuid.UUID | None
     created_at: datetime
     paid_at: datetime | None
     hold_expires_at: datetime | None
     items: list[OrderItem]
+    payment_status: str = "unpaid"
+    fulfilment_status: str = "unfulfilled"
+    fulfilment_method: str | None = "pickup"
+    channel: str = "instagram"
+    delivery_address: str | None = None
+    customer_note: str | None = None
     order_number: str | None = None
-    payment_status: str = "pending"
+
+    # Backwards-compatibility aliases for API consumers
+    fulfilment: str | None = None
     delivery_type: str | None = None
     source_channel: str = "instagram"
     total_amount_minor: int = 0
+    needed_by: str | None = None
+    notes: str | None = None
+
+
+class MarkPaidRequest(BaseModel):
+    method: Literal["upi", "cash", "card"] = "upi"
+    reference_id: str | None = None
 
 
 class OrderTimelineEvent(BaseModel):

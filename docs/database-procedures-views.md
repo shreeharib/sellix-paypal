@@ -264,7 +264,7 @@ Database triggers guarantee business rules and data consistency regardless of wh
      (OLD.status <> 'paid' AND NEW.status = 'paid') THEN
       UPDATE customers
       SET lifetime_orders_count = lifetime_orders_count + 1,
-          lifetime_spent_minor = lifetime_spent_minor + NEW.total_amount_minor
+          lifetime_spent_minor = lifetime_spent_minor + COALESCE(NEW.total_minor, 0)
       WHERE id = NEW.customer_id;
   END IF;
   ```
