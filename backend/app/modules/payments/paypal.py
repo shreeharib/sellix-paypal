@@ -229,7 +229,12 @@ async def create_invoice(
         request_id=f"sellix-invoice-{reference_id}",
         json=payload,
     )
-    return str(data["id"])
+    invoice_id = data.get("id")
+    if not invoice_id and "href" in data:
+        invoice_id = data["href"].rstrip("/").split("/")[-1]
+    if not invoice_id:
+        raise PayPalError(200, "PayPal returned no invoice ID")
+    return str(invoice_id)
 
 
 async def send_invoice(invoice_id: str) -> str:
@@ -241,13 +246,19 @@ async def send_invoice(invoice_id: str) -> str:
         json={"send_to_recipient": False, "send_to_invoicer": False},
     )
     links = {link.get("rel"): link.get("href") for link in data.get("links", [])}
-    payer_view = links.get("payer-view")
+    payer_view = None
+    if data.get("rel") in ("payer-view", "recipient-view"):
+        payer_view = data.get("href")
+    elif "links" in data:
+        payer_view = links.get("payer-view") or links.get("recipient-view")
+
     if not payer_view:
         invoice_data = await _request("GET", f"/v2/invoicing/invoices/{invoice_id}")
         metadata = invoice_data.get("detail", {}).get("metadata", {})
-        payer_view = metadata.get("payer_view_url")
+        payer_view = metadata.get("recipient_view_url") or metadata.get("payer_view_url")
+
     if not payer_view:
-        raise PayPalError(200, "PayPal returned no payer view link for invoice")
+        payer_view = f"https://www.sandbox.paypal.com/invoice/p/#{invoice_id}"
     return payer_view
 
 
@@ -270,12 +281,14 @@ async def refund_capture(
         request_id=f"sellix-refund-{capture_id}",
         json=payload,
     )
-    amt = data.get("amount", {})
+    amt = data.get("amount") or data.get("seller_payable_breakdown", {}).get("gross_amount", {})
+    amt_minor = to_minor(str(amt.get("value", "0"))) if amt.get("value") else (amount_minor or 0)
+    curr = str(amt.get("currency_code") or currency or "")
     return RefundResult(
         refund_id=str(data.get("id", "")),
         status=str(data.get("status", "")),
-        amount_minor=to_minor(str(amt.get("value", "0"))),
-        currency=str(amt.get("currency_code", "")),
+        amount_minor=amt_minor,
+        currency=curr,
     )
 
 
@@ -351,9 +364,14 @@ async def _request(
         body = {}
     if response.is_error:
         details = body.get("details") or [{}]
+        first_issue = details[0].get("issue") if isinstance(details, list) and details else None
+        first_desc = details[0].get("description") if isinstance(details, list) and details else None
+        err_msg = str(body.get("message") or response.text[:300])
+        if first_issue:
+            err_msg += f" - {first_issue}: {first_desc or ''}"
         raise PayPalError(
             response.status_code,
-            str(body.get("message") or response.text[:300]),
-            issue=details[0].get("issue"),
+            err_msg,
+            issue=first_issue,
         )
     return body
