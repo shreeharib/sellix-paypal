@@ -37,6 +37,9 @@ class StockHold(Base):
     variant_id: Mapped[uuid.UUID]
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     order_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    business_date: Mapped[date] = mapped_column(
+        server_default=text("(NOW() AT TIME ZONE 'Asia/Kolkata')::date")
+    )
     quantity: Mapped[int]
     status: Mapped[str] = mapped_column(server_default=text("'held'"))
     expires_at: Mapped[datetime]

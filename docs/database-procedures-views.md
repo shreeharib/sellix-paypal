@@ -1,7 +1,12 @@
 # Database Logic: Functions, Triggers & Views
 
-> **Reference File**: `supabase/migrations/20261026000000_enterprise_schema.sql`  
-> **Target Schema**: Sellix Enterprise Multi-Tenant SaaS (Bakery & Direct-to-Consumer Commerce)
+> **Reference Files**:
+> - `supabase/migrations/20261026000000_enterprise_schema.sql`
+> - `supabase/migrations/20261027200000_stock_holds_order_sync.sql`
+> - `supabase/migrations/20261027210000_stock_modes_and_rollover.sql`
+> - `supabase/migrations/20261028000000_enterprise_schema_alignment.sql`
+> - `supabase/migrations/20261028100000_fix_duplications_and_pnl.sql`  
+> **Target Schema**: Sellix Enterprise Multi-Tenant SaaS (India-Only `Asia/Kolkata` IST · `INR`)
 
 ---
 
@@ -9,39 +14,44 @@
 
 ```mermaid
 flowchart TD
-    subgraph Channels["Customer Channels"]
+    subgraph Channels["Customer & Merchant Channels"]
         WA["WhatsApp Chat"]
         IG["Instagram DM"]
-        Counter["Physical Store (Counter)"]
+        Counter["Physical Store (Counter POS)"]
     end
 
-    subgraph LogicLayer["Stored Procedures & Functions"]
-        F1["hold_stock()"]
-        F2["convert_stock_hold()"]
+    subgraph LogicLayer["Stored Procedures & Inventory Service"]
+        F1["hold_stock() / inventory.hold()"]
+        F2["convert_stock_hold() / inventory.confirm_sale()"]
         F3["release_expired_holds()"]
         F4["record_counter_sale()"]
+        F5["rollover_daily_stock()"]
     end
 
-    subgraph DB["Core Tables & Generated Columns"]
-        DS[("daily_stock<br/>opening + restocked - held - sold - counter_sales")]
-        SH[("stock_holds<br/>status: held | converted | expired")]
-        ORD[("orders & order_items")]
-        CUST[("customers")]
+    subgraph DB["Canonical Single-Source-of-Truth Tables"]
+        DS[("daily_stock<br/>business_date (IST)<br/>opening + restocked - held - sold - counter_sales")]
+        SH[("stock_holds<br/>business_date (IST), order_id<br/>status: held | converted | expired | cancelled")]
+        ORD[("orders & order_items<br/>status | payment_status | fulfilment_status<br/>total_minor, total_cost_minor, shipping_minor")]
+        OE[("order_events<br/>actor: agent | merchant | paypal | customer | system")]
+        PAY[("payments<br/>provider, method, kind, amount_minor, fee_minor")]
+        REF[("refunds<br/>refund_amount_minor, is_restocked")]
+        CUST[("customers<br/>lifetime_orders_count, lifetime_spent_minor")]
         ESC[("escalations")]
         MD[("missed_demands")]
     end
 
     subgraph Triggers["Automated Database Triggers"]
-        T1["trg_orders_touch & trg_merchants_touch<br/>fn_touch_updated_at()"]
-        T2["trg_order_timeline<br/>fn_log_order_timeline()"]
-        T3["trg_order_paid<br/>fn_update_customer_stats()"]
+        T1["trg_orders_touch & set_updated_at()"]
+        T2["trg_order_items_sync & trg_order_items_recalc_cost<br/>Auto-snapshots COGS (unit_cost_minor -> total_cost_minor)"]
+        T3["trg_order_paid<br/>fn_update_customer_stats() (Increment on paid, decrement on refund)"]
     end
 
     subgraph Views["Optimized Database Views"]
-        V1["v_active_daily_inventory<br/>(For AI Agents)"]
-        V2["v_merchant_pnl_summary<br/>(Real-Time Analytics)"]
+        V0["order_timeline (View over order_events)<br/>Preserves real actor & merchant comments"]
+        V1["v_active_daily_inventory<br/>(Real-Time IST Stock & Live Variant Price)"]
+        V2["v_merchant_pnl_summary<br/>(Pre-aggregated Payments, COGS & Refunds by IST business_date)"]
         V3["v_pending_escalations<br/>(Owner Inbox Mobile App)"]
-        V4["v_missed_demand_summary<br/>(Baking Intelligence)"]
+        V4["v_missed_demand_summary<br/>(IST Baking / Stock Intelligence)"]
     end
 
     WA -->|Inquiry| V1
@@ -53,18 +63,21 @@ flowchart TD
     F1 -->|Creates Record| SH
     F4 -->|Increments counter_sales| DS
 
-    Cron["Scheduled Background Job (pg_cron)"] -->|Periodic sweep| F3
-    F3 -->|Reverses held count| DS
-    PaymentWebhook["Payment Webhook (Razorpay/Stripe/UPI)"] -->|Success| F2
+    Cron["Scheduled Background Job"] -->|Periodic sweep| F3
+    F3 -->|Reverses held count & logs expired| DS
+    F3 -->|Syncs order & event| ORD
+    PaymentWebhook["Payment Settlement (PayPal / UPI / Cash)"] -->|Success| F2
     F2 -->|Converts hold to sold| DS
 
     ORD --> T1
-    ORD -->|Status changes| T2
-    ORD -->|Payment changes to paid| T3
+    ORD --> T2
+    ORD -->|Status / Payment changes| T3
     T3 -->|Updates lifetime spend & count| CUST
-
+    OE -.-> V0
     DS -.-> V1
     ORD -.-> V2
+    PAY -.-> V2
+    REF -.-> V2
     ESC -.-> V3
     MD -.-> V4
 ```
@@ -73,27 +86,27 @@ flowchart TD
 
 ## 1. Stored Procedures & Business Functions
 
-Stored procedures encapsulate critical transactional operations directly in PostgreSQL, eliminating network round-trips and race conditions between concurrent requests.
+Stored procedures encapsulate critical transactional operations directly in PostgreSQL, eliminating network round-trips and race conditions between concurrent requests. All date-scoped operations default to **Indian Standard Time (`Asia/Kolkata`)** rather than server UTC (`CURRENT_DATE`), preventing midnight–5:30 AM IST date drift.
 
 ---
 
-### 1.1 `hold_stock(p_variant_id, p_conversation_id, p_quantity, p_hold_minutes)`
+### 1.1 `hold_stock(p_variant_id, p_conversation_id, p_quantity, p_hold_minutes, p_business_date, p_order_id)`
 
-* **Schema Location**: Section 5 (`hold_stock`)
+* **Schema Location**: `20261028100000_fix_duplications_and_pnl.sql` (`hold_stock`)
 * **Return Type**: `UUID` (The generated `stock_holds.id`)
-* **Default Hold Time**: `15 minutes`
+* **Defaults**: `p_hold_minutes = 15`, `p_business_date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`, `p_order_id = NULL`
 
 #### What It Does
-Atomically checks available inventory and reserves a requested quantity of an item for an active chat conversation during checkout.
+Atomically checks available inventory on the merchant's IST `business_date` and reserves a requested quantity of an item for an active order or chat conversation during checkout.
 
 #### What Is the Use of This?
 In conversational commerce (Instagram DMs, WhatsApp), multiple buyers frequently ask for the same limited item (e.g., the last 2 boxes of chocolate croissants). If a payment link is sent without holding stock, multiple customers could pay simultaneously, causing overselling and customer disputes. 
 
-`hold_stock()` solves this with strict row-level atomicity:
-1. It updates `daily_stock` by incrementing `held = held + p_quantity` **only if**:
-   $$\text{opening\_stock} + \text{restocked} - \text{held} - \text{sold} - \text{counter\_sales} \ge p\_quantity$$
+`hold_stock()` (and its Python counterpart `inventory.hold()`) solves this with strict row-level atomicity:
+1. It updates `daily_stock` on `business_date = p_business_date` by incrementing `held = held + p_quantity` **only if**:
+   $$\text{opening} + \text{restocked} - \text{held} - \text{sold} - \text{counter\_sales} \ge p\_quantity$$
 2. If available stock is insufficient, `GET DIAGNOSTICS ROW_COUNT` returns `0`, and an exception `INSUFFICIENT_STOCK: Item is sold out or unavailable` is raised immediately, aborting the transaction.
-3. If successful, it creates a row in `stock_holds` with status `'held'` and expiry set to `NOW() + interval`.
+3. If successful, it creates a row in `stock_holds` storing `business_date = p_business_date`, `order_id = p_order_id`, status `'held'`, and expiry set to `NOW() + interval`.
 
 #### Practical SQL Example
 ```sql
@@ -101,7 +114,9 @@ SELECT hold_stock(
     p_variant_id       := 'a1b2c3d4-1111-2222-3333-444455556666',
     p_conversation_id  := 'b2c3d4e5-2222-3333-4444-555566667777',
     p_quantity         := 2,
-    p_hold_minutes     := 15
+    p_hold_minutes     := 15,
+    p_business_date    := (NOW() AT TIME ZONE 'Asia/Kolkata')::date,
+    p_order_id         := 'd4e5f6a7-4444-5555-6666-777788889999'
 );
 -- Returns: 'e8f9a0b1-3333-4444-5555-666677778888' (Hold ID)
 ```
@@ -110,22 +125,23 @@ SELECT hold_stock(
 
 ### 1.2 `convert_stock_hold(p_hold_id)`
 
-* **Schema Location**: Section 5 (`convert_stock_hold`)
+* **Schema Location**: `20261028100000_fix_duplications_and_pnl.sql` (`convert_stock_hold`)
 * **Return Type**: `VOID`
 
 #### What It Does
-Transforms a temporary reservation into a permanent, finalized sale in the daily inventory ledger.
+Transforms a temporary reservation into a permanent, finalized sale in the daily inventory ledger on the hold's stored `business_date`.
 
 #### What Is the Use of This?
-When the merchant receives a verified webhook from Razorpay, Stripe, or UPI confirming the customer completed payment:
+When the merchant confirms a payment (or receives a verified webhook from PayPal, Razorpay, or Cashfree):
 1. It locks the hold row using `SELECT ... FOR UPDATE` to avoid double-processing.
 2. Checks that `status` is currently `'held'`.
-3. In `daily_stock`, shifts the inventory from temporary hold to confirmed sale:
+3. Resolves the exact `business_date` from the linked `orders.business_date` or `stock_holds.business_date` (falling back to `(NOW() AT TIME ZONE 'Asia/Kolkata')::date`).
+4. In `daily_stock`, shifts the inventory from temporary hold to confirmed sale:
    ```sql
    held = held - v_quantity,
    sold = sold + v_quantity
    ```
-4. Flips the hold record status in `stock_holds` to `'converted'`.
+5. Flips the hold record status in `stock_holds` to `'converted'`.
 
 #### Practical SQL Example
 ```sql
@@ -137,19 +153,18 @@ SELECT convert_stock_hold('e8f9a0b1-3333-4444-5555-666677778888');
 
 ### 1.3 `release_expired_holds()`
 
-* **Schema Location**: Section 5 (`release_expired_holds`)
+* **Schema Location**: `20261028100000_fix_duplications_and_pnl.sql` (`release_expired_holds`)
 * **Return Type**: `INT` (Total number of expired reservations released)
 
 #### What It Does
-Finds all reservations that expired without being paid and releases their held quantities back into available inventory.
+Finds all reservations that expired without being paid, releases their held quantities back into available inventory on the hold's exact `business_date`, marks linked orders `'expired'`, and records an `'expired'` audit event in `order_events`.
 
 #### What Is the Use of This?
-If a customer receives a payment link in Instagram DM but gets distracted, navigates away, or abandons checkout, their reserved stock shouldn't remain blocked forever.
-1. Sweeps `stock_holds` for records where `status = 'held' AND expires_at < NOW()`.
-2. For each expired hold, decrements `daily_stock.held = held - r.quantity` for the current date.
+If a customer receives a payment link in Instagram DM at 11:50 PM IST and abandons checkout so it expires at 12:05 AM IST (after midnight):
+1. Sweeps `stock_holds` for records where `status = 'held' AND expires_at < NOW()` (`FOR UPDATE SKIP LOCKED`).
+2. Decrements `daily_stock.held = held - r.quantity` on `COALESCE(orders.business_date, stock_holds.business_date, (created_at AT TIME ZONE 'Asia/Kolkata')::date)` — ensuring holds crossing midnight release stock on the exact business date they were reserved from.
 3. Updates `stock_holds.status = 'expired'`.
-4. Returns the total count of restored slots so monitoring jobs can log cleanup activity.
-5. Invoked every 1–2 minutes via background schedulers (e.g., `pg_cron` or backend workers).
+4. If linked to an order (`r.order_id IS NOT NULL`), updates `orders.status = 'expired'` and inserts an `'expired'` row into `order_events` (`actor = 'system'`).
 
 #### Practical SQL Example
 ```sql
@@ -160,27 +175,21 @@ SELECT release_expired_holds();
 
 ---
 
-### 1.4 `record_counter_sale(p_variant_id, p_quantity)`
+### 1.4 `record_counter_sale(p_variant_id, p_quantity, p_business_date)`
 
-* **Schema Location**: Section 5 (`record_counter_sale`)
+* **Schema Location**: `20261028100000_fix_duplications_and_pnl.sql` (`record_counter_sale`)
 * **Return Type**: `INT` (Remaining `available` stock after this counter sale)
+* **Default Date**: `p_business_date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`
 
 #### What It Does
-Records direct walk-in physical store sales on the daily stock ledger and instantly returns the new real-time online availability.
-
-#### What Is the Use of This?
-Home bakers and boutique stores sell through both physical walk-ins and digital chats. When a walk-in customer buys 5 brownies at the register (*"5 brownies counter-la poyiduchu"*), the owner or POS clerk enters this into the merchant app.
-1. Atomically increments `daily_stock.counter_sales = counter_sales + p_quantity`.
-2. PostgreSQL's generated column `available` automatically recalculates:
-   $$\text{available} = \text{opening\_stock} + \text{restocked} - \text{held} - \text{sold} - \text{counter\_sales}$$
-3. Returns `available` immediately so the cashier app can alert the merchant if stock has run out.
-4. Prevents online AI agents from offering or selling inventory that was already purchased at the physical store counter.
+Records direct walk-in physical store sales on the daily stock ledger (only if `available >= p_quantity`) and instantly returns the new real-time online availability.
 
 #### Practical SQL Example
 ```sql
 SELECT record_counter_sale(
-    p_variant_id := 'a1b2c3d4-1111-2222-3333-444455556666',
-    p_quantity   := 5
+    p_variant_id    := 'a1b2c3d4-1111-2222-3333-444455556666',
+    p_quantity      := 5,
+    p_business_date := (NOW() AT TIME ZONE 'Asia/Kolkata')::date
 );
 -- Returns: 12 (12 units still available for online AI sales today)
 ```
@@ -217,14 +226,18 @@ SELECT rollover_daily_stock(
 
 ## 2. Database Triggers & Trigger Functions
 
-Database triggers guarantee business rules and data consistency regardless of which service or API modifies the database.
+Database triggers guarantee business rules, COGS snapshotting, and CRM data consistency regardless of which service or API modifies the database.
 
 | Trigger Name | Target Table | Timing & Event | Trigger Function | Business Purpose & Use Case |
 | :--- | :--- | :--- | :--- | :--- |
 | **`trg_merchants_touch`** | `merchants` | `BEFORE UPDATE` | `fn_touch_updated_at` | Keeps `updated_at` current on tenant profile changes. |
 | **`trg_orders_touch`** | `orders` | `BEFORE UPDATE` | `fn_touch_updated_at` | Automatically updates `orders.updated_at = NOW()` for accurate change tracking. |
-| **`trg_order_timeline`** | `orders` | `AFTER UPDATE OF status` | `fn_log_order_timeline` | Immutable audit log of every order status transition (`draft` $\rightarrow$ `confirmed` $\rightarrow$ `ready` $\rightarrow$ `delivered`). |
-| **`trg_order_paid`** | `orders` | `AFTER UPDATE OF payment_status` | `fn_update_customer_stats` | Live CRM updates: recalculates lifetime orders count and lifetime monetary spend on customer profiles. |
+| **`trg_order_items_sync`** | `order_items` | `BEFORE INSERT OR UPDATE` | `fn_sync_order_items` | Populates `product_name`, `variant_label`, `line_total_minor`, and snapshots `unit_cost_minor` from `product_variants.cost_price_minor`. |
+| **`trg_order_items_recalc_cost`** | `order_items` | `AFTER INSERT OR UPDATE OR DELETE` | `fn_recalc_order_total_cost` | Automatically recalculates `orders.total_cost_minor` (`SUM(quantity * unit_cost_minor)`) for accurate P&L margin calculation. |
+| **`trg_order_paid`** | `orders` | `AFTER INSERT OR UPDATE OF status, payment_status` | `fn_update_customer_stats` | Live CRM updates: increments `lifetime_orders_count` and `lifetime_spent_minor` when paid, and decrements on `'refunded'`. |
+| **`trg_variants_sync`** | `product_variants` | `BEFORE INSERT OR UPDATE` | `fn_sync_variant_fields` | Keeps `price_minor` and `selling_price_minor` synchronized across `INSERT` and `UPDATE`. |
+| **`trg_daily_stock_sync`** | `daily_stock` | `BEFORE INSERT OR UPDATE` | `fn_sync_daily_stock` | Keeps `business_date`/`stock_date` (`Asia/Kolkata` IST) and `opening`/`opening_stock` synchronized across `INSERT` and `UPDATE`. |
+| **`trg_products_sync`** | `products` | `BEFORE INSERT OR UPDATE` | `fn_sync_product_names` | Keeps `name` and `title` synchronized across `INSERT` and `UPDATE`. |
 
 ---
 
@@ -237,41 +250,59 @@ Database triggers guarantee business rules and data consistency regardless of wh
 * **Mechanism**: Sets `NEW.updated_at = NOW()`.
 * **Value**: Ensures clients, sync workers, and cache layers (e.g., Redis / HTTP ETags) always know the exact timestamp when an order or merchant configuration was last altered without having to manually pass timestamps from backend code.
 
-#### 2.2 `fn_log_order_timeline()`
-* **Schema Location**: Section 6 (`fn_log_order_timeline`)
-* **Trigger**: `trg_order_timeline AFTER UPDATE OF status ON orders`
+#### 2.2 `fn_sync_order_items()` & `fn_recalc_order_total_cost()`
+* **Schema Location**: Migration [`20261028100000_fix_duplications_and_pnl.sql`](file:///Volumes/Workspace/Development/01-Active-Projects/sellix-paypal/supabase/migrations/20261028100000_fix_duplications_and_pnl.sql)
+* **Triggers**: `trg_order_items_sync BEFORE INSERT OR UPDATE ON order_items` and `trg_order_items_recalc_cost AFTER INSERT OR UPDATE OR DELETE ON order_items`
 * **Mechanism**:
   ```sql
-  IF (OLD.status IS DISTINCT FROM NEW.status) THEN
-      INSERT INTO order_timeline (
-          order_id, from_status, to_status, triggered_by, comment
-      ) VALUES (
-          NEW.id, OLD.status, NEW.status, 'system', 'Order status updated'
-      );
+  -- 1. Snapshot unit_cost_minor from product_variants.cost_price_minor on insert/update
+  IF NEW.variant_id IS NOT NULL AND COALESCE(NEW.unit_cost_minor, 0) = 0 THEN
+      SELECT COALESCE(pv.cost_price_minor, 0)
+        INTO NEW.unit_cost_minor
+        FROM product_variants pv
+       WHERE pv.id = NEW.variant_id;
   END IF;
+
+  -- 2. Maintain orders.total_cost_minor automatically
+  UPDATE orders
+     SET total_cost_minor = COALESCE((
+         SELECT SUM(oi.quantity * oi.unit_cost_minor)
+           FROM order_items oi
+          WHERE oi.order_id = v_order_id
+     ), 0)
+   WHERE id = v_order_id;
   ```
 * **Value**:
-  - Provides a 100% tamper-evident audit history of order lifecycles.
-  - Helps resolve customer support disputes ("When did my cake go out for delivery?").
-  - Powers timeline UI widgets on customer tracking web pages.
+  - Snapshots the historical Cost of Goods Sold (`unit_cost_minor`) at the moment of order placement so future catalog cost adjustments never corrupt historical P&L margins.
+  - Keeps `orders.total_cost_minor` accurate at all times for `v_merchant_pnl_summary`.
 
 #### 2.3 `fn_update_customer_stats()`
-* **Schema Location**: Section 6 (`fn_update_customer_stats`)
-* **Trigger**: `trg_order_paid AFTER UPDATE OF status ON orders` (supporting both `status` and `payment_status` settlement in lockstep)
+* **Schema Location**: Migration [`20261028100000_fix_duplications_and_pnl.sql`](file:///Volumes/Workspace/Development/01-Active-Projects/sellix-paypal/supabase/migrations/20261028100000_fix_duplications_and_pnl.sql)
+* **Trigger**: `trg_order_paid AFTER INSERT OR UPDATE OF status, payment_status ON orders`
 * **Mechanism**:
   ```sql
-  IF (OLD.payment_status <> 'paid' AND NEW.payment_status = 'paid') OR
-     (OLD.status <> 'paid' AND NEW.status = 'paid') THEN
+  v_was_paid := (TG_OP = 'UPDATE') AND (COALESCE(OLD.payment_status, '') = 'paid' OR COALESCE(OLD.status, '') = 'paid');
+  v_is_paid  := (COALESCE(NEW.payment_status, '') = 'paid' OR COALESCE(NEW.status, '') = 'paid');
+  v_was_refunded := (TG_OP = 'UPDATE') AND (COALESCE(OLD.payment_status, '') = 'refunded' OR COALESCE(OLD.status, '') = 'refunded');
+  v_is_refunded  := (COALESCE(NEW.payment_status, '') = 'refunded' OR COALESCE(NEW.status, '') = 'refunded');
+
+  IF (NOT v_was_paid) AND v_is_paid THEN
       UPDATE customers
       SET lifetime_orders_count = lifetime_orders_count + 1,
-          lifetime_spent_minor = lifetime_spent_minor + COALESCE(NEW.total_minor, 0)
+          lifetime_spent_minor = lifetime_spent_minor + COALESCE(NEW.total_minor, 0),
+          last_order_at = NOW()
+      WHERE id = NEW.customer_id;
+  ELSIF v_was_paid AND (NOT v_was_refunded) AND v_is_refunded THEN
+      UPDATE customers
+      SET lifetime_orders_count = GREATEST(0, lifetime_orders_count - 1),
+          lifetime_spent_minor = GREATEST(0, lifetime_spent_minor - COALESCE(NEW.total_minor, 0))
       WHERE id = NEW.customer_id;
   END IF;
   ```
 * **Value**:
-  - Automatically identifies High-Value Customers (VIPs) for special treatment or discounts.
-  - Informs the AI agent during conversations (e.g., *"Welcome back! You've placed 12 orders with us"*).
-  - Eliminates slow `SUM(orders.total_amount)` aggregations over millions of rows whenever a customer profile is fetched.
+  - Supports both direct paid inserts (e.g., `record_counter_sale()`) and subsequent payment transitions without double-counting when `status` and `payment_status` are updated in separate steps.
+  - Properly decrements `lifetime_orders_count` and `lifetime_spent_minor` when an order is refunded.
+  - Eliminates slow `SUM(orders.total_minor)` aggregations over millions of rows whenever a customer profile is fetched.
 
 ---
 
@@ -282,11 +313,11 @@ Views present pre-computed, optimized abstractions over complex multi-table join
 ---
 
 ### 3.1 `v_active_daily_inventory`
-* **Schema Location**: Section 7 (`v_active_daily_inventory`)
+* **Schema Location**: Migration [`20261028100000_fix_duplications_and_pnl.sql`](file:///Volumes/Workspace/Development/01-Active-Projects/sellix-paypal/supabase/migrations/20261028100000_fix_duplications_and_pnl.sql)
 * **Primary Consumer**: Dual-Channel AI Agents (WhatsApp & Instagram DM bots).
 
 #### What It Does
-Joins `products`, `product_variants`, `daily_stock`, and `story_registry` to expose what items are available *today*, their prices, real-time stock balances, and any linked Instagram Story menu images.
+Joins `products`, `product_variants`, `daily_stock`, and `story_registry` for today's Indian Standard Time date (`(NOW() AT TIME ZONE 'Asia/Kolkata')::date`) to expose what items are available *today*, their live prices (`COALESCE(pv.price_minor, pv.selling_price_minor)`), real-time stock balances, and any linked Instagram Story menu images.
 
 #### Column Reference
 | Column | Type | Description |
@@ -296,7 +327,7 @@ Joins `products`, `product_variants`, `daily_stock`, and `story_registry` to exp
 | `product_name` | `VARCHAR(255)` | Main item title (e.g., "Fudge Brownie Box") |
 | `variant_id` | `UUID` | Unique variant ID needed to reserve stock |
 | `variant_name` | `VARCHAR(150)` | Size/flavor (e.g., "Pack of 6", "500g Eggless") |
-| `selling_price_minor` | `BIGINT` | Price in minor currency units (paise / cents) |
+| `selling_price_minor` | `BIGINT` | Price in minor currency units (paise) |
 | `available` | `INT` | Computed real-time stock available right now |
 | `menu_image_url` | `TEXT` | Cached image URL from active Instagram Story menu |
 
@@ -311,11 +342,11 @@ WHERE merchant_id = 'c1d2e3f4-0000-0000-0000-000000000001'
 ---
 
 ### 3.2 `v_merchant_pnl_summary`
-* **Schema Location**: Section 7 (`v_merchant_pnl_summary`)
-* **Primary Consumer**: Merchant Web Dashboard & Analytics Reports.
+* **Schema Location**: Migration [`20261028100000_fix_duplications_and_pnl.sql`](file:///Volumes/Workspace/Development/01-Active-Projects/sellix-paypal/supabase/migrations/20261028100000_fix_duplications_and_pnl.sql)
+* **Primary Consumer**: Merchant Web/Mobile Dashboard & AI Business Monitor.
 
 #### What It Does
-Aggregates sales, costs, delivery fees, payment gateway processing fees, and customer refunds by merchant and date to deliver a real-time Profit & Loss statement.
+Aggregates settled sales (`o.payment_status IN ('paid', 'partially_refunded', 'refunded')` or settled operational states), snapshotted COGS (`orders.total_cost_minor`), shipping fees (`orders.shipping_minor`), pre-aggregated payment gateway fees (`payments.fee_minor` via CTE `order_fees`), and pre-aggregated customer refunds (`refunds.amount_minor` via CTE `order_refunds`) grouped by `o.merchant_id` and IST `o.business_date AS order_date` without 1-to-N join fan-out inflation.
 
 #### Profit Calculation Formula
 $$\text{Net Profit} = \text{Gross Sales} - \text{COGS} - \text{Delivery Fees} - \text{Gateway Fees} - \text{Refunds}$$
@@ -324,14 +355,14 @@ $$\text{Net Profit} = \text{Gross Sales} - \text{COGS} - \text{Delivery Fees} - 
 | Column | Type | Description |
 | :--- | :--- | :--- |
 | `merchant_id` | `UUID` | Merchant ID |
-| `order_date` | `DATE` | Grouping calendar date |
-| `total_orders` | `BIGINT` | Total confirmed non-cancelled orders |
-| `gross_sales_minor` | `BIGINT` | Total revenue in paise |
-| `total_cogs_minor` | `BIGINT` | Cost of Goods Sold (ingredient / product cost) |
-| `total_delivery_fees_minor` | `BIGINT` | Delivery fees billed to customers |
-| `total_gateway_fees_minor` | `BIGINT` | Payment gateway charges (Razorpay / Stripe) |
-| `total_refunds_minor` | `BIGINT` | Deductions for returned or cancelled orders |
-| `net_profit_minor` | `BIGINT` | True bottom-line net profit |
+| `order_date` | `DATE` | IST business date (`o.business_date`) |
+| `total_orders` | `BIGINT` | Total settled non-cancelled/non-expired orders |
+| `gross_sales_minor` | `BIGINT` | Total revenue in paise (`SUM(o.total_minor)`) |
+| `total_cogs_minor` | `BIGINT` | Cost of Goods Sold (`SUM(o.total_cost_minor)`) |
+| `total_delivery_fees_minor` | `BIGINT` | Delivery/shipping fees (`SUM(o.shipping_minor)`) |
+| `total_gateway_fees_minor` | `BIGINT` | Payment gateway fees from `payments.fee_minor` |
+| `total_refunds_minor` | `BIGINT` | Deductions from `refunds.amount_minor` |
+| `net_profit_minor` | `BIGINT` | True bottom-line net profit in paise |
 
 #### Query Example for Owner Dashboard
 ```sql
@@ -349,7 +380,27 @@ LIMIT 30;
 
 ---
 
-### 3.3 `v_pending_escalations`
+### 3.3 `order_timeline` (Unified Audit View over `order_events`)
+* **Schema Location**: Migration [`20261028100000_fix_duplications_and_pnl.sql`](file:///Volumes/Workspace/Development/01-Active-Projects/sellix-paypal/supabase/migrations/20261028100000_fix_duplications_and_pnl.sql)
+* **Primary Consumer**: Order Lifecycle Audit API (`GET /v1/orders/{order_id}/timeline`) & Merchant App.
+
+#### What It Does
+Projects status-transition events from the canonical `order_events` table (`WHERE oe.to_status IS NOT NULL AND (oe.from_status IS DISTINCT FROM oe.to_status)`), preserving the true `actor` (`agent`, `merchant`, `paypal`, `system`) as `triggered_by` and surfacing rich context (`oe.payload->>'comment'` or `oe.payload->>'reason'`) as `comment`.
+
+#### Column Reference
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `id` | `UUID` | Event ID from `order_events.id` |
+| `order_id` | `UUID` | Parent order ID |
+| `from_status` | `VARCHAR(32)` | Previous status (`NULL` on initial placement) |
+| `to_status` | `VARCHAR(32)` | New status (`awaiting_payment`, `paid`, `confirmed`, `ready`, `delivered`, `completed`, `cancelled`, `expired`, `refunded`) |
+| `triggered_by` | `VARCHAR(64)` | Actor that triggered the transition (`agent`, `merchant`, `paypal`, `system`) |
+| `comment` | `TEXT` | Transition note, cancellation reason, or default description |
+| `created_at` | `TIMESTAMPTZ` | Exact transition timestamp |
+
+---
+
+### 3.4 `v_pending_escalations`
 * **Schema Location**: Section 7 (`v_pending_escalations`)
 * **Primary Consumer**: Merchant Owner Mobile App (Flutter / React Native).
 
@@ -379,12 +430,12 @@ ORDER BY created_at ASC;
 
 ---
 
-### 3.4 `v_missed_demand_summary`
+### 3.5 `v_missed_demand_summary`
 * **Schema Location**: Section 7 (`v_missed_demand_summary`)
 * **Primary Consumer**: End-of-Day (EOD) Analytics & AI Production Advisor.
 
 #### What It Does
-Aggregates customer queries where an item was requested but could not be fulfilled (e.g., sold out, shop closed, or unlisted flavor). Answers the owner's question: *"What should I bake more of tomorrow?"*
+Aggregates customer queries from the last 7 days in IST (`((NOW() AT TIME ZONE 'Asia/Kolkata')::date - INTERVAL '7 days')`) where an item was requested but could not be fulfilled (e.g., sold out, shop closed, or unlisted flavor). Answers the owner's question: *"What should I bake more of tomorrow?"*
 
 #### Column Reference
 | Column | Type | Description |
@@ -407,9 +458,10 @@ ORDER BY total_units_missed DESC;
 
 ## 4. Performance Indexes Supporting Views & Functions
 
-To maintain sub-millisecond query responses under high conversation concurrency, the following indexes are specifically configured:
+To maintain sub-millisecond query responses under high conversation concurrency without redundant write amplification, the following canonical indexes are configured:
 
-* `idx_daily_stock_variant_date`: Accelerates `hold_stock()` and `record_counter_sale()` lookups on `daily_stock(variant_id, stock_date)`.
+* `daily_stock_variant_id_business_date_key` (`UNIQUE (variant_id, business_date)`): Accelerates `hold_stock()`, `convert_stock_hold()`, `release_expired_holds()`, and `record_counter_sale()` lookups on `daily_stock`.
 * `idx_stock_holds_active`: Makes `release_expired_holds()` run instantly via `stock_holds(variant_id, status, expires_at)`.
-* `idx_orders_merchant_date`: Powers the date-bucketed aggregations in `v_merchant_pnl_summary`.
+* `orders_merchant_idx` (`orders(merchant_id, business_date, status)`): Powers the IST date-bucketed aggregations in `v_merchant_pnl_summary` and merchant order list queries.
+* `messages_conversation_idx` (`messages(conversation_id, created_at)`): Powers fast chronological chat history loading.
 * `idx_story_registry_lookup`: Speeds up image joins in `v_active_daily_inventory`.

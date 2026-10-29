@@ -377,3 +377,69 @@ async def test_custom_rollover_exceeds_available_raises_conflict(
                 business_date=TODAY,
                 selections=[RolloverItemSelection(variant_id=cookie_var.id, rollover_quantity=10)],
             )
+
+
+async def test_active_daily_inventory_view_reflects_updated_variant_price(
+    shop: ChannelConnection,
+) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import text
+
+    ist_today = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date()
+
+    async with session_scope() as session:
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=ist_today,
+            lines=[OpeningStockLine("Filter Coffee Cake", None, 6000, 10)],
+        )
+        # Update price on the same day from 6000 to 7500
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=ist_today,
+            lines=[OpeningStockLine("Filter Coffee Cake", None, 7500, 10)],
+        )
+
+        view_price = await session.scalar(
+            text(
+                "SELECT selling_price_minor FROM v_active_daily_inventory "
+                "WHERE merchant_id = :mid AND product_name = 'Filter Coffee Cake'"
+            ),
+            {"mid": shop.merchant_id},
+        )
+        assert view_price == 7500
+
+
+async def test_release_expired_holds_uses_stored_business_date_across_days(
+    shop: ChannelConnection,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    async with session_scope() as session:
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=TODAY,
+            lines=[OpeningStockLine("Filter Coffee Cake", None, 7500, 10)],
+        )
+        ledger = await inventory.day_ledger(session, shop.merchant_id, TODAY)
+        variant_id = ledger[0].variant_id
+
+        held = await inventory.hold(
+            session,
+            variant_id=variant_id,
+            business_date=TODAY,
+            quantity=3,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        assert held is True
+
+    async with session_scope() as session:
+        await inventory.release_expired_holds(session, now=datetime.now(UTC))
+        ledger_after = await inventory.day_ledger(session, shop.merchant_id, TODAY)
+        assert ledger_after[0].held == 0
+        assert ledger_after[0].available == 10

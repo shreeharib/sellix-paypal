@@ -22,6 +22,7 @@ demo_rollover.py
 demo_catalog.py
 demo_triple_status.py
 demo_enterprise_order.py
+demo_live_agent_tools.py
 conflicts.md
 improvements.md
 AGENTS.MD

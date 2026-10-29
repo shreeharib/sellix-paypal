@@ -353,3 +353,152 @@ async def test_sql_procedure_release_expired_holds_sweeps_and_syncs(
 
         order = await session.get(Order, placed.order_id)
         assert order is not None and order.status == "expired"
+
+
+async def test_pnl_summary_view_computes_exact_profit_from_payments_cogs_and_refunds(
+    stocked: ChannelConnection,
+) -> None:
+    from app.modules.catalog.models import ProductVariant
+    from app.modules.payments.models import Payment
+
+    # Set unit cost on Brownie variant = 4000 paise (selling price is 9000 paise)
+    async with session_scope() as session:
+        brownie_var = await session.scalar(
+            select(ProductVariant).where(
+                ProductVariant.merchant_id == stocked.merchant_id,
+                ProductVariant.price_minor == 9000,
+            )
+        )
+        assert brownie_var is not None
+        brownie_var.cost_price_minor = 4000
+
+    # 1. Place a paid order of 2 Brownies (gross = 18000, cogs = 8000)
+    paid_order = await place(stocked, request(("Brownie", None, 2)))
+
+    # 2. Place an unpaid abandoned order of 1 Brownie (must NOT be counted in P&L revenue)
+    await place(stocked, request(("Brownie", None, 1)))
+
+    # 3. Record 1 failed payment attempt + 1 completed payment with fee_minor = 500
+    async with session_scope() as session:
+        session.add(
+            Payment(
+                merchant_id=stocked.merchant_id,
+                order_id=paid_order.order_id,
+                provider="paypal",
+                method="paypal_wallet",
+                provider_order_id=f"FAIL-{paid_order.order_id}",
+                status="failed",
+                currency="INR",
+                amount_minor=18000,
+                fee_minor=0,
+            )
+        )
+        session.add(
+            Payment(
+                merchant_id=stocked.merchant_id,
+                order_id=paid_order.order_id,
+                provider="paypal",
+                method="paypal_wallet",
+                provider_order_id=f"OK-{paid_order.order_id}",
+                provider_capture_id=f"CAP-{paid_order.order_id}",
+                status="completed",
+                currency="INR",
+                amount_minor=18000,
+                fee_minor=500,
+            )
+        )
+        await orders.record_payment(
+            session, paid_order.order_id, amount_minor=18000, currency="INR", actor="paypal"
+        )
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT order_date, total_orders, gross_sales_minor, total_cogs_minor, "
+                    "total_delivery_fees_minor, total_gateway_fees_minor, total_refunds_minor, "
+                    "net_profit_minor "
+                    "FROM v_merchant_pnl_summary "
+                    "WHERE merchant_id = :mid AND order_date = :bdate"
+                ),
+                {"mid": stocked.merchant_id, "bdate": TODAY},
+            )
+        ).one_or_none()
+
+        assert row is not None
+        assert row.order_date == TODAY
+        assert row.total_orders == 1
+        assert row.gross_sales_minor == 18000
+        assert row.total_cogs_minor == 8000
+        assert row.total_delivery_fees_minor == 0
+        assert row.total_gateway_fees_minor == 500
+        assert row.total_refunds_minor == 0
+        assert row.net_profit_minor == 9500
+
+
+async def test_customer_lifetime_stats_decrement_on_refund(
+    stocked: ChannelConnection,
+) -> None:
+    from app.modules.conversations.models import Customer
+
+    paid_order = await place(stocked, request(("Brownie", None, 2)))
+
+    async with session_scope() as session:
+        await orders.record_payment(
+            session, paid_order.order_id, amount_minor=18000, currency="INR", actor="paypal"
+        )
+        order_obj = await session.get(Order, paid_order.order_id)
+        assert order_obj is not None
+        cust = await session.get(Customer, order_obj.customer_id)
+        assert cust is not None
+        assert cust.lifetime_orders_count == 1
+        assert cust.lifetime_spent_minor == 18000
+
+        await orders.refund_order(session, paid_order.order_id, restock=True, reason="Damaged box")
+        await session.flush()
+        await session.refresh(cust)
+        assert cust.lifetime_orders_count == 0
+        assert cust.lifetime_spent_minor == 0
+
+
+async def test_order_timeline_preserves_initial_placement_actor_and_merchant_comments(
+    stocked: ChannelConnection,
+) -> None:
+    placed = await place(stocked, request(("Brownie", None, 2)))
+
+    async with session_scope() as session:
+        await orders.mark_order_paid(
+            session, placed.order_id, merchant_id=stocked.merchant_id, actor="merchant"
+        )
+        await orders.advance_order_status(
+            session,
+            placed.order_id,
+            merchant_id=stocked.merchant_id,
+            new_status="ready",
+            actor="merchant",
+            comment="Packed with ice pack",
+        )
+        timeline = await orders.get_order_timeline(session, placed.order_id, stocked.merchant_id)
+
+    assert [(t.from_status, t.to_status, t.triggered_by) for t in timeline] == [
+        (None, "awaiting_payment", "agent"),
+        ("awaiting_payment", "paid", "merchant"),
+        ("paid", "ready", "merchant"),
+    ]
+    assert timeline[-1].comment == "Packed with ice pack"
+
+
+async def test_all_business_tables_have_rls_enabled(stocked: ChannelConnection) -> None:
+    async with session_scope() as session:
+        unprotected = list(
+            await session.scalars(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = 'public' "
+                    "AND tablename NOT LIKE 'procrastinate_%' "
+                    "AND rowsecurity = false "
+                    "ORDER BY tablename"
+                )
+            )
+        )
+    assert unprotected == []

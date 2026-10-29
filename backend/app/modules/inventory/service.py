@@ -158,6 +158,7 @@ async def hold(
         variant_id=variant_id,
         conversation_id=conversation_id,
         order_id=order_id,
+        business_date=business_date,
         quantity=quantity,
         status="held",
         expires_at=expires_at or (datetime.now(UTC) + timedelta(minutes=15)),
@@ -248,12 +249,12 @@ async def release_expired_holds(
         )
     )
     affected_order_ids: list[uuid.UUID] = []
-    b_date = business_date or cutoff.date()
     for hold_rec in expired_holds:
+        target_date = business_date or hold_rec.business_date or cutoff.date()
         await _apply(
             session,
             hold_rec.variant_id,
-            b_date,
+            target_date,
             condition=DailyStock.held >= hold_rec.quantity,
             held=DailyStock.held - hold_rec.quantity,
         )
