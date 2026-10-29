@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.jobs import jobs, run_worker
 from app.core.logging import configure_logging
+from app.modules.agent import service as agent
 from app.modules.channels.router import router as channels_router
 from app.modules.payments.router import router as payments_router
 from app.webhooks import meta, paypal
@@ -28,6 +29,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.app_env != "local":
             raise RuntimeError(f"Missing required settings: {', '.join(missing)}")
         log.warning("config.missing_settings", settings=missing)
+    agent.load_prompts()
 
     async with jobs.open_async():
         worker: asyncio.Task[None] | None = None

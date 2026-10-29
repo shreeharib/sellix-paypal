@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
-from app.modules.orders.models import Order, OrderEvent, OrderItem, OrderTimeline, Refund
+from app.modules.orders.models import (
+    Order,
+    OrderEvent,
+    OrderItem,
+    OrderTimeline,
+    Refund,
+    RefundRequest,
+)
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
@@ -25,6 +32,8 @@ from app.modules.orders.schemas import (
     PlacedOrder,
     Quote,
     QuoteLine,
+    RefundStatus,
+    RefundTicket,
 )
 
 
@@ -282,15 +291,77 @@ async def refund_order(
     reason: str | None = None,
     actor: str = "merchant",
 ) -> None:
-    """Mark an order as refunded, record in refunds table, and release stock."""
+    """Refund an order at once, when there's no payment provider to wait for."""
+    ticket = await open_refund(session, order_id, restock=restock, reason=reason)
+    await settle_refund(session, ticket.id, status="completed", actor=actor)
+
+
+async def open_refund(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    restock: bool = True,
+    reason: str | None = None,
+) -> RefundTicket:
+    """Record a pending refund of the order's total, or return the refund already open for it.
+
+    Commit it before asking the payment provider for the money, so a refund the provider makes
+    is always on record.
+    """
     order = await session.scalar(select(Order).where(Order.id == order_id).with_for_update())
     if order is None:
         raise LookupError(f"No order {order_id}")
-    if order.status == "refunded":
+    request = await session.scalar(
+        select(RefundRequest).where(
+            RefundRequest.order_id == order_id,
+            RefundRequest.status.in_(("pending", "completed")),
+        )
+    )
+    if request is None:
+        if order.status == "refunded":
+            raise RuntimeError(f"Order {order_id} is already refunded")
+        request = RefundRequest(
+            merchant_id=order.merchant_id,
+            order_id=order.id,
+            amount_minor=order.total_minor,
+            reason=reason,
+            is_restocked=restock,
+            status="pending",
+        )
+        session.add(request)
+        await session.flush()
+    return _refund_ticket(request)
+
+
+async def settle_refund(
+    session: AsyncSession,
+    refund_id: uuid.UUID,
+    *,
+    status: RefundStatus,
+    provider_refund_id: str | None = None,
+    actor: str = "merchant",
+) -> None:
+    """Record the provider's answer; a completed refund refunds the order and returns its stock."""
+    request = await session.scalar(
+        select(RefundRequest).where(RefundRequest.id == refund_id).with_for_update()
+    )
+    if request is None:
+        raise LookupError(f"No refund {refund_id}")
+    if request.status != "pending":
+        return
+    request.status = status
+    request.provider_refund_id = provider_refund_id or request.provider_refund_id
+    request.updated_at = datetime.now(UTC)
+    if status != "completed":
         return
 
+    order = await session.scalar(
+        select(Order).where(Order.id == request.order_id).with_for_update()
+    )
+    if order is None or order.status == "refunded":
+        return
     previous = order.status
-    if restock and previous in ("paid", "completed", "confirmed"):
+    if request.is_restocked and previous in ("paid", "completed", "confirmed"):
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
         for item in items:
             await inventory.release(
@@ -305,12 +376,41 @@ async def refund_order(
     session.add(
         Refund(
             order_id=order.id,
-            refund_amount_minor=order.total_minor,
-            reason=reason,
-            is_restocked=restock,
+            refund_amount_minor=request.amount_minor,
+            reason=request.reason,
+            is_restocked=request.is_restocked,
         )
     )
-    _log(session, order, "refunded", previous, "refunded", actor, {"reason": reason})
+    _log(session, order, "refunded", previous, "refunded", actor, {"reason": request.reason})
+
+
+async def pending_refunds(
+    session: AsyncSession,
+    *,
+    older_than: timedelta | None = None,
+    order_id: uuid.UUID | None = None,
+) -> list[RefundTicket]:
+    """Refunds still waiting for the payment provider, oldest first."""
+    query = (
+        select(RefundRequest)
+        .where(RefundRequest.status == "pending")
+        .order_by(RefundRequest.created_at)
+    )
+    if older_than is not None:
+        query = query.where(RefundRequest.created_at < func.now() - older_than)
+    if order_id is not None:
+        query = query.where(RefundRequest.order_id == order_id)
+    return [_refund_ticket(request) for request in await session.scalars(query)]
+
+
+def _refund_ticket(request: RefundRequest) -> RefundTicket:
+    return RefundTicket(
+        id=request.id,
+        order_id=request.order_id,
+        status=request.status,
+        reason=request.reason,
+        provider_refund_id=request.provider_refund_id,
+    )
 
 
 async def mark_order_paid(

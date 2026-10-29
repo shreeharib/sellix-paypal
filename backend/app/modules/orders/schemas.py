@@ -80,6 +80,20 @@ class PaymentResult:
     outcome: PaymentOutcome
 
 
+RefundStatus = Literal["pending", "completed", "failed"]
+
+
+@dataclass(frozen=True)
+class RefundTicket:
+    """A refund on record; `pending` until the payment provider confirms it."""
+
+    id: uuid.UUID
+    order_id: uuid.UUID
+    status: str
+    reason: str | None
+    provider_refund_id: str | None
+
+
 @dataclass(frozen=True)
 class ExpiredOrder:
     order_id: uuid.UUID

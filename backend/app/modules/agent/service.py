@@ -1,11 +1,12 @@
 """Public interface of the agent module."""
 
 import uuid
+from typing import Any
 
 import structlog
 
 from app.core.db import session_scope
-from app.modules.agent import customer_agent, llm
+from app.modules.agent import customer_agent, llm, prompt_store
 from app.modules.agent.models import AiUsage
 from app.modules.agent.schemas import ChatMessage, CustomerReply
 from app.modules.inventory import service as inventory
@@ -26,6 +27,21 @@ class AgentUnavailable(RuntimeError):
 def system_note(text: str) -> str:
     """A note from the shop's system in the conversation (not from the customer)."""
     return customer_agent.system_note(text)
+
+
+def prompt(prompt_id: str, **values: Any) -> str:
+    """A prompt file from agent/prompts/, filled with code-produced values."""
+    return prompt_store.render(prompt_id, **values)
+
+
+def fixed_text(template_id: str, language: str, **values: Any) -> str:
+    """A fixed customer-facing message from agent/prompts/templates/, in the given language."""
+    return prompt_store.text(template_id, language, **values)
+
+
+def load_prompts() -> None:
+    """Load and check every prompt file; called at startup so a broken file fails fast."""
+    prompt_store.load()
 
 
 async def reply_to_customer(

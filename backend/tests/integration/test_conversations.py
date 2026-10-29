@@ -2,13 +2,13 @@ import uuid
 
 import pytest
 from procrastinate.testing import InMemoryConnector
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.db import session_scope
 from app.modules.channels.models import ChannelConnection
 from app.modules.channels.schemas import IncomingMessage
-from app.modules.conversations import service
-from app.modules.conversations.models import Conversation, Message
+from app.modules.conversations import outbox, service
+from app.modules.conversations.models import Conversation, Message, OutboundMessage
 from app.modules.merchants.models import Merchant
 from app.webhooks.models import WebhookEvent
 from app.webhooks.tasks import process_meta_event
@@ -86,18 +86,12 @@ async def test_echo_of_our_own_reply_is_matched_not_treated_as_the_merchant(
     async with session_scope() as session:
         turn = await service.handle_incoming(session, customer_message())
         assert turn is not None
-        session.add(
-            Message(
-                merchant_id=shop.merchant_id,
-                conversation_id=turn.conversation_id,
-                direction="outbound",
-                sender="agent",
-                body="Chocolate or red velvet?",
-                details={},
-                status="sending",
-            )
+        await outbox.queue_text(
+            session, conversation_id=turn.conversation_id, text="Chocolate or red velvet?", key="r"
         )
+        await session.execute(update(OutboundMessage).values(status="sending"))
 
+    # The echo arrives before Instagram's send API has answered us.
     async with session_scope() as session:
         await service.handle_incoming(session, echo("m-2", "Chocolate or red velvet?"))
 

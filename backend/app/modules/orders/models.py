@@ -168,3 +168,23 @@ class Refund(Base):
     reason: Mapped[str | None] = mapped_column(nullable=True, default=None)
     is_restocked: Mapped[bool] = mapped_column(server_default=text("true"))
     processed_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class RefundRequest(Base):
+    """A refund asked of the payment provider; a `refunds` row is written once it completes."""
+
+    __tablename__ = "refund_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    merchant_id: Mapped[uuid.UUID]
+    order_id: Mapped[uuid.UUID]
+    amount_minor: Mapped[int]
+    reason: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    is_restocked: Mapped[bool] = mapped_column(server_default=text("true"))
+    # pending | completed | failed
+    status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    provider_refund_id: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())

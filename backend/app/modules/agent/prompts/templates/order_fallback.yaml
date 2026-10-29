@@ -1,0 +1,5 @@
+id: v1.order_fallback
+version: 1
+description: Sent by code if the v1 agent fails after an order with a payment link was placed.
+texts:
+  en: "Order #{{ number }} ({{ total }}): {{ link }}"

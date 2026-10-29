@@ -564,6 +564,7 @@ async def test_one_shop_cannot_refund_another_shops_order(
         refunded.append(capture_id)
         return paypal.RefundResult("REFUND-1", "COMPLETED", 30000, "INR")
 
+    monkeypatch.setattr(paypal, "configured", lambda: True)
     monkeypatch.setattr(paypal, "refund_capture", refund_capture)
     owner = await sign_in_as(shop.merchant_id)
     await api.put(

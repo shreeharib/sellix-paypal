@@ -270,6 +270,15 @@ async def refund_capture(
         request_id=f"sellix-refund-{capture_id}",
         json=payload,
     )
+    return _refund_result(data)
+
+
+async def get_refund(refund_id: str) -> RefundResult:
+    """Ask PayPal for a refund's current state."""
+    return _refund_result(await _request("GET", f"/v2/payments/refunds/{refund_id}"))
+
+
+def _refund_result(data: Mapping[str, Any]) -> RefundResult:
     amt = data.get("amount", {})
     return RefundResult(
         refund_id=str(data.get("id", "")),

@@ -14,13 +14,18 @@ GRAPH_URL = "https://graph.instagram.com"
 SCOPES = ("instagram_business_basic", "instagram_business_manage_messages")
 WEBHOOK_FIELDS = "messages,messaging_postbacks"
 MAX_TEXT_LENGTH = 1000  # Instagram's limit for one text message
+MAX_TEXT_BYTES = 1000  # the same limit, as Instagram counts it: UTF-8 bytes
 TIMEOUT_SECONDS = 15
 
 
 class InstagramAPIError(RuntimeError):
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(
+        self, status: int, message: str, *, code: int | None = None, subcode: int | None = None
+    ) -> None:
         super().__init__(f"Instagram API error {status}: {message}")
         self.status = status
+        self.code = code  # Meta's error code, e.g. 10, 190, 551, 613
+        self.subcode = subcode  # Meta's error_subcode, e.g. 2018278 (outside the window)
 
 
 @dataclass(frozen=True)
@@ -185,8 +190,25 @@ async def _request(
     except ValueError:
         body = {}
     if response.is_error:
-        raise InstagramAPIError(response.status_code, _error_message(body) or response.text[:300])
+        raise error_from_response(response.status_code, body, fallback=response.text[:300])
     return body
+
+
+def error_from_response(
+    status: int, body: dict[str, Any], *, fallback: str = ""
+) -> InstagramAPIError:
+    error = body.get("error")
+    details: dict[str, Any] = error if isinstance(error, dict) else {}
+    return InstagramAPIError(
+        status,
+        _error_message(body) or fallback,
+        code=_as_int(details.get("code")),
+        subcode=_as_int(details.get("error_subcode")),
+    )
+
+
+def _as_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _error_message(body: dict[str, Any]) -> str:

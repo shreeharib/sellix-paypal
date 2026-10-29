@@ -4,7 +4,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from sqlalchemy import select
@@ -21,6 +21,7 @@ log = structlog.get_logger()
 
 OAUTH_STATE_TTL_SECONDS = 15 * 60
 MAX_TEXT_LENGTH = instagram.MAX_TEXT_LENGTH  # longest message one send can carry
+MAX_TEXT_BYTES = instagram.MAX_TEXT_BYTES  # Instagram counts UTF-8 bytes, not characters
 _CONNECT_PURPOSE = "instagram_connect"
 _LOGIN_PURPOSE = "app_login"
 _PKCE_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{43}")  # base64url SHA-256, unpadded
@@ -30,8 +31,19 @@ class ChannelConnectError(RuntimeError):
     """Connecting a channel account failed; the message is safe to show the merchant."""
 
 
+SendFailureReason = Literal["retryable", "window_closed", "recipient_unavailable", "permanent"]
+
+
 class SendFailed(RuntimeError):
-    pass
+    """A send didn't go through; `reason` says whether trying again can help."""
+
+    def __init__(self, message: str, *, reason: SendFailureReason = "permanent") -> None:
+        super().__init__(message)
+        self.reason: SendFailureReason = reason
+
+    @property
+    def retryable(self) -> bool:
+        return self.reason == "retryable"
 
 
 @dataclass(frozen=True)
@@ -93,7 +105,26 @@ async def send_text(credentials: SendCredentials, recipient_id: str, text: str) 
             text=text,
         )
     except instagram.InstagramAPIError as exc:
-        raise SendFailed(str(exc)) from exc
+        raise SendFailed(str(exc), reason=_send_failure_reason(exc)) from exc
+
+
+# Meta's error codes for sends. To confirm against real payloads (agent-phase-2.md section 21,
+# item 4) and record them in docs/meta-payloads.md.
+_RATE_LIMIT_CODES = {4, 17, 32, 613}
+_OUTSIDE_WINDOW = (10, 2018278)
+_RECIPIENT_UNAVAILABLE_CODE = 551
+
+
+def _send_failure_reason(exc: instagram.InstagramAPIError) -> SendFailureReason:
+    if exc.status == 0 or exc.status == 429 or exc.status >= 500:
+        return "retryable"
+    if exc.code in _RATE_LIMIT_CODES:
+        return "retryable"
+    if (exc.code, exc.subcode) == _OUTSIDE_WINDOW:
+        return "window_closed"
+    if exc.code == _RECIPIENT_UNAVAILABLE_CODE:
+        return "recipient_unavailable"
+    return "permanent"
 
 
 def instagram_redirect_uri() -> str:

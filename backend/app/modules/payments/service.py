@@ -4,10 +4,11 @@ An order counts as paid only when PayPal confirms the capture: never from a scre
 and never from the buyer merely returning to our page.
 """
 
+import dataclasses
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import structlog
@@ -19,7 +20,7 @@ from app.core.config import get_settings
 from app.core.db import session_scope
 from app.modules.merchants import service as merchants
 from app.modules.orders import service as orders
-from app.modules.orders.schemas import PaymentResult, PlacedOrder
+from app.modules.orders.schemas import PaymentResult, PlacedOrder, RefundStatus, RefundTicket
 from app.modules.payments import paypal, upi
 from app.modules.payments.models import Payment
 from app.modules.shop_profile import service as shop_profile
@@ -422,32 +423,24 @@ async def refund_order(
     reason: str | None = None,
     restock: bool = True,
 ) -> RefundOutcome:
-    """Refund a paid order of this merchant's shop through PayPal and update local records."""
+    """Refund a paid order of this merchant's shop through PayPal.
+
+    The refund is committed as pending before PayPal is called, so money PayPal sends back is
+    always on record. PayPal's answer settles it; if that answer is lost, the
+    PAYMENT.CAPTURE.REFUNDED webhook or reconcile_refunds does.
+    """
+    if not paypal.configured():
+        raise RuntimeError("PayPal isn't configured")
     async with session_scope() as session:
         order = await orders.get_order(session, order_id, merchant_id)
         if order is None:
             raise LookupError(f"No order {order_id}")
-        payment = await session.scalar(
-            select(Payment).where(
-                Payment.order_id == order_id,
-                Payment.merchant_id == merchant_id,
-                Payment.provider == "paypal",
-                Payment.status == "completed",
-            )
-        )
-        if payment is None or not payment.provider_capture_id:
+        capture = await _captured_payment(session, order_id, merchant_id)
+        if capture is None:
             raise RuntimeError(f"No completed PayPal payment capture found for order {order_id}")
+        ticket = await orders.open_refund(session, order_id, restock=restock, reason=reason)
 
-        result = await paypal.refund_capture(
-            payment.provider_capture_id,
-            amount_minor=payment.amount_minor,
-            currency=payment.currency,
-            note=reason,
-        )
-        payment.status = "refunded"
-
-        await orders.refund_order(session, order_id, restock=restock, reason=reason)
-
+    result = await _request_refund(ticket, capture)
     return RefundOutcome(
         order_id=order_id,
         refund_id=result.refund_id,
@@ -455,6 +448,137 @@ async def refund_order(
         currency=result.currency,
         status=result.status,
     )
+
+
+async def reconcile_refunds(older_than: timedelta = timedelta(minutes=5)) -> int:
+    """Settle refunds still pending after `older_than`; returns how many completed."""
+    async with session_scope() as session:
+        stuck = [
+            (ticket, await _captured_payment(session, ticket.order_id))
+            for ticket in await orders.pending_refunds(session, older_than=older_than)
+        ]
+    completed = 0
+    for ticket, capture in stuck:
+        if capture is None:
+            log.error("payments.refund_without_capture", refund_id=str(ticket.id))
+            continue
+        try:
+            if ticket.provider_refund_id:
+                result = await paypal.get_refund(ticket.provider_refund_id)
+                await _record_refund(ticket.id, capture.capture_id, result)
+            else:
+                result = await _request_refund(ticket, capture)
+        except (paypal.PayPalError, RuntimeError) as exc:
+            log.warning(
+                "payments.refund_reconcile_failed", refund_id=str(ticket.id), error=str(exc)
+            )
+            continue
+        if result.status == "COMPLETED":
+            completed += 1
+    return completed
+
+
+@dataclass(frozen=True)
+class _Capture:
+    capture_id: str
+    amount_minor: int
+    currency: str
+
+
+_REFUND_STATUSES: dict[str, RefundStatus] = {
+    "COMPLETED": "completed",
+    "FAILED": "failed",
+    "CANCELLED": "failed",
+}
+
+
+async def _captured_payment(
+    session: AsyncSession, order_id: uuid.UUID, merchant_id: uuid.UUID | None = None
+) -> _Capture | None:
+    query = select(Payment).where(
+        Payment.order_id == order_id,
+        Payment.provider == "paypal",
+        Payment.status == "completed",
+    )
+    if merchant_id is not None:
+        query = query.where(Payment.merchant_id == merchant_id)
+    payment = await session.scalar(query)
+    if payment is None or not payment.provider_capture_id:
+        return None
+    return _Capture(payment.provider_capture_id, payment.amount_minor, payment.currency)
+
+
+async def _request_refund(ticket: RefundTicket, capture: _Capture) -> paypal.RefundResult:
+    """Ask PayPal to refund the capture and record its answer.
+
+    Every try uses the same PayPal-Request-Id, so retrying never refunds twice.
+    """
+    try:
+        result = await paypal.refund_capture(
+            capture.capture_id,
+            amount_minor=capture.amount_minor,
+            currency=capture.currency,
+            note=ticket.reason,
+        )
+    except paypal.PayPalError as exc:
+        unknown = paypal.RefundResult(
+            ticket.provider_refund_id or "", "PENDING", capture.amount_minor, capture.currency
+        )
+        if exc.issue == "CAPTURE_FULLY_REFUNDED":
+            # The money is already back with the buyer: an earlier try, or the PayPal dashboard.
+            result = dataclasses.replace(unknown, status="COMPLETED")
+        elif exc.status in (0, 408, 429) or exc.status >= 500:
+            log.warning("payments.refund_unconfirmed", refund_id=str(ticket.id), error=str(exc))
+            return unknown
+        else:
+            await _record_refund(
+                ticket.id, capture.capture_id, dataclasses.replace(unknown, status="FAILED")
+            )
+            raise RuntimeError(f"PayPal refused the refund: {exc}") from exc
+    await _record_refund(ticket.id, capture.capture_id, result)
+    return result
+
+
+async def _record_refund(
+    refund_id: uuid.UUID, capture_id: str, result: paypal.RefundResult
+) -> None:
+    status = _REFUND_STATUSES.get(result.status, "pending")
+    async with session_scope() as session:
+        if status == "completed":
+            payment = await session.scalar(
+                select(Payment)
+                .where(Payment.provider == "paypal", Payment.provider_capture_id == capture_id)
+                .with_for_update()
+            )
+            if payment is not None:
+                payment.status = "refunded"
+        await orders.settle_refund(
+            session, refund_id, status=status, provider_refund_id=result.refund_id or None
+        )
+
+
+async def _refund_reported(resource: Mapping[str, Any]) -> None:
+    """PayPal reports a refund: re-fetch it from PayPal rather than trusting the event body."""
+    refund_id = str(resource.get("id", ""))
+    links: list[Mapping[str, Any]] = resource.get("links") or []
+    capture_url = next((str(link.get("href", "")) for link in links if link.get("rel") == "up"), "")
+    capture_id = capture_url.rsplit("/", 1)[-1]
+    if not refund_id or not capture_id:
+        log.warning("payments.refund_event_incomplete", refund_id=refund_id)
+        return
+    async with session_scope() as session:
+        payment = await session.scalar(
+            select(Payment).where(
+                Payment.provider == "paypal", Payment.provider_capture_id == capture_id
+            )
+        )
+        pending = (
+            await orders.pending_refunds(session, order_id=payment.order_id) if payment else []
+        )
+    if not pending:
+        log.info("payments.refund_event_ignored", refund_id=refund_id)
+        return
+    await _record_refund(pending[0].id, capture_id, await paypal.get_refund(refund_id))
 
 
 async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFailed | None:
@@ -470,6 +594,9 @@ async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFai
             log.warning("payments.capture_without_order", event_type=event_type)
             return None
         return await record_capture(str(paypal_order_id), paypal.capture_from_resource(resource))
+    if event_type == "PAYMENT.CAPTURE.REFUNDED":
+        await _refund_reported(resource)
+        return None
     if event_type == "INVOICING.INVOICE.PAID":
         invoice_id = str(resource.get("id", ""))
         amount_data = resource.get("amount") or (

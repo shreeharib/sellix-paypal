@@ -1,0 +1,5 @@
+id: v1.order_fallback_offline
+version: 1
+description: Sent by code if the v1 agent fails after an order without online payment was placed.
+texts:
+  en: "Order #{{ number }} ({{ total }}) is confirmed. We'll share payment details shortly."

@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
+from app.modules.agent import service as agent
 from app.modules.conversations import service as conversations
 from app.modules.escalations import service as escalations
 from app.modules.escalations.schemas import EscalationItem
@@ -42,8 +43,7 @@ async def answer_question(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await conversations.inform_customer(
         result.conversation_id,
-        f'The shop owner answered your question "{result.question}": "{result.answer}". '
-        "Pass this on to the customer and continue helping them.",
+        agent.prompt("v1.note.owner_answered", question=result.question, answer=result.answer),
     )
     return result
 

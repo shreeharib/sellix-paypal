@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +16,7 @@ from app.modules.agent import service as agent
 from app.modules.agent.schemas import ChatMessage, CustomerReply
 from app.modules.channels import service as channels
 from app.modules.channels.schemas import IncomingMessage
-from app.modules.conversations import actions
+from app.modules.conversations import actions, outbox
 from app.modules.conversations.models import Conversation, Customer, Message
 from app.modules.conversations.schemas import ConversationSummary, MessageView
 from app.modules.escalations import service as escalations
@@ -26,16 +26,10 @@ from app.modules.payments.service import PaymentFailed
 
 log = structlog.get_logger()
 
-# How long after sending we still match an echo to our reply by its text (the echo can
-# arrive before the channel API has returned the message ID).
-ECHO_MATCH_WINDOW = timedelta(minutes=5)
 # One turn: up to two actions (quote, then place the order) and the reply itself.
 MAX_AGENT_STEPS = 3
 # The agent answers when the latest message is from the customer or a system note.
 REPLY_SENDERS = ("customer", "system")
-SEND_FAILED_QUESTION = (
-    "I couldn't send my reply to this customer. Please reply to them directly in Instagram."
-)
 AGENT_UNAVAILABLE_QUESTION = (
     "The assistant couldn't answer this customer just now. Please reply to them in Instagram."
 )
@@ -152,12 +146,13 @@ async def run_turn(conversation_id: uuid.UUID) -> None:
         await _escalate(context, AGENT_UNAVAILABLE_QUESTION)
         fallback = next((o.fallback_text for o in reversed(outcomes) if o.fallback_text), None)
         if fallback is not None:
-            await _send(context, fallback, details=details, owner_question=None)
+            await _send(context, fallback, key="fallback", details=details, owner_question=None)
         return
 
     await _send(
         context,
         _with_payment_link(reply.reply, payment_link),
+        key="reply",
         details={**details, "language": reply.language},
         owner_question=reply.owner_question if reply.needs_owner else None,
     )
@@ -239,22 +234,20 @@ async def _send(
     context: actions.TurnContext,
     text: str,
     *,
+    key: str,
     details: dict[str, Any],
     owner_question: str | None,
 ) -> None:
+    """Queue the turn's message in the outbox, then deliver it."""
     async with session_scope() as session:
-        outbound = Message(
-            merchant_id=context.merchant_id,
+        await outbox.queue_text(
+            session,
             conversation_id=context.conversation_id,
-            direction="outbound",
-            sender="agent",
-            body=text,
+            text=text,
+            # One reply per customer message: a repeated turn can't send it twice.
+            key=f"turn:{context.trigger_message_id}:{key}",
             details=details,
-            status="sending",
         )
-        session.add(outbound)
-        await session.flush()
-        outbound_id = outbound.id
         if owner_question:
             await escalations.open_escalation(
                 session,
@@ -263,35 +256,17 @@ async def _send(
                 question=owner_question,
                 trigger_message_id=context.trigger_message_id,
             )
-        credentials = await channels.get_send_credentials(session, context.channel_connection_id)
-
-    try:
-        external_id = await channels.send_text(credentials, context.customer_external_id, text)
-    except channels.SendFailed as exc:
-        async with session_scope() as session:
-            await session.execute(
-                update(Message)
-                .where(Message.id == outbound_id)
-                .values(status="failed", error=str(exc)[:500])
-            )
-        await _escalate(context, SEND_FAILED_QUESTION)
-        log.error(
-            "conversations.send_failed",
-            conversation_id=str(context.conversation_id),
-            error=str(exc),
-        )
-        return
-
-    async with session_scope() as session:
-        await session.execute(
-            update(Message)
-            .where(Message.id == outbound_id)
-            .values(
-                status="sent",
-                external_id=func.coalesce(Message.external_id, external_id or None),
-            )
-        )
+    await deliver_outbox(context.conversation_id)
     log.info("conversations.replied", conversation_id=str(context.conversation_id))
+
+
+async def deliver_outbox(conversation_id: uuid.UUID) -> None:
+    """Send what's queued for this chat now; schedule the next retry if one is needed."""
+    retry_at = await outbox.deliver(conversation_id)
+    if retry_at is not None:
+        from app.modules.conversations import tasks
+
+        await tasks.schedule_delivery(conversation_id, retry_at)
 
 
 async def _escalate(context: actions.TurnContext, question: str) -> None:
@@ -366,21 +341,7 @@ async def _record_echo(
         if known is not None:
             return
 
-    ours = await session.scalar(
-        select(Message)
-        .where(
-            Message.conversation_id == conversation.id,
-            Message.sender == "agent",
-            Message.external_id.is_(None),
-            Message.status.in_(("sending", "sent")),
-            Message.body == message.text,
-            Message.created_at > datetime.now(UTC) - ECHO_MATCH_WINDOW,
-        )
-        .order_by(Message.created_at.desc())
-        .limit(1)
-    )
-    if ours is not None:
-        ours.external_id = message.message_id or None
+    if await outbox.match_echo(session, conversation, message.message_id, message.text):
         return
 
     # The merchant replied from the Instagram app: record it and step back from this chat.
