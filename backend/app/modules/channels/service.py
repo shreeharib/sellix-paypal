@@ -2,6 +2,7 @@
 
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -25,6 +26,10 @@ MAX_TEXT_BYTES = instagram.MAX_TEXT_BYTES  # Instagram counts UTF-8 bytes, not c
 _CONNECT_PURPOSE = "instagram_connect"
 _LOGIN_PURPOSE = "app_login"
 _PKCE_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{43}")  # base64url SHA-256, unpadded
+
+
+# The simulator's channel: the same pipeline as Instagram, but messages never leave sellix.
+WEBCHAT = "webchat"
 
 
 class ChannelConnectError(RuntimeError):
@@ -92,8 +97,41 @@ async def get_send_credentials(session: AsyncSession, connection_id: uuid.UUID) 
     )
 
 
-async def send_text(credentials: SendCredentials, recipient_id: str, text: str) -> str:
+async def simulator_account(session: AsyncSession, merchant_id: uuid.UUID) -> str:
+    """The shop's simulator web chat 'account' (created on first use)."""
+    account_id = f"simulator-{merchant_id}"
+    connection = await session.scalar(
+        select(ChannelConnection).where(
+            ChannelConnection.channel == WEBCHAT,
+            ChannelConnection.external_account_id == account_id,
+        )
+    )
+    if connection is None:
+        session.add(
+            ChannelConnection(
+                merchant_id=merchant_id,
+                channel=WEBCHAT,
+                external_account_id=account_id,
+                username="simulator",
+                access_token_encrypted=crypto.encrypt("simulator"),
+                scopes=[],
+            )
+        )
+        await session.flush()
+    return account_id
+
+
+async def send_text(
+    credentials: SendCredentials,
+    recipient_id: str,
+    text: str,
+    *,
+    tag: str | None = None,
+    quick_replies: Sequence[tuple[str, str]] = (),
+) -> str:
     """Send a message to a customer. Returns the channel's message ID."""
+    if credentials.channel == WEBCHAT:
+        return _simulated_id()
     if credentials.channel != "instagram":
         raise SendFailed(f"Sending on {credentials.channel} isn't supported yet")
     try:
@@ -103,6 +141,8 @@ async def send_text(credentials: SendCredentials, recipient_id: str, text: str) 
             token=credentials.access_token,
             recipient_id=recipient_id,
             text=text,
+            tag=tag,
+            quick_replies=quick_replies,
         )
     except instagram.InstagramAPIError as exc:
         raise SendFailed(str(exc), reason=_send_failure_reason(exc)) from exc
@@ -125,6 +165,31 @@ def _send_failure_reason(exc: instagram.InstagramAPIError) -> SendFailureReason:
     if exc.code == _RECIPIENT_UNAVAILABLE_CODE:
         return "recipient_unavailable"
     return "permanent"
+
+
+async def send_attachment(
+    credentials: SendCredentials, recipient_id: str, attachment: dict[str, Any]
+) -> str:
+    """Send an image or a shared post to a customer. Returns the channel's message ID."""
+    if credentials.channel == WEBCHAT:
+        return _simulated_id()
+    if credentials.channel != "instagram":
+        raise SendFailed(f"Sending on {credentials.channel} isn't supported yet")
+    try:
+        return await instagram.send_attachment(
+            api_version=get_settings().graph_api_version,
+            account_id=credentials.account_id,
+            token=credentials.access_token,
+            recipient_id=recipient_id,
+            attachment=attachment,
+        )
+    except instagram.InstagramAPIError as exc:
+        raise SendFailed(str(exc), reason=_send_failure_reason(exc)) from exc
+
+
+def _simulated_id() -> str:
+    """The simulator's messages are stored by the outbox but go nowhere."""
+    return f"web-{uuid.uuid4().hex[:16]}"
 
 
 def instagram_redirect_uri() -> str:

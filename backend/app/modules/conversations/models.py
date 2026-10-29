@@ -44,6 +44,9 @@ class Conversation(Base):
     agent_active: Mapped[bool] = mapped_column(server_default=text("true"))
     agent_paused_reason: Mapped[str | None]
     last_customer_message_at: Mapped[datetime | None]
+    # browsing | collecting_details | awaiting_confirmation | payment_pending | handed_off
+    order_stage: Mapped[str] = mapped_column(server_default=text("'browsing'"))
+    order_draft: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

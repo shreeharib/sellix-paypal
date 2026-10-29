@@ -11,6 +11,9 @@
 --   sent            Instagram accepted it
 --   failed          gave up: a permanent error, or retries ran out
 --   pending_window  Instagram's 24-hour window is closed; sent when the customer writes again
+--   expired         still waiting 7 days after the customer's last message: never sent
+--   draft           draft mode: waits for the merchant to approve (or discard) it
+--   discarded       the merchant discarded the draft
 
 CREATE TABLE outbound_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -21,12 +24,15 @@ CREATE TABLE outbound_messages (
     message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     idempotency_key TEXT NOT NULL,
     part SMALLINT NOT NULL DEFAULT 1 CHECK (part >= 1),
-    kind TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text')),
+    kind TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'image', 'media_share')),
     payload JSONB NOT NULL,
     window_policy TEXT NOT NULL DEFAULT 'standard'
         CHECK (window_policy IN ('standard', 'human_agent', 'when_open')),
     status TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'sending', 'sent', 'failed', 'pending_window')),
+        CHECK (status IN (
+            'queued', 'sending', 'sent', 'failed', 'pending_window', 'expired', 'draft',
+            'discarded'
+        )),
     attempts INT NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_error TEXT,

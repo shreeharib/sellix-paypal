@@ -281,10 +281,23 @@ class Question(BaseModel):
     answer: str | None
     created_at: datetime
     answered_at: datetime | None
+    # Instagram's 24-hour window for this customer: the Ask me countdown.
+    window_closes_at: datetime | None = None
+    window_state: Literal["open", "closing", "human_agent_only", "closed"] | None = None
+    # How the answer reached the customer: sent | pending_window | human_agent | expired
+    answer_delivery: str | None = None
 
 
 class Answer(BaseModel):
     answer: str = Field(min_length=1, max_length=1000)
+    # "Always answer this way": the agent gives this answer to the same question from now on.
+    always: bool = False
+
+
+class MemoryFact(BaseModel):
+    key: str
+    value: Any
+    updated_at: datetime
 
 
 # Chats ----------------------------------------------------------------------------------------

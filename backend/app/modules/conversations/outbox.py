@@ -15,6 +15,7 @@
 import asyncio
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -23,10 +24,13 @@ import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.db import session_scope
 from app.modules.channels import service as channels
+from app.modules.conversations import window
 from app.modules.conversations.models import Conversation, Customer, Message, OutboundMessage
 from app.modules.escalations import service as escalations
+from app.modules.orders import service as orders
 
 log = structlog.get_logger()
 
@@ -44,10 +48,10 @@ SEND_FAILED_QUESTION = (
 )
 WINDOW_CLOSED_QUESTION = (
     "My reply couldn't reach this customer: Instagram only lets the shop reply within 24 hours "
-    "of their last message. Please reply to them from the Instagram app."
+    "of their last message. It will be sent when they write again, or you can reply from the "
+    "Instagram app."
 )
-
-WindowPolicy = Literal["standard", "human_agent", "when_open"]
+HUMAN_AGENT_TAG = "HUMAN_AGENT"
 
 
 async def queue_text(
@@ -57,9 +61,64 @@ async def queue_text(
     text: str,
     key: str,
     details: dict[str, Any] | None = None,
-    window_policy: WindowPolicy = "standard",
+    window_policy: window.WindowPolicy = "standard",
+    sender: Literal["agent", "merchant"] = "agent",
+    quick_replies: Sequence[tuple[str, str]] = (),
+    draft: bool = False,
 ) -> uuid.UUID:
-    """Record an agent message and queue it for sending. Returns the chat message's id."""
+    """Record an outbound message and queue it for sending. Returns the chat message's id.
+
+    `sender="merchant"` is the merchant's own words (an Ask me answer sent as written).
+    """
+    existing = await session.scalar(
+        select(OutboundMessage.message_id).where(OutboundMessage.idempotency_key == key).limit(1)
+    )
+    if existing is not None:
+        return existing
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        raise LookupError(f"No conversation {conversation_id}")
+    message = Message(
+        merchant_id=conversation.merchant_id,
+        conversation_id=conversation.id,
+        direction="outbound",
+        sender=sender,
+        body=text,
+        details=details or {},
+        status="sending",
+    )
+    session.add(message)
+    await session.flush()
+    parts = split_text(text)
+    for number, part in enumerate(parts, start=1):
+        payload: dict[str, Any] = {"text": part}
+        if quick_replies and number == len(parts):  # buttons go with the last part
+            payload["quick_replies"] = [[title, value] for title, value in quick_replies]
+        session.add(
+            OutboundMessage(
+                merchant_id=conversation.merchant_id,
+                conversation_id=conversation.id,
+                message_id=message.id,
+                idempotency_key=key,
+                part=number,
+                payload=payload,
+                window_policy=window_policy,
+                status="draft" if draft else "queued",
+            )
+        )
+    await session.flush()
+    return message.id
+
+
+async def queue_attachment(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    attachment: dict[str, Any],
+    label: str,
+    key: str,
+) -> uuid.UUID:
+    """Queue an image or a shared post. `label` is what the chat shows for it."""
     existing = await session.scalar(
         select(OutboundMessage.message_id).where(OutboundMessage.idempotency_key == key).limit(1)
     )
@@ -73,26 +132,108 @@ async def queue_text(
         conversation_id=conversation.id,
         direction="outbound",
         sender="agent",
-        body=text,
-        details=details or {},
+        body=label,
+        details={"attachment": attachment},
         status="sending",
     )
     session.add(message)
     await session.flush()
-    for number, part in enumerate(split_text(text), start=1):
-        session.add(
-            OutboundMessage(
-                merchant_id=conversation.merchant_id,
-                conversation_id=conversation.id,
-                message_id=message.id,
-                idempotency_key=key,
-                part=number,
-                payload={"text": part},
-                window_policy=window_policy,
-            )
+    session.add(
+        OutboundMessage(
+            merchant_id=conversation.merchant_id,
+            conversation_id=conversation.id,
+            message_id=message.id,
+            idempotency_key=key,
+            kind="media_share" if attachment.get("type") == "MEDIA_SHARE" else "image",
+            payload={"attachment": attachment},
         )
+    )
     await session.flush()
     return message.id
+
+
+async def drafts(session: AsyncSession, conversation_id: uuid.UUID) -> list[Message]:
+    """Replies waiting for the merchant's approval (draft mode)."""
+    ids = select(OutboundMessage.message_id).where(
+        OutboundMessage.conversation_id == conversation_id, OutboundMessage.status == "draft"
+    )
+    return list(
+        await session.scalars(
+            select(Message).where(Message.id.in_(ids)).order_by(Message.created_at)
+        )
+    )
+
+
+async def approve_draft(
+    session: AsyncSession, conversation_id: uuid.UUID, message_id: uuid.UUID, text: str | None
+) -> bool:
+    """Send a draft, as written or as the merchant edited it."""
+    rows = list(
+        await session.scalars(
+            select(OutboundMessage)
+            .where(
+                OutboundMessage.conversation_id == conversation_id,
+                OutboundMessage.message_id == message_id,
+                OutboundMessage.status == "draft",
+            )
+            .order_by(OutboundMessage.part)
+            .with_for_update()
+        )
+    )
+    if not rows:
+        return False
+    if text is not None and text.strip():
+        message = await session.get(Message, message_id)
+        assert message is not None
+        message.body = text.strip()
+        buttons = rows[-1].payload.get("quick_replies")
+        first = rows[0]
+        for row in rows:
+            await session.delete(row)
+        await session.flush()
+        parts = split_text(message.body)
+        for number, part in enumerate(parts, start=1):
+            payload: dict[str, Any] = {"text": part}
+            if buttons and number == len(parts):
+                payload["quick_replies"] = buttons
+            session.add(
+                OutboundMessage(
+                    merchant_id=first.merchant_id,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    idempotency_key=first.idempotency_key,
+                    part=number,
+                    payload=payload,
+                    window_policy=first.window_policy,
+                )
+            )
+        return True
+    for row in rows:
+        row.status = "queued"
+        row.next_attempt_at = datetime.now(UTC)
+    return True
+
+
+async def discard_draft(
+    session: AsyncSession, conversation_id: uuid.UUID, message_id: uuid.UUID
+) -> bool:
+    result = await session.execute(
+        update(OutboundMessage)
+        .where(
+            OutboundMessage.conversation_id == conversation_id,
+            OutboundMessage.message_id == message_id,
+            OutboundMessage.status == "draft",
+        )
+        .values(status="discarded", updated_at=func.now())
+    )
+    if not result.rowcount:  # pyright: ignore[reportAttributeAccessIssue]
+        return False
+    await session.execute(
+        update(Message)
+        .where(Message.id == message_id)
+        .values(status="failed", error="Discarded by the shop")
+    )
+    return True
 
 
 async def deliver(conversation_id: uuid.UUID) -> datetime | None:
@@ -107,9 +248,17 @@ async def deliver(conversation_id: uuid.UUID) -> datetime | None:
         try:
             async with session_scope() as session:
                 credentials = await channels.get_send_credentials(session, claim.connection_id)
-            provider_message_id = await channels.send_text(
-                credentials, claim.recipient_id, claim.text
-            )
+            if claim.attachment:
+                provider_message_id = await channels.send_attachment(
+                    credentials, claim.recipient_id, claim.attachment
+                )
+            else:
+                extra: dict[str, Any] = {"tag": claim.tag} if claim.tag else {}
+                if claim.quick_replies:
+                    extra["quick_replies"] = claim.quick_replies
+                provider_message_id = await channels.send_text(
+                    credentials, claim.recipient_id, claim.text, **extra
+                )
         except channels.SendFailed as exc:
             retry_at = await _record_failure(claim.row_id, exc)
             if retry_at is not None:
@@ -145,12 +294,25 @@ async def sweep() -> list[uuid.UUID]:
                 row.updated_at = now
                 log.warning("outbox.recovered_stuck_send", outbound_id=str(row.id))
         await session.flush()
+        await _expire_waiting(session, now)
         due = await session.scalars(
             select(OutboundMessage.conversation_id)
             .where(OutboundMessage.status == "queued", OutboundMessage.next_attempt_at <= now)
             .distinct()
         )
         return list(due)
+
+
+async def reopen(session: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """The customer wrote again: messages waiting for the window go out first, now."""
+    await session.execute(
+        update(OutboundMessage)
+        .where(
+            OutboundMessage.conversation_id == conversation_id,
+            OutboundMessage.status == "pending_window",
+        )
+        .values(status="queued", next_attempt_at=func.now(), updated_at=func.now())
+    )
 
 
 async def match_echo(
@@ -212,39 +374,103 @@ class _Claim:
     text: str
     connection_id: uuid.UUID
     recipient_id: str
+    tag: str | None
+    quick_replies: tuple[tuple[str, str], ...] = ()
+    attachment: dict[str, Any] | None = None
 
 
 async def _claim_next(conversation_id: uuid.UUID) -> _Claim | datetime | None:
-    """Take the conversation's next row for sending, or say when it's due (None: nothing)."""
+    """Take the conversation's next row for sending, or say when it's due (None: nothing).
+
+    Rows Instagram's window doesn't allow now are parked (or expired) on the way, without
+    asking Instagram.
+    """
     now = datetime.now(UTC)
+    human_agent_enabled = get_settings().instagram_human_agent_enabled
     async with session_scope() as session:
-        row = await session.scalar(
+        conversation = await session.get(Conversation, conversation_id)
+        customer = await session.get(Customer, conversation.customer_id) if conversation else None
+        if conversation is None or customer is None:
+            return None
+        current = window.window_at(conversation.last_customer_message_at, now)
+        rows = await session.scalars(
             select(OutboundMessage)
             .where(
                 OutboundMessage.conversation_id == conversation_id,
                 OutboundMessage.status.in_(("queued", "sending")),
             )
             .order_by(OutboundMessage.seq)
-            .limit(1)
             .with_for_update()
         )
-        if row is None or row.status == "sending":
-            return None  # nothing to send, or another worker is sending it (the sweep watches)
-        if row.next_attempt_at > now:
-            return row.next_attempt_at
-        conversation = await session.get(Conversation, conversation_id)
-        customer = await session.get(Customer, conversation.customer_id) if conversation else None
-        if conversation is None or customer is None:
-            return None
-        row.status = "sending"
-        row.attempts += 1
-        row.updated_at = now
-        return _Claim(
-            row.id,
-            str(row.payload["text"]),
-            conversation.channel_connection_id,
-            customer.external_id,
+        parked: list[OutboundMessage] = []
+        claim: _Claim | datetime | None = None
+        for row in rows:
+            if row.status == "sending":
+                break  # another worker is sending it (the sweep watches for crashes)
+            if row.next_attempt_at > now:
+                claim = row.next_attempt_at
+                break
+            decision = window.decide(
+                current,
+                row.window_policy,  # pyright: ignore[reportArgumentType]
+                human_agent_enabled=human_agent_enabled,
+            )
+            if decision == "wait":
+                row.status = "pending_window"
+                row.updated_at = now
+                parked.append(row)
+                continue
+            if decision == "expire":
+                await _expire(session, row, now)
+                continue
+            row.status = "sending"
+            row.attempts += 1
+            row.updated_at = now
+            claim = _Claim(
+                row.id,
+                str(row.payload.get("text", "")),
+                conversation.channel_connection_id,
+                customer.external_id,
+                HUMAN_AGENT_TAG if decision == "send_tagged" else None,
+                tuple((str(t), str(p)) for t, p in row.payload.get("quick_replies", [])),
+                row.payload.get("attachment"),
+            )
+            break
+        if parked:
+            await escalations.open_escalation(
+                session,
+                merchant_id=conversation.merchant_id,
+                conversation_id=conversation.id,
+                question=WINDOW_CLOSED_QUESTION,
+            )
+            log.info("outbox.waiting_for_window", conversation_id=str(conversation.id))
+        return claim
+
+
+async def _expire_waiting(session: AsyncSession, now: datetime) -> None:
+    """Messages still waiting once 7 days have passed since the customer's last message."""
+    waiting = await session.scalars(
+        select(OutboundMessage)
+        .join(Conversation, Conversation.id == OutboundMessage.conversation_id)
+        .where(
+            OutboundMessage.status == "pending_window",
+            Conversation.last_customer_message_at < now - window.HUMAN_AGENT_WINDOW,
         )
+        .with_for_update(of=OutboundMessage, skip_locked=True)
+    )
+    for row in waiting:
+        await _expire(session, row, now)
+
+
+async def _expire(session: AsyncSession, row: OutboundMessage, now: datetime) -> None:
+    row.status = "expired"
+    row.updated_at = now
+    await session.execute(
+        update(Message)
+        .where(Message.id == row.message_id)
+        .values(status="failed", error="Not sent: Instagram's 7-day window had passed")
+    )
+    log.warning("outbox.expired", outbound_id=str(row.id))
 
 
 async def _mark_sent(
@@ -268,6 +494,16 @@ async def _mark_sent(
         values["status"] = "sent"
     if values:
         await session.execute(update(Message).where(Message.id == row.message_id).values(values))
+    if not unsent:
+        await _after_delivery(session, row.message_id)
+
+
+async def _after_delivery(session: AsyncSession, message_id: uuid.UUID) -> None:
+    """Hooks for a message the customer now has: a delivered quote card can be confirmed."""
+    details = await session.scalar(select(Message.details).where(Message.id == message_id))
+    quote_id = (details or {}).get("quote_id")
+    if quote_id:
+        await orders.mark_quote_shown(session, uuid.UUID(quote_id), message_id)
 
 
 async def _record_failure(row_id: uuid.UUID, exc: channels.SendFailed) -> datetime | None:

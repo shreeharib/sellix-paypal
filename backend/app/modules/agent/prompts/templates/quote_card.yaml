@@ -1,0 +1,34 @@
+id: quote_card
+version: 2
+description: "The quote card: items, total, pickup or delivery. Sent by code with Confirm / Change."
+texts:
+  en: |-
+    Your order:
+    {% for line in lines %}• {{ line.quantity }} × {{ line.label }}: {{ line.subtotal }}
+    {% endfor %}Total: {{ total }}
+    {% if fulfilment == "delivery" %}Delivery to {{ address }}{% else %}Pickup at the shop{% endif %}{% if date_text %}, {{ date_text }}{% endif %}{% if needed_by %}, {{ needed_by }}{% endif %}
+    Tap Confirm to place the order, or Change to edit it.
+  ta-en: |-
+    Ungal order:
+    {% for line in lines %}• {{ line.quantity }} × {{ line.label }}: {{ line.subtotal }}
+    {% endfor %}Mothham: {{ total }}
+    {% if fulfilment == "delivery" %}Delivery: {{ address }}{% else %}Shop-la pickup{% endif %}{% if date_text %}, {{ date_text }}{% endif %}{% if needed_by %}, {{ needed_by }}{% endif %}
+    Order panna Confirm, maatha Change tap pannunga.
+  ta: |-
+    உங்கள் ஆர்டர்:
+    {% for line in lines %}• {{ line.quantity }} × {{ line.label }}: {{ line.subtotal }}
+    {% endfor %}மொத்தம்: {{ total }}
+    {% if fulfilment == "delivery" %}டெலிவரி: {{ address }}{% else %}கடையில் பெற்றுக்கொள்ளலாம்{% endif %}{% if date_text %}, {{ date_text }}{% endif %}{% if needed_by %}, {{ needed_by }}{% endif %}
+    ஆர்டர் செய்ய Confirm, மாற்ற Change அழுத்தவும்.
+  hi-en: |-
+    Aapka order:
+    {% for line in lines %}• {{ line.quantity }} × {{ line.label }}: {{ line.subtotal }}
+    {% endfor %}Total: {{ total }}
+    {% if fulfilment == "delivery" %}Delivery: {{ address }}{% else %}Shop se pickup{% endif %}{% if date_text %}, {{ date_text }}{% endif %}{% if needed_by %}, {{ needed_by }}{% endif %}
+    Order ke liye Confirm, badalne ke liye Change dabaiye.
+  hi: |-
+    आपका ऑर्डर:
+    {% for line in lines %}• {{ line.quantity }} × {{ line.label }}: {{ line.subtotal }}
+    {% endfor %}कुल: {{ total }}
+    {% if fulfilment == "delivery" %}डिलीवरी: {{ address }}{% else %}दुकान से पिकअप{% endif %}{% if date_text %}, {{ date_text }}{% endif %}{% if needed_by %}, {{ needed_by }}{% endif %}
+    ऑर्डर के लिए Confirm, बदलने के लिए Change दबाइए।

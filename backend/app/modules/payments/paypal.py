@@ -134,6 +134,11 @@ async def capture_order(paypal_order_id: str) -> Capture | None:
     return capture_from_order(data)
 
 
+async def get_order(paypal_order_id: str) -> dict[str, Any]:
+    """PayPal's own record of an order: what code checks before anything counts as paid."""
+    return await _request("GET", f"/v2/checkout/orders/{paypal_order_id}")
+
+
 def capture_from_order(order: Mapping[str, Any]) -> Capture | None:
     captures = order.get("purchase_units", [{}])[0].get("payments", {}).get("captures", [])
     return capture_from_resource(captures[0]) if captures else None

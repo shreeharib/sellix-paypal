@@ -3,10 +3,12 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.api.v1 import router as v1_router
 from app.core.config import get_settings
@@ -19,6 +21,8 @@ from app.modules.payments.router import router as payments_router
 from app.webhooks import meta, paypal
 
 log = structlog.get_logger()
+
+SIMULATOR_PAGE = Path(__file__).parent / "simulator.html"
 
 
 @asynccontextmanager
@@ -67,6 +71,11 @@ def create_app() -> FastAPI:
     app.include_router(channels_router)
     app.include_router(payments_router)
     app.include_router(v1_router)
+
+    @app.get("/simulator", include_in_schema=False)
+    async def simulator() -> HTMLResponse:
+        """The simulator page (it calls /v1/simulator with the merchant's own token)."""
+        return HTMLResponse(SIMULATOR_PAGE.read_text(encoding="utf-8"))
 
     @app.get("/health", tags=["ops"])
     async def health() -> dict[str, str]:

@@ -1,0 +1,14 @@
+id: quote_card.change
+version: 1
+description: "Title of the quote card's Change button (Instagram allows 20 characters)."
+texts:
+  en: |-
+    Change
+  ta-en: |-
+    Change
+  ta: |-
+    மாற்று
+  hi-en: |-
+    Change
+  hi: |-
+    बदलें

@@ -1,0 +1,14 @@
+id: handed_off
+version: 1
+description: "Sent by code when the chat is handed to the shop owner."
+texts:
+  en: |-
+    I've passed your message to the shop owner. They'll reply to you here soon.
+  ta-en: |-
+    Ungal message-a shop owner-kitta kuduthutten. Avanga seekiram reply pannuvanga.
+  ta: |-
+    உங்கள் செய்தியை கடை உரிமையாளரிடம் கொடுத்துவிட்டேன். அவர்கள் விரைவில் பதில் சொல்வார்கள்.
+  hi-en: |-
+    Aapka message shop owner ko de diya hai. Woh jaldi yahan reply karenge.
+  hi: |-
+    आपका संदेश दुकान के मालिक को दे दिया है। वे जल्दी यहाँ जवाब देंगे।

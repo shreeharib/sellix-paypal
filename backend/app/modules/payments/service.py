@@ -355,12 +355,50 @@ async def capture(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
     result = await paypal.capture_order(paypal_order_id)
     if result is None:
         return None  # not approved yet
-    return await record_capture(paypal_order_id, result)
+    return await verify_and_record(paypal_order_id)
 
 
-async def record_capture(
+async def verify_and_record(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
+    """Mark an order paid only after re-fetching it from PayPal (agent-phase-2.md 14, item 1).
+
+    Webhook bodies and capture answers only say which order to check. PayPal's own record must
+    show the order COMPLETED, a COMPLETED capture, and our order id as custom_id. The amount
+    and currency PayPal reports go to orders.record_payment, which refuses a mismatch and
+    alerts the merchant. (Once shops connect their own PayPal accounts, the payee is checked
+    here too: agent-phase-2.md section 21, item 7.)
+    """
+    async with session_scope() as session:
+        payment = await session.scalar(
+            select(Payment).where(
+                Payment.provider == "paypal", Payment.provider_order_id == paypal_order_id
+            )
+        )
+    if payment is None:
+        log.warning("payments.unknown_paypal_order", paypal_order_id=paypal_order_id)
+        return None
+    if payment.status in ("completed", "refunded"):
+        return None  # already recorded: a replayed webhook or a second return
+    data = await paypal.get_order(paypal_order_id)
+    unit: dict[str, Any] = (data.get("purchase_units") or [{}])[0]
+    if str(unit.get("custom_id") or unit.get("reference_id") or "") != str(payment.order_id):
+        log.error(
+            "payments.payment_verification_failed",
+            paypal_order_id=paypal_order_id,
+            reason="custom_id doesn't match this order",
+        )
+        return None
+    captured = paypal.capture_from_order(data)
+    if captured is None:
+        return None
+    if captured.status == "COMPLETED" and data.get("status") != "COMPLETED":
+        captured = paypal.Capture("PENDING", captured.capture_id, 0, captured.currency)
+    return await _record_verified(paypal_order_id, captured)
+
+
+async def _record_verified(
     paypal_order_id: str, result: paypal.Capture
 ) -> PaymentResult | PaymentFailed | None:
+    """Record a capture already checked against PayPal (only verify_and_record calls this)."""
     async with session_scope() as session:
         payment = await session.scalar(
             select(Payment)
@@ -593,7 +631,8 @@ async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFai
         if not paypal_order_id:
             log.warning("payments.capture_without_order", event_type=event_type)
             return None
-        return await record_capture(str(paypal_order_id), paypal.capture_from_resource(resource))
+        # The body only says which order to look at; PayPal's record decides.
+        return await verify_and_record(str(paypal_order_id))
     if event_type == "PAYMENT.CAPTURE.REFUNDED":
         await _refund_reported(resource)
         return None

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sellix simulator</title>
+<style>
+  :root { color-scheme: light dark; --bubble: #eef1f5; --mine: #d7f5dd; --accent: #2b6cb0; }
+  @media (prefers-color-scheme: dark) { :root { --bubble: #2a2f36; --mine: #21402a; } }
+  body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 560px; padding: 16px; }
+  #chat { display: flex; flex-direction: column; gap: 8px; min-height: 50vh; }
+  .msg { padding: 8px 12px; border-radius: 14px; max-width: 80%; white-space: pre-wrap; }
+  .customer { align-self: flex-end; background: var(--mine); }
+  .agent, .merchant { align-self: flex-start; background: var(--bubble); }
+  .buttons button { margin: 4px 4px 0 0; border: 1px solid var(--accent); color: var(--accent);
+    background: none; border-radius: 12px; padding: 4px 10px; cursor: pointer; }
+  form { display: flex; gap: 8px; margin-top: 16px; }
+  input { flex: 1; padding: 8px; }
+  #trace { font: 12px ui-monospace, monospace; opacity: .75; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>sellix simulator</h1>
+<p>Chat with your shop's assistant through the real pipeline (nothing is sent to Instagram).
+Paste an access token from the merchant app to start.</p>
+<input id="token" placeholder="Access token" autocomplete="off">
+<div id="chat"></div>
+<div id="trace"></div>
+<form id="form"><input id="text" placeholder="Write as a customer" autocomplete="off">
+<button>Send</button></form>
+<script>
+const chat = document.getElementById("chat"), trace = document.getElementById("trace");
+const token = document.getElementById("token");
+try { token.value = localStorage.getItem("sellix-sim-token") || ""; } catch (e) {}
+async function call(method, body) {
+  try { localStorage.setItem("sellix-sim-token", token.value); } catch (e) {}
+  const response = await fetch("/v1/simulator/messages", {
+    method, headers: {"Authorization": "Bearer " + token.value, "Content-Type": "application/json"},
+    body: body ? JSON.stringify(body) : undefined });
+  if (!response.ok) { trace.textContent = "Error " + response.status; return; }
+  render(await response.json());
+}
+function render(data) {
+  chat.replaceChildren(...data.messages.map(m => {
+    const el = document.createElement("div");
+    el.className = "msg " + m.sender; el.textContent = m.body;
+    if (m.buttons.length) {
+      const row = document.createElement("div"); row.className = "buttons";
+      for (const b of m.buttons) {
+        const button = document.createElement("button"); button.textContent = b.title;
+        button.onclick = () => call("POST", {text: b.title, quick_reply: b.payload});
+        row.append(button);
+      }
+      el.append(row);
+    }
+    return el;
+  }));
+  trace.textContent = data.turn ? JSON.stringify(data.turn) : "";
+}
+document.getElementById("form").onsubmit = e => {
+  e.preventDefault(); const text = document.getElementById("text");
+  call("POST", {text: text.value}); text.value = "";
+};
+if (token.value) call("GET");
+</script>
+</body>
+</html>

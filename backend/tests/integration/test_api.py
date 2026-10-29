@@ -717,3 +717,14 @@ async def test_order_lifecycle_and_upi_payment_link_endpoints(
     assert (
         await api.get(f"/v1/orders/{fake_id}/payment-link", headers=bearer(token))
     ).status_code == 404
+
+
+async def test_an_operator_token_works_like_an_app_session(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    async with session_scope() as session:
+        token = await accounts.operator_token(session, shop.merchant_id)
+
+    response = await api.get("/v1/questions", headers=bearer(token))
+
+    assert response.status_code == 200
