@@ -1,0 +1,14 @@
+id: too_long
+version: 1
+description: "Sent instead of a model call when a message is far too long."
+texts:
+  en: |-
+    Could you send that in a shorter message, please?
+  ta-en: |-
+    Konjam chinna message-a anuppunga, please?
+  ta: |-
+    தயவுசெய்து கொஞ்சம் சுருக்கமாக அனுப்ப முடியுமா?
+  hi-en: |-
+    Kya aap thoda chhota message bhej sakte hain?
+  hi: |-
+    क्या आप थोड़ा छोटा संदेश भेज सकते हैं?

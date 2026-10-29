@@ -1,0 +1,19 @@
+id: payment_link
+version: 1
+description: "Sent by code right after an order is placed, with the payment link."
+texts:
+  en: |-
+    Order {{ number }} is placed: {{ total }}. Pay here: {{ link }}
+    We're holding your items for {{ hold_minutes }} minutes.
+  ta-en: |-
+    Order {{ number }} confirm aachu: {{ total }}. Inga pay pannunga: {{ link }}
+    {{ hold_minutes }} nimisham ungalukkaga vechirukkom.
+  ta: |-
+    ஆர்டர் {{ number }} உறுதியானது: {{ total }}. இங்கே பணம் செலுத்துங்கள்: {{ link }}
+    {{ hold_minutes }} நிமிடம் உங்களுக்காக வைத்திருக்கிறோம்.
+  hi-en: |-
+    Order {{ number }} ho gaya: {{ total }}. Yahan pay kariye: {{ link }}
+    {{ hold_minutes }} minute ke liye aapke items rakhe hain.
+  hi: |-
+    ऑर्डर {{ number }} हो गया: {{ total }}। यहाँ भुगतान करें: {{ link }}
+    {{ hold_minutes }} मिनट के लिए आपका सामान रखा है।

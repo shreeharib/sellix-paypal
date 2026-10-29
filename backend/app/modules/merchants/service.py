@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
@@ -90,6 +91,19 @@ async def update_settings(
     return _to_info(merchant)
 
 
+async def set_agent_engine(
+    session: AsyncSession, merchant_id: uuid.UUID, engine: Literal["v1", "v2", "shadow", "draft"]
+) -> None:
+    """Which agent answers this shop's customers (agent-phase-2.md section 19)."""
+    merchant = await _get_model(session, merchant_id)
+    merchant.agent_engine = engine
+
+
+async def set_menu_image(session: AsyncSession, merchant_id: uuid.UUID, url: str | None) -> None:
+    merchant = await _get_model(session, merchant_id)
+    merchant.menu_image_url = url
+
+
 async def _get_model(session: AsyncSession, merchant_id: uuid.UUID) -> Merchant:
     merchant = await session.get(Merchant, merchant_id)
     if merchant is None:
@@ -103,6 +117,10 @@ def _to_info(merchant: Merchant) -> MerchantInfo:
         name=merchant.name,
         timezone=merchant.timezone,
         agent_enabled=merchant.agent_enabled,
+        agent_engine=merchant.agent_engine,
+        never_promise=tuple(merchant.never_promise or ()),
+        ai_daily_budget_usd=merchant.ai_daily_budget_usd,
+        menu_image_url=merchant.menu_image_url,
         created_at=merchant.created_at,
         updated_at=merchant.updated_at,
     )

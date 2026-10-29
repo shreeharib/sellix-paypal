@@ -4,19 +4,24 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.escalations.models import Escalation
-from app.modules.escalations.schemas import EscalationItem
+from app.modules.escalations.schemas import AnswerDelivery, EscalationItem
 
 __all__ = [
+    "AnswerDelivery",
     "EscalationItem",
     "EscalationNotFound",
     "answer",
     "close",
     "list_escalations",
+    "mark_window_warned",
     "open_escalation",
+    "pending_answers",
+    "set_answer_delivery",
+    "unwarned_open_questions",
 ]
 
 log = structlog.get_logger()
@@ -87,6 +92,48 @@ async def close(
     return _to_item(escalation)
 
 
+async def set_answer_delivery(
+    session: AsyncSession, escalation_id: uuid.UUID, delivery: AnswerDelivery
+) -> None:
+    """Record how the merchant's answer reached (or will reach) the customer."""
+    escalation = await session.get(Escalation, escalation_id, with_for_update=True)
+    if escalation is not None:
+        escalation.answer_delivery = delivery
+
+
+async def pending_answers(
+    session: AsyncSession, conversation_id: uuid.UUID
+) -> list[EscalationItem]:
+    """Answers waiting for the customer to write again (their window had closed)."""
+    rows = await session.scalars(
+        select(Escalation)
+        .where(
+            Escalation.conversation_id == conversation_id,
+            Escalation.answer_delivery == "pending_window",
+        )
+        .order_by(Escalation.answered_at)
+        .with_for_update()
+    )
+    return [_to_item(escalation) for escalation in rows]
+
+
+async def unwarned_open_questions(session: AsyncSession) -> list[EscalationItem]:
+    """Open questions the merchant hasn't yet been warned about (window closing)."""
+    rows = await session.scalars(
+        select(Escalation).where(Escalation.status == "open", Escalation.window_warned_at.is_(None))
+    )
+    return [_to_item(escalation) for escalation in rows]
+
+
+async def mark_window_warned(session: AsyncSession, escalation_ids: list[uuid.UUID]) -> None:
+    if escalation_ids:
+        await session.execute(
+            update(Escalation)
+            .where(Escalation.id.in_(escalation_ids))
+            .values(window_warned_at=datetime.now(UTC))
+        )
+
+
 async def _get(
     session: AsyncSession, merchant_id: uuid.UUID, escalation_id: uuid.UUID
 ) -> Escalation:
@@ -111,4 +158,6 @@ def _to_item(escalation: Escalation) -> EscalationItem:
         answer=escalation.answer,
         created_at=escalation.created_at,
         answered_at=escalation.answered_at,
+        answer_delivery=escalation.answer_delivery,
+        window_warned_at=escalation.window_warned_at,
     )

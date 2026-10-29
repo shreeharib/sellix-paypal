@@ -91,6 +91,23 @@ async def today_stock(
     ]
 
 
+async def upcoming_stock(
+    session: AsyncSession, merchant_id: uuid.UUID, after: date, days: int
+) -> dict[date, list[StockItem]]:
+    """Stock the merchant has set for the days after `after` (pre-orders), by day."""
+    dates = await session.scalars(
+        select(DailyStock.business_date)
+        .where(
+            DailyStock.merchant_id == merchant_id,
+            DailyStock.business_date > after,
+            DailyStock.business_date <= after + timedelta(days=days),
+        )
+        .distinct()
+        .order_by(DailyStock.business_date)
+    )
+    return {day: await today_stock(session, merchant_id, day) for day in list(dates)}
+
+
 async def set_opening_stock(
     session: AsyncSession,
     *,

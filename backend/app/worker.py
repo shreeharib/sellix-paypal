@@ -11,11 +11,13 @@ from app.core.db import dispose_engine
 from app.core.jobs import jobs, run_worker
 from app.core.logging import configure_logging
 from app.core.runtime import new_event_loop
+from app.modules.agent import service as agent
 
 
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json_logs=settings.app_env != "local")
+    agent.load_prompts()
     try:
         async with jobs.open_async():
             # Signal handlers need a Unix event loop.

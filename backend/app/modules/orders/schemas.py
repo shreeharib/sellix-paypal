@@ -66,6 +66,34 @@ class PlacedOrder:
     hold_minutes: int
 
 
+@dataclass(frozen=True)
+class SavedQuote:
+    """A quote sent to the customer as a card; it becomes an order only through confirm_quote."""
+
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    lines: tuple[QuoteLine, ...]
+    currency: str
+    total_minor: int
+    fulfilment: str | None
+    delivery_address: str | None
+    needed_by: str | None
+    business_date: date  # the day the stock is held on (later than today for a pre-order)
+    status: str  # open | superseded | confirmed | expired
+    expires_at: datetime
+    shown_message_id: uuid.UUID | None
+    shown_at: datetime | None
+    order_id: uuid.UUID | None
+
+
+class QuoteRefused(ValueError):
+    """A quote can't be confirmed; `code` tells the agent why, the message what to do."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 PaymentOutcome = Literal["paid", "already_paid", "paid_stock_short", "amount_mismatch"]
 
 
@@ -78,6 +106,20 @@ class PaymentResult:
     currency: str
     total_minor: int
     outcome: PaymentOutcome
+
+
+RefundStatus = Literal["pending", "completed", "failed"]
+
+
+@dataclass(frozen=True)
+class RefundTicket:
+    """A refund on record; `pending` until the payment provider confirms it."""
+
+    id: uuid.UUID
+    order_id: uuid.UUID
+    status: str
+    reason: str | None
+    provider_refund_id: str | None
 
 
 @dataclass(frozen=True)

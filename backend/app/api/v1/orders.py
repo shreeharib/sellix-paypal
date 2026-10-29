@@ -72,7 +72,9 @@ async def refund_order(
     reason = payload.reason if payload else None
     restock = payload.restock if payload else True
     try:
-        outcome = await payments.refund_order(order_id, reason=reason, restock=restock)
+        outcome = await payments.refund_order(
+            order_id, merchant_id=shop.merchant_id, reason=reason, restock=restock
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Order not found") from exc
     except RuntimeError as exc:

@@ -8,16 +8,25 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
-from app.modules.orders.models import Order, OrderEvent, OrderItem, OrderTimeline, Refund
+from app.modules.orders.models import (
+    Order,
+    OrderEvent,
+    OrderItem,
+    OrderTimeline,
+    QuoteRecord,
+    Refund,
+    RefundRequest,
+)
 from app.modules.orders.schemas import (
     DaySummary,
     ExpiredOrder,
     OrderItemSummary,
+    OrderLineRequest,
     OrderRequest,
     OrderSummary,
     PaymentOutcome,
@@ -25,7 +34,14 @@ from app.modules.orders.schemas import (
     PlacedOrder,
     Quote,
     QuoteLine,
+    QuoteRefused,
+    RefundStatus,
+    RefundTicket,
+    SavedQuote,
 )
+
+# Per customer per shop (agent-phase-2.md section 14, item 6); more needs the shop owner.
+MAX_UNPAID_ORDERS = 2
 
 
 class OrderProblem(ValueError):
@@ -196,6 +212,270 @@ async def place_order(
     )
 
 
+async def save_quote(
+    session: AsyncSession,
+    *,
+    merchant_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    customer_id: uuid.UUID,
+    business_date: date,
+    request: OrderRequest,
+    expires_at: datetime,
+    business_date_override: date | None = None,
+) -> SavedQuote | Quote:
+    """Price the request and save it as the conversation's open quote (older ones superseded).
+
+    Returns the plain Quote, with its problems, when it can't be offered.
+    `business_date_override`: a pre-order for a later day, priced and held on that day's stock.
+    """
+    business_date = business_date_override or business_date
+    offer = await quote(
+        session, merchant_id=merchant_id, business_date=business_date, request=request
+    )
+    if not offer.ok or offer.currency is None:
+        return offer
+    await supersede_quotes(session, conversation_id)
+    record = QuoteRecord(
+        merchant_id=merchant_id,
+        conversation_id=conversation_id,
+        customer_id=customer_id,
+        business_date=business_date,
+        lines=[
+            {
+                "variant_id": str(line.variant_id),
+                "label": line.label,
+                "product": line.product,
+                "variant": line.variant,
+                "quantity": line.quantity,
+                "unit_price_minor": line.unit_price_minor,
+            }
+            for line in offer.lines
+        ],
+        currency=offer.currency,
+        total_minor=offer.total_minor,
+        fulfilment=request.fulfilment,
+        delivery_address=request.delivery_address,
+        needed_by=request.needed_by,
+        notes=request.notes,
+        status="open",
+        expires_at=expires_at,
+    )
+    session.add(record)
+    await session.flush()
+    return _saved_quote(record)
+
+
+async def supersede_quotes(session: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """The order changed: open quotes for this conversation can no longer be confirmed."""
+    await session.execute(
+        update(QuoteRecord)
+        .where(QuoteRecord.conversation_id == conversation_id, QuoteRecord.status == "open")
+        .values(status="superseded", updated_at=func.now())
+    )
+
+
+async def get_quote(
+    session: AsyncSession, quote_id: uuid.UUID, conversation_id: uuid.UUID
+) -> SavedQuote | None:
+    record = await session.get(QuoteRecord, quote_id)
+    if record is None or record.conversation_id != conversation_id:
+        return None
+    return _saved_quote(record)
+
+
+async def open_quote(session: AsyncSession, conversation_id: uuid.UUID) -> SavedQuote | None:
+    """The conversation's quote that can still be confirmed, if any."""
+    record = await session.scalar(
+        select(QuoteRecord)
+        .where(QuoteRecord.conversation_id == conversation_id, QuoteRecord.status == "open")
+        .order_by(QuoteRecord.created_at.desc())
+        .limit(1)
+    )
+    return _saved_quote(record) if record else None
+
+
+async def current_quote(session: AsyncSession, conversation_id: uuid.UUID) -> SavedQuote | None:
+    """The conversation's latest quote that's still open, or was confirmed."""
+    record = await session.scalar(
+        select(QuoteRecord)
+        .where(
+            QuoteRecord.conversation_id == conversation_id,
+            QuoteRecord.status.in_(("open", "confirmed")),
+        )
+        .order_by(QuoteRecord.created_at.desc())
+        .limit(1)
+    )
+    return _saved_quote(record) if record else None
+
+
+async def latest_order(session: AsyncSession, conversation_id: uuid.UUID) -> PlacedOrder | None:
+    """The conversation's most recent order (for the agent's [[order_number]] token)."""
+    order = await session.scalar(
+        select(Order)
+        .where(Order.conversation_id == conversation_id)
+        .order_by(Order.created_at.desc())
+        .limit(1)
+    )
+    if order is None:
+        return None
+    return PlacedOrder(order.id, order.number, order.currency, order.total_minor, 0)
+
+
+async def customer_orders(
+    session: AsyncSession, merchant_id: uuid.UUID, customer_id: uuid.UUID, *, limit: int = 5
+) -> list[OrderSummary]:
+    """This customer's latest orders at this shop, newest first."""
+    ids = list(
+        await session.scalars(
+            select(Order.id)
+            .where(Order.merchant_id == merchant_id, Order.customer_id == customer_id)
+            .order_by(Order.created_at.desc())
+            .limit(limit)
+        )
+    )
+    found = [await get_order(session, order_id, merchant_id) for order_id in ids]
+    return [order for order in found if order is not None]
+
+
+async def last_order_lines(
+    session: AsyncSession, merchant_id: uuid.UUID, customer_id: uuid.UUID
+) -> tuple[list[tuple[uuid.UUID, int]], str | None, str | None] | None:
+    """The customer's last paid order: (variant, quantity) lines, fulfilment, address."""
+    order = await session.scalar(
+        select(Order)
+        .where(
+            Order.merchant_id == merchant_id,
+            Order.customer_id == customer_id,
+            Order.payment_status.in_(("paid", "partially_refunded")),
+        )
+        .order_by(Order.created_at.desc())
+        .limit(1)
+    )
+    if order is None:
+        return None
+    lines = await session.execute(
+        select(OrderItem.variant_id, OrderItem.quantity).where(OrderItem.order_id == order.id)
+    )
+    return (
+        [(variant_id, quantity) for variant_id, quantity in lines],
+        order.fulfilment_method,
+        order.delivery_address,
+    )
+
+
+async def mark_quote_shown(
+    session: AsyncSession, quote_id: uuid.UUID, message_id: uuid.UUID
+) -> None:
+    """The quote card reached the customer: only now can the quote be confirmed."""
+    record = await session.get(QuoteRecord, quote_id, with_for_update=True)
+    if record is not None and record.shown_message_id is None:
+        record.shown_message_id = message_id
+        record.shown_at = datetime.now(UTC)
+        record.updated_at = datetime.now(UTC)
+
+
+async def confirm_quote(
+    session: AsyncSession,
+    *,
+    quote_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    hold_minutes: int,
+    now: datetime | None = None,
+) -> PlacedOrder:
+    """Turn a delivered, unexpired quote into an order. Confirming twice returns the same order.
+
+    Raises QuoteRefused (placing nothing) if the quote can't be confirmed, and OrderProblem if
+    the stock is gone. Raising rolls back the caller's transaction, stock holds included.
+    """
+    now = now or datetime.now(UTC)
+    record = await session.get(QuoteRecord, quote_id, with_for_update=True)
+    if record is None or record.conversation_id != conversation_id:
+        raise QuoteRefused("unknown_quote", "No such quote in this conversation")
+    if record.status == "confirmed" and record.order_id is not None:
+        order = await session.get(Order, record.order_id)
+        if order is not None:
+            return PlacedOrder(
+                order.id, order.number, order.currency, order.total_minor, hold_minutes
+            )
+    if record.status == "superseded":
+        raise QuoteRefused("superseded", "The order changed after this quote: make a new quote")
+    if record.status == "expired" or record.expires_at <= now:
+        record.status = "expired"
+        raise QuoteRefused("expired", "This quote has expired: make a new quote")
+    if record.shown_message_id is None:
+        raise QuoteRefused(
+            "not_shown", "The customer hasn't received the quote card, so it can't be confirmed"
+        )
+    unpaid = await session.scalar(
+        select(func.count())
+        .select_from(Order)
+        .where(
+            Order.merchant_id == record.merchant_id,
+            Order.customer_id == record.customer_id,
+            Order.status == "awaiting_payment",
+        )
+    )
+    if (unpaid or 0) >= MAX_UNPAID_ORDERS:
+        raise QuoteRefused(
+            "too_many_unpaid_orders",
+            f"This customer already has {unpaid} unpaid orders: ask the shop owner first",
+        )
+    placed = await place_order(
+        session,
+        merchant_id=record.merchant_id,
+        customer_id=record.customer_id,
+        conversation_id=record.conversation_id,
+        business_date=record.business_date,
+        request=OrderRequest(
+            lines=tuple(
+                OrderLineRequest(line["product"], line["variant"], int(line["quantity"]))
+                for line in record.lines
+            ),
+            fulfilment=record.fulfilment,
+            delivery_address=record.delivery_address,
+            needed_by=record.needed_by,
+            notes=record.notes,
+        ),
+        hold_minutes=hold_minutes,
+    )
+    if (placed.total_minor, placed.currency) != (record.total_minor, record.currency):
+        raise QuoteRefused("price_changed", "Prices changed since this quote: make a new quote")
+    record.status = "confirmed"
+    record.order_id = placed.order_id
+    record.updated_at = now
+    return placed
+
+
+def _saved_quote(record: QuoteRecord) -> SavedQuote:
+    return SavedQuote(
+        id=record.id,
+        conversation_id=record.conversation_id,
+        lines=tuple(
+            QuoteLine(
+                variant_id=uuid.UUID(line["variant_id"]),
+                label=line["label"],
+                product=line["product"],
+                variant=line["variant"],
+                unit_price_minor=int(line["unit_price_minor"]),
+                currency=record.currency,
+                quantity=int(line["quantity"]),
+            )
+            for line in record.lines
+        ),
+        currency=record.currency,
+        total_minor=record.total_minor,
+        fulfilment=record.fulfilment,
+        delivery_address=record.delivery_address,
+        needed_by=record.needed_by,
+        business_date=record.business_date,
+        status=record.status,
+        expires_at=record.expires_at,
+        shown_message_id=record.shown_message_id,
+        shown_at=record.shown_at,
+        order_id=record.order_id,
+    )
+
+
 async def record_payment(
     session: AsyncSession,
     order_id: uuid.UUID,
@@ -282,15 +562,77 @@ async def refund_order(
     reason: str | None = None,
     actor: str = "merchant",
 ) -> None:
-    """Mark an order as refunded, record in refunds table, and release stock."""
+    """Refund an order at once, when there's no payment provider to wait for."""
+    ticket = await open_refund(session, order_id, restock=restock, reason=reason)
+    await settle_refund(session, ticket.id, status="completed", actor=actor)
+
+
+async def open_refund(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    restock: bool = True,
+    reason: str | None = None,
+) -> RefundTicket:
+    """Record a pending refund of the order's total, or return the refund already open for it.
+
+    Commit it before asking the payment provider for the money, so a refund the provider makes
+    is always on record.
+    """
     order = await session.scalar(select(Order).where(Order.id == order_id).with_for_update())
     if order is None:
         raise LookupError(f"No order {order_id}")
-    if order.status == "refunded":
+    request = await session.scalar(
+        select(RefundRequest).where(
+            RefundRequest.order_id == order_id,
+            RefundRequest.status.in_(("pending", "completed")),
+        )
+    )
+    if request is None:
+        if order.status == "refunded":
+            raise RuntimeError(f"Order {order_id} is already refunded")
+        request = RefundRequest(
+            merchant_id=order.merchant_id,
+            order_id=order.id,
+            amount_minor=order.total_minor,
+            reason=reason,
+            is_restocked=restock,
+            status="pending",
+        )
+        session.add(request)
+        await session.flush()
+    return _refund_ticket(request)
+
+
+async def settle_refund(
+    session: AsyncSession,
+    refund_id: uuid.UUID,
+    *,
+    status: RefundStatus,
+    provider_refund_id: str | None = None,
+    actor: str = "merchant",
+) -> None:
+    """Record the provider's answer; a completed refund refunds the order and returns its stock."""
+    request = await session.scalar(
+        select(RefundRequest).where(RefundRequest.id == refund_id).with_for_update()
+    )
+    if request is None:
+        raise LookupError(f"No refund {refund_id}")
+    if request.status != "pending":
+        return
+    request.status = status
+    request.provider_refund_id = provider_refund_id or request.provider_refund_id
+    request.updated_at = datetime.now(UTC)
+    if status != "completed":
         return
 
+    order = await session.scalar(
+        select(Order).where(Order.id == request.order_id).with_for_update()
+    )
+    if order is None or order.status == "refunded":
+        return
     previous = order.status
-    if restock and previous in ("paid", "completed", "confirmed"):
+    if request.is_restocked and previous in ("paid", "completed", "confirmed"):
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
         for item in items:
             await inventory.release(
@@ -305,12 +647,41 @@ async def refund_order(
     session.add(
         Refund(
             order_id=order.id,
-            refund_amount_minor=order.total_minor,
-            reason=reason,
-            is_restocked=restock,
+            refund_amount_minor=request.amount_minor,
+            reason=request.reason,
+            is_restocked=request.is_restocked,
         )
     )
-    _log(session, order, "refunded", previous, "refunded", actor, {"reason": reason})
+    _log(session, order, "refunded", previous, "refunded", actor, {"reason": request.reason})
+
+
+async def pending_refunds(
+    session: AsyncSession,
+    *,
+    older_than: timedelta | None = None,
+    order_id: uuid.UUID | None = None,
+) -> list[RefundTicket]:
+    """Refunds still waiting for the payment provider, oldest first."""
+    query = (
+        select(RefundRequest)
+        .where(RefundRequest.status == "pending")
+        .order_by(RefundRequest.created_at)
+    )
+    if older_than is not None:
+        query = query.where(RefundRequest.created_at < func.now() - older_than)
+    if order_id is not None:
+        query = query.where(RefundRequest.order_id == order_id)
+    return [_refund_ticket(request) for request in await session.scalars(query)]
+
+
+def _refund_ticket(request: RefundRequest) -> RefundTicket:
+    return RefundTicket(
+        id=request.id,
+        order_id=request.order_id,
+        status=request.status,
+        reason=request.reason,
+        provider_refund_id=request.provider_refund_id,
+    )
 
 
 async def mark_order_paid(

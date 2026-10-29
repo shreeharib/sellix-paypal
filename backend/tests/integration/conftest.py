@@ -17,9 +17,17 @@ from app.core import crypto
 from app.core.config import BACKEND_DIR, get_settings
 from app.core.db import dispose_engine, libpq_url, session_scope
 from app.core.jobs import jobs
+from app.modules.agent import llm
+from app.modules.channels import service as channels
 from app.modules.channels.models import ChannelConnection
+from app.modules.conversations import outbox
+from app.modules.inventory import service as inventory
+from app.modules.inventory.schemas import OpeningStockLine
+from app.modules.merchants import service as merchants
 from app.modules.merchants.models import Merchant
-from tests.integration.factories import SHOP_ACCOUNT_ID
+from app.modules.shop_profile import service as shop_profile
+from app.modules.shop_profile.schemas import OnboardingAnswers
+from tests.integration.factories import SHOP_ACCOUNT_ID, Instagram, ScriptedModel
 
 MIGRATIONS_DIR = BACKEND_DIR.parent / "supabase" / "migrations"
 
@@ -82,3 +90,40 @@ async def shop(db: None) -> ChannelConnection:
         session.add(connection)
         await session.flush()
     return connection
+
+
+@pytest.fixture
+async def v2_shop(shop: ChannelConnection) -> ChannelConnection:
+    """The shop on the v2 engine, with chocolate cookies (₹60, 10 left) and UPI payments."""
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        await merchants.set_agent_engine(session, shop.merchant_id, "v2")
+        await inventory.set_opening_stock(
+            session,
+            merchant_id=shop.merchant_id,
+            business_date=merchants.business_date(merchant),
+            lines=[OpeningStockLine("Scoop cookie", "Chocolate", 6000, 10)],
+        )
+        await shop_profile.save_onboarding(
+            session,
+            shop.merchant_id,
+            shop_name=merchant.name,
+            answers=OnboardingAnswers(upi_id="sweetcrumbs@okhdfcbank"),
+        )
+    return shop
+
+
+@pytest.fixture
+def instagram(monkeypatch: pytest.MonkeyPatch) -> Instagram:
+    fake = Instagram()
+    monkeypatch.setattr(channels, "send_text", fake)
+    monkeypatch.setattr(channels, "send_attachment", fake.attachment)
+    monkeypatch.setattr(outbox, "PACING_SECONDS", 0)
+    return fake
+
+
+@pytest.fixture
+def model(monkeypatch: pytest.MonkeyPatch) -> ScriptedModel:
+    scripted = ScriptedModel()
+    monkeypatch.setattr(llm, "generate", scripted)
+    return scripted

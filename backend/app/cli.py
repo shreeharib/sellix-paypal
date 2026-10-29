@@ -10,7 +10,7 @@ import json
 import secrets
 import sys
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,8 @@ from app.core.config import get_settings
 from app.core.db import dispose_engine, session_scope
 from app.core.logging import configure_logging
 from app.core.runtime import new_event_loop
+from app.modules.accounts import service as accounts
+from app.modules.agent import service as agent
 from app.modules.channels import service as channels
 from app.modules.conversations import service as conversations
 from app.modules.inventory import service as inventory
@@ -77,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument(
         "--date", type=date.fromisoformat, help="business date (default: today for the merchant)"
     )
+    command.add_argument(
+        "--until",
+        type=date.fromisoformat,
+        help="also set the same stock for every day up to this date (pre-orders)",
+    )
 
     command = commands.add_parser("set-agent", help="switch the agent on or off for a merchant")
     command.add_argument("--merchant-id", type=uuid.UUID, required=True)
@@ -86,6 +93,28 @@ def _parser() -> argparse.ArgumentParser:
         "resume-conversation", help="switch the agent back on for one paused chat"
     )
     command.add_argument("--conversation-id", type=uuid.UUID, required=True)
+
+    command = commands.add_parser(
+        "set-agent-engine", help="which agent answers a merchant's customers (v1 or v2)"
+    )
+    command.add_argument("--merchant-id", type=uuid.UUID, required=True)
+    command.add_argument("engine", choices=["v1", "v2", "shadow", "draft"])
+
+    command = commands.add_parser(
+        "shadow-report", help="v1 replies next to what v2 would have said (shadow mode)"
+    )
+    command.add_argument("--merchant-id", type=uuid.UUID, required=True)
+    command.add_argument("--days", type=int, default=1)
+
+    command = commands.add_parser(
+        "replay-turn", help="re-run a v2 turn's first model call with today's prompts and model"
+    )
+    command.add_argument("--turn-id", type=uuid.UUID, required=True)
+
+    command = commands.add_parser(
+        "issue-token", help="an access token for a merchant (simulator, evals); keep it secret"
+    )
+    command.add_argument("--merchant-id", type=uuid.UUID, required=True)
     return parser
 
 
@@ -113,19 +142,31 @@ async def _run(args: argparse.Namespace) -> int:
                     merchant = await merchants.get_merchant(session, args.merchant_id)
                     business_date = args.date or merchants.business_date(merchant)
                     lines = _stock_lines(json.loads(args.file.read_text(encoding="utf-8")))
-                    await inventory.set_opening_stock(
-                        session,
-                        merchant_id=merchant.id,
-                        business_date=business_date,
-                        lines=lines,
-                    )
-                    print(f"Set opening stock for {business_date}: {len(lines)} items")
+                    last = args.until or business_date
+                    day = business_date
+                    while day <= last:
+                        await inventory.set_opening_stock(
+                            session, merchant_id=merchant.id, business_date=day, lines=lines
+                        )
+                        print(f"Set opening stock for {day}: {len(lines)} items")
+                        day += timedelta(days=1)
                 case "set-agent":
                     await merchants.set_agent_enabled(session, args.merchant_id, args.state == "on")
                     print(f"Agent switched {args.state}")
                 case "resume-conversation":
                     await conversations.set_agent_active(session, args.conversation_id, True)
                     print("Agent switched back on for this chat")
+                case "set-agent-engine":
+                    await merchants.set_agent_engine(session, args.merchant_id, args.engine)
+                    print(f"Agent engine set to {args.engine}")
+                case "shadow-report":
+                    report = await agent.shadow_report(args.merchant_id, days=args.days)
+                    print(json.dumps(report, indent=2, ensure_ascii=False))
+                case "replay-turn":
+                    print(json.dumps(await agent.replay_turn(args.turn_id), indent=2))
+                case "issue-token":
+                    await merchants.get_merchant(session, args.merchant_id)
+                    print(await accounts.operator_token(session, args.merchant_id))
                 case _:
                     raise ValueError(f"Unknown command {args.command}")
     except (ValueError, LookupError, OSError) as exc:

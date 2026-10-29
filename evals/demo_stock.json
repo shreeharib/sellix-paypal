@@ -1,0 +1,6 @@
+[
+  {"product": "Scoop cookie", "variant": "Chocolate", "price": "60", "quantity": 40},
+  {"product": "Scoop cookie", "variant": "Red velvet", "price": "70", "quantity": 0},
+  {"product": "Brownie", "price": "90", "quantity": 25},
+  {"product": "Banana bread", "price": "250", "quantity": 6}
+]
