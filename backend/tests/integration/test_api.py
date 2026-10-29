@@ -29,6 +29,8 @@ from app.modules.merchants import service as merchants
 from app.modules.merchants.models import Merchant
 from app.modules.orders import service as orders
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest
+from app.modules.payments import paypal
+from app.modules.payments.models import Payment
 from app.modules.shop_profile import service as shop_profile
 from tests.integration.factories import start_conversation
 
@@ -551,6 +553,73 @@ async def test_one_shop_cannot_see_or_touch_another_shops_data(
     assert questions.json() == []
     assert answer.status_code == 404
     assert messages.status_code == 404
+
+
+async def test_one_shop_cannot_refund_another_shops_order(
+    api: httpx2.AsyncClient, shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refunded: list[str] = []
+
+    async def refund_capture(capture_id: str, **_: object) -> paypal.RefundResult:
+        refunded.append(capture_id)
+        return paypal.RefundResult("REFUND-1", "COMPLETED", 30000, "INR")
+
+    monkeypatch.setattr(paypal, "refund_capture", refund_capture)
+    owner = await sign_in_as(shop.merchant_id)
+    await api.put(
+        "/v1/today/stock",
+        headers=bearer(owner),
+        json={"lines": [{"product": "Sourdough", "price_minor": 15000, "quantity": 10}]},
+    )
+    turn = await start_conversation()
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        conversation = await session.get(Conversation, turn.conversation_id)
+        assert conversation is not None
+        placed = await orders.place_order(
+            session,
+            merchant_id=shop.merchant_id,
+            customer_id=conversation.customer_id,
+            conversation_id=conversation.id,
+            business_date=merchants.business_date(merchant),
+            request=OrderRequest(
+                lines=(OrderLineRequest("Sourdough", None, 2),), fulfilment="pickup"
+            ),
+            hold_minutes=15,
+        )
+        session.add(
+            Payment(
+                merchant_id=shop.merchant_id,
+                order_id=placed.order_id,
+                provider="paypal",
+                provider_capture_id="CAPTURE-1",
+                status="completed",
+                currency="INR",
+                amount_minor=30000,
+            )
+        )
+        await orders.record_payment(
+            session, placed.order_id, amount_minor=30000, currency="INR", actor="paypal"
+        )
+        other = Merchant(name="Other shop")
+        session.add(other)
+        await session.flush()
+        other_id = other.id
+    intruder = await sign_in_as(other_id, subject="17841400000009999")
+
+    response = await api.post(f"/v1/orders/{placed.order_id}/refund", headers=bearer(intruder))
+
+    assert response.status_code == 404
+    assert refunded == []
+    async with session_scope() as session:
+        order = await orders.get_order(session, placed.order_id, shop.merchant_id)
+    assert order is not None
+    assert order.status == "paid"
+
+    own = await api.post(f"/v1/orders/{placed.order_id}/refund", headers=bearer(owner))
+
+    assert own.status_code == 200
+    assert refunded == ["CAPTURE-1"]
 
 
 async def test_order_lifecycle_and_upi_payment_link_endpoints(

@@ -418,17 +418,19 @@ async def record_invoice_payment(
 async def refund_order(
     order_id: uuid.UUID,
     *,
+    merchant_id: uuid.UUID,
     reason: str | None = None,
     restock: bool = True,
 ) -> RefundOutcome:
-    """Refund a paid order through PayPal and update local records."""
+    """Refund a paid order of this merchant's shop through PayPal and update local records."""
     async with session_scope() as session:
-        order = await orders.get_order(session, order_id)
+        order = await orders.get_order(session, order_id, merchant_id)
         if order is None:
             raise LookupError(f"No order {order_id}")
         payment = await session.scalar(
             select(Payment).where(
                 Payment.order_id == order_id,
+                Payment.merchant_id == merchant_id,
                 Payment.provider == "paypal",
                 Payment.status == "completed",
             )
