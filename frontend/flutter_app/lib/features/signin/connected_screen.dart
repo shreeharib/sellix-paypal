@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/auth/instagram_connect.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
@@ -20,6 +22,31 @@ class ConnectedScreen extends ConsumerStatefulWidget {
 
 class _ConnectedScreenState extends ConsumerState<ConnectedScreen> {
   bool _busy = false;
+  bool _connecting = false;
+
+  /// For a shop that is signed in without a working Instagram, such as the DEV ONLY token session:
+  /// runs the real Instagram login in place (see [InstagramConnect]).
+  Future<void> _connect(Me me) async {
+    if (_connecting) return;
+    setState(() => _connecting = true);
+    final result = await ref.read(instagramConnectProvider).run(merchantId: me.merchant.id);
+    if (!mounted) return;
+    ref
+      ..invalidate(_meProvider)
+      ..invalidate(onboardingCompletedProvider);
+    setState(() => _connecting = false);
+    final message = switch (result.outcome) {
+      InstagramConnectOutcome.connected => 'Instagram is connected.',
+      InstagramConnectOutcome.otherShop =>
+        'That Instagram account belongs to another shop. You are now in ${result.me!.merchant.name}.',
+      InstagramConnectOutcome.notConnected => 'Instagram did not connect. Please try again.',
+      InstagramConnectOutcome.cancelled => 'Cancelled. Instagram is still not connected.',
+      InstagramConnectOutcome.failed => result.error is ApiException
+          ? sxErrorMessage(result.error)
+          : 'Instagram did not connect. Please try again.',
+    };
+    showSxSnack(context, message, icon: TablerIcons.plug_connected);
+  }
 
   Future<void> _next() async {
     if (_busy) return;
@@ -46,7 +73,7 @@ class _ConnectedScreenState extends ConsumerState<ConnectedScreen> {
         value: me,
         onRetry: () => ref.invalidate(_meProvider),
         loading: const SxSkeletonList(topHeight: 160),
-        builder: (context, data) => _Joined(me: data),
+        builder: (context, data) => _Joined(me: data, connecting: _connecting, onConnect: () => _connect(data)),
       ),
     );
   }
@@ -55,9 +82,11 @@ class _ConnectedScreenState extends ConsumerState<ConnectedScreen> {
 /// sellix and the shop join. The name comes from the Instagram account: the merchant confirms it in
 /// the next step. Final state at once with reduced motion.
 class _Joined extends StatefulWidget {
-  const _Joined({required this.me});
+  const _Joined({required this.me, required this.connecting, required this.onConnect});
 
   final Me me;
+  final bool connecting;
+  final VoidCallback onConnect;
 
   @override
   State<_Joined> createState() => _JoinedState();
@@ -205,6 +234,21 @@ class _JoinedState extends State<_Joined> with SingleTickerProviderStateMixin {
                     : const SxChip(label: 'Instagram is not receiving messages yet', tone: SxChipTone.attention),
               ),
             ),
+            if (!receiving) ...[
+              const SizedBox(height: SxSpace.s12),
+              _rise(
+                3,
+                Center(
+                  child: SxButton(
+                    label: instagram == null ? 'Connect Instagram' : 'Reconnect Instagram',
+                    icon: TablerIcons.brand_instagram,
+                    kind: SxButtonKind.secondary,
+                    loading: widget.connecting,
+                    onTap: widget.connecting ? null : widget.onConnect,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: SxSpace.s32),
             _rise(
               4,

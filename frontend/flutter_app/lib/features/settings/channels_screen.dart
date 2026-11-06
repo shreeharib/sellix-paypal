@@ -4,7 +4,7 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
-import '../../core/auth/auth_controller.dart';
+import '../../core/auth/instagram_connect.dart';
 import '../../core/format.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
@@ -21,31 +21,26 @@ class ChannelsScreen extends ConsumerStatefulWidget {
 class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
   bool _reconnecting = false;
 
-  /// The only Instagram flow the app has is sign-in. The backend treats the same Instagram account as
-  /// the same shop and renews its connection. A different account signs in to that account's shop, so
-  /// this checks who came back rather than assuming.
-  Future<void> _reconnect(String merchantId) async {
+  /// Runs the real Instagram login for this shop (see [InstagramConnect]) and says what came of it.
+  Future<void> _reconnect(String merchantId, {required bool first}) async {
     setState(() => _reconnecting = true);
-    String? message;
-    try {
-      await ref.read(authControllerProvider.notifier).signInWithInstagram();
-      final me = await ref.refresh(meProvider.future);
-      ref.invalidate(conversationsProvider);
-      if (me.merchant.id != merchantId) {
-        message = 'That Instagram account belongs to another shop. You are now in ${me.merchant.name}.';
-      } else if (channelWorks(channelOf(me.channels, 'instagram'))) {
-        message = 'Instagram is back.';
-      } else {
-        message = 'Instagram did not reconnect. Please try again.';
-      }
-    } on SignInCancelled {
-      message = 'Reconnect cancelled. Instagram is still disconnected.';
-    } on ApiException catch (error) {
-      message = sxErrorMessage(error);
-    } catch (_) {
-      message = 'Instagram did not reconnect. Please try again.';
-    }
+    final result = await ref.read(instagramConnectProvider).run(merchantId: merchantId);
     if (!mounted) return;
+    ref
+      ..invalidate(meProvider)
+      ..invalidate(conversationsProvider);
+    final message = switch (result.outcome) {
+      InstagramConnectOutcome.connected => first ? 'Instagram is connected.' : 'Instagram is back.',
+      InstagramConnectOutcome.otherShop =>
+        'That Instagram account belongs to another shop. You are now in ${result.me!.merchant.name}.',
+      InstagramConnectOutcome.notConnected =>
+        first ? 'Instagram did not connect. Please try again.' : 'Instagram did not reconnect. Please try again.',
+      InstagramConnectOutcome.cancelled =>
+        first ? 'Cancelled. Instagram is still not connected.' : 'Reconnect cancelled. Instagram is still disconnected.',
+      InstagramConnectOutcome.failed => result.error is ApiException
+          ? sxErrorMessage(result.error)
+          : (first ? 'Instagram did not connect. Please try again.' : 'Instagram did not reconnect. Please try again.'),
+    };
     setState(() => _reconnecting = false);
     showSxSnack(context, message, icon: TablerIcons.plug_connected);
   }
@@ -60,11 +55,11 @@ class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
       floating: broken
           ? SxBottomCta(
               label: _reconnecting
-                  ? 'Reconnecting…'
+                  ? (instagram == null ? 'Connecting…' : 'Reconnecting…')
                   : (instagram == null ? 'Connect Instagram' : 'Reconnect Instagram'),
-              icon: TablerIcons.refresh,
+              icon: instagram == null ? TablerIcons.brand_instagram : TablerIcons.refresh,
               loading: _reconnecting,
-              onTap: () => _reconnect(data.merchant.id),
+              onTap: _reconnecting ? null : () => _reconnect(data.merchant.id, first: instagram == null),
             )
           : null,
       body: Column(

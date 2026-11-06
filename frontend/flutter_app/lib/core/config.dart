@@ -27,7 +27,9 @@ abstract final class AppConfig {
   ///     flutter run --dart-define=DEV_ACCESS_TOKEN=<token>
   ///
   /// With the define set, the app counts as signed in and sends this token on every request,
-  /// with no refresh; when it expires, issue a new one. Without the define this is empty and
+  /// with no refresh; when it expires, issue a new one. "Connect Instagram" (onboarding, Channels)
+  /// still runs the real Instagram login, and once it succeeds that session replaces this token
+  /// until the app restarts (see devSignInProvider). Without the define this is empty and
   /// nothing changes: normal Instagram sign-in applies. Release builds ignore the define, so a
   /// token passed by mistake can't sign a shipped app in.
   static String get devAccessToken => kReleaseMode ? '' : _devAccessToken;

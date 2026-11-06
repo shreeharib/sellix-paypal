@@ -450,6 +450,23 @@ void main() {
       await drain(tester);
     });
 
+    testWidgets('a shop with no Instagram can connect it with the real login', (tester) async {
+      final fake = FakeSellixApi()..channels = const [];
+      final auth = FakeAuth(
+        onSignIn: () async {
+          fake.channels = const [Channel(channel: 'instagram', username: 'test.shop', status: 'active')];
+        },
+      );
+      await pumpScreen(tester, const ChannelsScreen(), fake, auth: auth);
+      await settle(tester);
+      expect(find.text('Not connected'), findsOneWidget);
+      await tapText(tester, 'Connect Instagram');
+      expect(auth.signIns, 1);
+      expect(find.text('Instagram is connected.'), findsOneWidget);
+      expect(find.textContaining('@test.shop'), findsOneWidget);
+      await drain(tester);
+    });
+
     testWidgets('reconnect does not claim success if the channel is still down', (tester) async {
       final fake = FakeSellixApi()
         ..channels = const [Channel(channel: 'instagram', username: 'test.shop', status: 'revoked')];

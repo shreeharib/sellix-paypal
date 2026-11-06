@@ -14,18 +14,39 @@ class SignInCancelled implements Exception {
   const SignInCancelled();
 }
 
+/// Opens [url] in the system's sign-in browser and returns the URL it was redirected to once it
+/// reaches [callbackUrlScheme]. Throws a [PlatformException] coded `CANCELED` when closed.
+typedef WebAuthenticate = Future<String> Function({required String url, required String callbackUrlScheme});
+
+/// The browser login. Tests replace it so the real flow runs without a browser.
+final webAuthenticateProvider = Provider<WebAuthenticate>((ref) => FlutterWebAuth2.authenticate);
+
+/// DEV ONLY: true while requests carry AppConfig.devAccessToken. A real Instagram sign-in ends it,
+/// so the session it creates is the one the app uses from then on. Always false without the define.
+class DevSignIn extends Notifier<bool> {
+  @override
+  bool build() => AppConfig.usesDevSignIn;
+
+  void end() => state = false;
+}
+
+final devSignInProvider = NotifierProvider<DevSignIn, bool>(DevSignIn.new);
+
 /// Whether the merchant is signed in, and "Continue with Instagram".
 class AuthController extends AsyncNotifier<AuthStatus> {
   @override
   Future<AuthStatus> build() async {
     // DEV ONLY: see AppConfig.devAccessToken. Inert when the define is empty.
-    if (AppConfig.usesDevSignIn) return AuthStatus.signedIn;
+    if (ref.read(devSignInProvider)) return AuthStatus.signedIn;
 
     final refreshToken = await ref.read(tokenStoreProvider).refreshToken();
     return refreshToken == null ? AuthStatus.signedOut : AuthStatus.signedIn;
   }
 
   /// Opens Instagram's login, then trades the returned one-time code (with PKCE) for a session.
+  ///
+  /// This is also how a signed-in shop connects or reconnects Instagram: the API has no separate
+  /// "connect to this shop" endpoint, and it signs the same Instagram account into the same shop.
   Future<void> signInWithInstagram() async {
     final pkce = Pkce.generate();
     final authApi = ref.read(authApiProvider);
@@ -36,7 +57,7 @@ class AuthController extends AsyncNotifier<AuthStatus> {
 
     final String result;
     try {
-      result = await FlutterWebAuth2.authenticate(
+      result = await ref.read(webAuthenticateProvider)(
         url: url,
         callbackUrlScheme: AppConfig.authCallbackScheme,
       );
@@ -53,13 +74,15 @@ class AuthController extends AsyncNotifier<AuthStatus> {
 
     final pair = await authApi.exchangeCode(code: code, codeVerifier: pkce.verifier);
     await ref.read(tokenStoreProvider).save(pair);
+    // DEV ONLY: from here on the API client sends this session, not the command-line token.
+    ref.read(devSignInProvider.notifier).end();
     state = const AsyncData(AuthStatus.signedIn);
   }
 
   Future<void> signOut() async {
     // DEV ONLY: the token came from the command line and stays valid until it expires, so don't
     // revoke it; signing out lasts until the app restarts.
-    if (AppConfig.usesDevSignIn) {
+    if (ref.read(devSignInProvider)) {
       state = const AsyncData(AuthStatus.signedOut);
       return;
     }

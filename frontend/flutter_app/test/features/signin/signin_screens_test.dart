@@ -259,6 +259,35 @@ void main() {
       expect(_label('Receiving messages'), findsNothing);
     });
 
+    testWidgets('a signed-in shop with no Instagram connects it in place, with the real login', (tester) async {
+      final fake = FakeSellixApi.empty();
+      final h = await _pump(tester, const ConnectedScreen(), api: fake, start: AuthStatus.signedIn);
+      await _settle(tester);
+      expect(_label('Receiving messages'), findsNothing);
+      fake.channels = const [Channel(channel: 'instagram', username: 'test.shop', status: 'active')];
+      await tester.ensureVisible(_label('Connect Instagram'));
+      await tester.pump();
+      await tester.tap(_label('Connect Instagram'));
+      await _settle(tester);
+      expect(h.auth.started, 1);
+      expect(_label('Receiving messages'), findsOneWidget);
+      expect(find.text('@test.shop'), findsOneWidget);
+      expect(_label('Instagram is connected.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 6));
+    });
+
+    testWidgets('a cancelled connect says Instagram is still not connected', (tester) async {
+      final h = await _pump(tester, const ConnectedScreen(), start: AuthStatus.signedIn, result: const SignInCancelled());
+      await _settle(tester);
+      await tester.ensureVisible(_label('Connect Instagram'));
+      await tester.pump();
+      await tester.tap(_label('Connect Instagram'));
+      await _settle(tester);
+      expect(h.auth.started, 1);
+      expect(_label('Cancelled. Instagram is still not connected.'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 6));
+    });
+
     testWidgets('error has a retry', (tester) async {
       final fake = FakeSellixApi.empty()..failure = const ApiException('No me');
       await _pump(tester, const ConnectedScreen(), api: fake);
