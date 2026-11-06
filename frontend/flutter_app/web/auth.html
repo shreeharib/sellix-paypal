@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- Where "Continue with Instagram" returns on the web: hands the result to the app window
+     (flutter_web_auth_2) and closes itself. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signing in · sellix</title>
+</head>
+<body>
+  <p>Signing you in… You can close this window if it doesn't close by itself.</p>
+  <script>
+    const message = { 'flutter-web-auth-2': window.location.href };
+    if (window.opener) {
+      window.opener.postMessage(message, window.location.origin);
+      window.close();
+    } else if (window.parent && window.parent !== window) {
+      window.parent.postMessage(message, window.location.origin);
+    } else {
+      localStorage.setItem('flutter-web-auth-2', window.location.href);
+      window.close();
+    }
+  </script>
+</body>
+</html>
