@@ -8,15 +8,23 @@ services:
     # Free instances sleep when idle, which breaks webhooks and the job worker inside the API.
     plan: starter
     buildCommand: pip install uv && uv sync --locked --no-dev
-    startCommand: uv run --frozen --no-dev uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # Several API processes; each keeps its own database pool (DB_POOL_SIZE), so size them together.
+    startCommand: uv run --frozen --no-dev uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2 --proxy-headers --timeout-graceful-shutdown 20
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.10"
       - key: APP_ENV
         value: dev
+      # The worker below runs the jobs; otherwise every API process would run its own worker.
       - key: RUN_WORKER_IN_PROCESS
-        value: "true"
+        value: "false"
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"  # Render's proxy sets X-Forwarded-For; the API is only reachable through it
+      - key: DB_POOL_SIZE
+        value: "8"
+      - key: DB_MAX_OVERFLOW
+        value: "4"
       - key: PUBLIC_BASE_URL
         sync: false
       # Supabase: the direct or session-pooler connection string (not the transaction pooler).
@@ -58,4 +66,56 @@ services:
       - key: LOG_WEBHOOK_PAYLOADS
         value: "true"
 
-# Next: the Flutter web app as a static site, and a separate worker once traffic needs it.
+  # The job worker as its own service: webhooks, agent turns, payments and expiry run here, so a
+  # burst of customer messages can't slow the merchant app, and API deploys don't stop jobs.
+  - type: worker
+    name: sellix-worker
+    runtime: python
+    rootDir: backend
+    plan: starter
+    buildCommand: pip install uv && uv sync --locked --no-dev
+    startCommand: uv run --frozen --no-dev python -m app.worker
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+      - key: APP_ENV
+        value: dev
+      - key: WORKER_CONCURRENCY
+        value: "4"
+      - key: DB_POOL_SIZE
+        value: "6"
+      # Same secrets and settings as the API: copy them from the same environment group.
+      - key: DATABASE_URL
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEYS
+        sync: false
+      - key: OAUTH_STATE_SECRET
+        sync: false
+      - key: SESSION_SIGNING_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_REASONING_EFFORT
+        value: low
+
+# Next: the Flutter web app as a static site.

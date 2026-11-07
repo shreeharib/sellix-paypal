@@ -1,0 +1,56 @@
+# Production-shaped stack on one machine: Postgres, the API (several processes) and the job
+# worker as its own container.   docker compose up --build
+# Needs backend/.env for the secrets (copy .env.example); DATABASE_URL is set below.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sellix
+    ports:
+      - "54322:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Run once, when the volume is empty: every migration in order.
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sellix"]
+      interval: 5s
+      retries: 20
+    command: ["postgres", "-c", "max_connections=200"]
+
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/sellix
+      RUN_WORKER_IN_PROCESS: "false"  # the worker below does the jobs
+      API_WORKERS: "2"
+      DB_POOL_SIZE: "10"
+      DB_MAX_OVERFLOW: "10"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/sellix
+      WORKER_CONCURRENCY: "4"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:

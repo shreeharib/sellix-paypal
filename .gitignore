@@ -54,3 +54,5 @@ paypal-certificate*
 # Agent-specific files
 .agents/
 .agents-local/
+backend/loadtest/tokens.txt
+
