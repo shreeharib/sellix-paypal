@@ -49,6 +49,9 @@ class FakeSellixApi implements SellixApi {
   List<StockRow> stock = [];
   List<YesterdayLeftoverItem> leftoverItems = [];
   List<UpcomingDay> upcoming = [];
+
+  /// The last `setUpcomingStock` call, for tests.
+  ({DateTime from, DateTime to, List<StockLine> lines, bool oneDayOnly, DateTime? lastOrderDate})? lastUpcoming;
   List<ProductDetail> catalog = [];
   List<Order> orderList = [];
   Map<String, List<OrderTimelineEvent>> timelines = {};
@@ -654,9 +657,12 @@ class FakeSellixApi implements SellixApi {
   Future<List<UpcomingDay>> setUpcomingStock(
     DateTime from,
     DateTime to,
-    List<StockLine> lines,
-  ) async {
+    List<StockLine> lines, {
+    bool oneDayOnly = false,
+    DateTime? lastOrderDate,
+  }) async {
     await _call('setUpcomingStock');
+    lastUpcoming = (from: from, to: to, lines: lines, oneDayOnly: oneDayOnly, lastOrderDate: lastOrderDate);
     final items = [
       for (final line in lines)
         UpcomingItem(

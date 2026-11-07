@@ -500,7 +500,13 @@ class _Catalogue extends StatelessWidget {
                     style: SxText.caption.copyWith(color: p.textSecondary),
                   ),
                   Text(
-                    item.shelf,
+                    item.availableOn == null
+                        ? item.shelf
+                        : [
+                            'Only ${DateFormat('d MMM').format(item.availableOn!)}',
+                            if (item.orderByDate != null)
+                              'order by ${DateFormat('d MMM').format(item.orderByDate!)}',
+                          ].join(' · '),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: SxText.caption.copyWith(color: p.textSecondary),

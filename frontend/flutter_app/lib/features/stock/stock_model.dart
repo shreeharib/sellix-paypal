@@ -103,6 +103,8 @@ class StockItem {
     this.attributes = const {},
     this.costPriceMinor,
     this.baseImageUrl,
+    this.availableOn,
+    this.orderByDate,
   });
 
   final String variantId;
@@ -120,6 +122,17 @@ class StockItem {
   final Map<String, dynamic> attributes;
   final int? costPriceMinor;
   final String? baseImageUrl;
+
+  /// Set: a one-day item, sold on this day only (a festival special for 9 Nov).
+  final DateTime? availableOn;
+
+  /// The last day customers can order it.
+  final DateTime? orderByDate;
+
+  /// Whether today's list shows it. The Catalogue shows every product; a one-day item for another
+  /// day stays off today's list unless it already has a count today.
+  bool onListOf(DateTime day) =>
+      availableOn == null || daysBetween(availableOn!, day) == 0 || row != null;
 
   String get label => itemName(name, variant);
   bool get counted => isCounted(stockMode);
@@ -184,6 +197,8 @@ class StockView {
             attributes: product.attributes,
             costPriceMinor: v.costPriceMinor,
             baseImageUrl: product.baseImageUrl,
+            availableOn: product.availableOn,
+            orderByDate: product.orderByDate,
           ),
         );
       }
@@ -209,9 +224,11 @@ class StockView {
   final Today today;
   final List<StockItem> items;
 
-  Iterable<StockItem> get tracked => items.where((i) => i.counted);
-  Iterable<StockItem> get noCount => items.where((i) => !i.counted);
-  Iterable<StockItem> get live => items.where((i) => i.live);
+  /// Today's lists: one-day items for another day are in [items] (the Catalogue) but not here.
+  Iterable<StockItem> get onTodaysList => items.where((i) => i.onListOf(today.businessDate));
+  Iterable<StockItem> get tracked => onTodaysList.where((i) => i.counted);
+  Iterable<StockItem> get noCount => onTodaysList.where((i) => !i.counted);
+  Iterable<StockItem> get live => onTodaysList.where((i) => i.live);
 
   StockItem? byVariant(String id) {
     for (final item in items) {

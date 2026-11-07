@@ -9,6 +9,7 @@ import 'package:sellix_merchant/core/router.dart';
 import 'package:sellix_merchant/core/theme_mode.dart';
 import 'package:sellix_merchant/design/design.dart';
 import 'package:sellix_merchant/features/stock/addproduct_screen.dart';
+import 'package:sellix_merchant/features/stock/day_stock_screen.dart';
 import 'package:sellix_merchant/features/stock/morning_screen.dart';
 import 'package:sellix_merchant/features/stock/product_screen.dart';
 import 'package:sellix_merchant/features/stock/stock_model.dart';
@@ -103,6 +104,14 @@ Future<void> _pump(
       GoRoute(path: Routes.home, builder: (_, _) => const Text('Home screen')),
       GoRoute(path: Routes.stock, builder: (_, _) => const Text('Stock screen')),
       GoRoute(path: Routes.morning, builder: (_, _) => const MorningScreen()),
+      GoRoute(
+        path: Routes.stockForDay,
+        builder: (_, s) => DayStockScreen(
+          day: s.uri.queryParameters['date'] == null
+              ? null
+              : DateTime.parse(s.uri.queryParameters['date']!),
+        ),
+      ),
       GoRoute(path: Routes.addproduct, builder: (_, s) => AddProductScreen(variantId: s.uri.queryParameters['id'])),
       GoRoute(path: '/product/:id', builder: (_, s) => ProductScreen(s.pathParameters['id']!)),
     ],
@@ -301,18 +310,79 @@ void main() {
       expect(api.calls, isNot(contains('applyRollover')));
     });
 
-    testWidgets('Coming days loads and saves a count over a range', (tester) async {
+    testWidgets('Coming days opens the day screen, which saves a count for that day', (tester) async {
       final api = _api();
       await _pump(tester, api, const StockScreen());
       await _settle(tester);
       await _tap(tester, 'Coming days');
       expect(api.calls, contains('upcomingStock'));
       await _tap(tester, 'Change Fri stock');
-      await _tap(tester, 'Next 3 days');
-      await _tap(tester, 'Save stock');
+      expect(find.text('What will you have on Fri, 16 Jan?'), findsOneWidget);
+      expect(find.text('Item A, small'), findsOneWidget);
+      await _tap(tester, 'Save stock for 16 Jan');
       expect(api.calls, contains('setUpcomingStock'));
-      expect(find.text('Stock set from Fri, 16 Jan to Sun, 18 Jan.'), findsOneWidget);
+      expect(api.lastUpcoming!.from, DateTime(2026, 1, 16));
+      expect(api.lastUpcoming!.to, DateTime(2026, 1, 16));
+      expect(api.lastUpcoming!.lines.single.product, 'Item A');
+      expect(find.text('Stock set for Fri, 16 Jan.'), findsOneWidget);
       await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('a new product for a later day is a one-day item with a last order day', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const DayStockScreen(day: null));
+      await _settle(tester);
+      expect(find.text('What will you have on Fri, 16 Jan?'), findsOneWidget);
+      await _tap(tester, 'Add another item');
+      await _tap(tester, 'New product');
+      final fields = find.byType(TextField);
+      await tester.enterText(fields.at(0), 'Diwali cake');
+      await tester.enterText(fields.at(2), '450');
+      await tester.enterText(fields.at(3), '40');
+      await _tap(tester, 'Add to the list');
+      expect(find.text('Diwali cake'), findsOneWidget);
+      expect(find.text('Only on this day'), findsOneWidget);
+      expect(find.text('Until the stock runs out'), findsOneWidget);
+      await _tap(tester, 'Last day to order');
+      await _tap(tester, 'OK');
+      expect(find.textContaining('Orders close after it.'), findsOneWidget);
+      await _tap(tester, 'Save stock for 16 Jan');
+      final sent = api.lastUpcoming!;
+      expect(sent.oneDayOnly, isTrue);
+      expect(sent.lastOrderDate, DateTime(2026, 1, 15));
+      final line = sent.lines.firstWhere((l) => l.product == 'Diwali cake');
+      expect(line.priceMinor, 45000);
+      expect(line.quantity, 40);
+    });
+
+    testWidgets('a one-day item shows on its own day and not on today', (tester) async {
+      final api = _api();
+      ProductDetail cake(DateTime day) => ProductDetail(
+        id: 'cake',
+        name: 'Diwali cake',
+        stockMode: StockMode.daily,
+        isActive: true,
+        availableOn: day,
+        variants: const [
+          ProductVariantDetail(
+            id: 'cake-v',
+            sku: null,
+            name: null,
+            priceMinor: 45000,
+            currency: 'INR',
+            stockMode: StockMode.daily,
+            isActive: true,
+          ),
+        ],
+      );
+      api.catalog = [...api.catalog, cake(DateTime(2026, 1, 20))];
+      await _pump(tester, api, const StockScreen());
+      await _settle(tester);
+      expect(find.text('Item A, small'), findsOneWidget);
+      expect(find.text('Diwali cake'), findsNothing); // not on today's list ...
+      await _tap(tester, 'Catalogue');
+      expect(find.text('Diwali cake'), findsOneWidget); // ... but in the Catalogue
+      expect(find.text('Only 20 Jan'), findsOneWidget);
     });
   });
 

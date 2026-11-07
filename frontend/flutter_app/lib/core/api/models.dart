@@ -729,16 +729,31 @@ class RolloverResponse {
 // Upcoming stock (stock.py) ----------------------------------------------------------------------
 
 class UpcomingStock {
-  const UpcomingStock({required this.fromDate, required this.toDate, required this.lines});
+  const UpcomingStock({
+    required this.fromDate,
+    required this.toDate,
+    required this.lines,
+    this.oneDayOnly = false,
+    this.lastOrderDate,
+  });
 
   final DateTime fromDate;
   final DateTime toDate;
   final List<StockLine> lines;
 
+  /// Single day only: items this call creates are sold on [fromDate] alone and stay off other
+  /// days' stock, today's included. Items that already sell every day are not changed.
+  final bool oneDayOnly;
+
+  /// The last day customers can order the one-day items. Needs [oneDayOnly].
+  final DateTime? lastOrderDate;
+
   Map<String, dynamic> toJson() => {
     'from_date': _day(fromDate),
     'to_date': _day(toDate),
     'lines': [for (final line in lines) line.toJson()],
+    if (oneDayOnly) 'one_day_only': true,
+    if (lastOrderDate != null) 'last_order_date': _day(lastOrderDate!),
   };
 }
 
@@ -753,6 +768,8 @@ class UpcomingItem {
     required this.opening,
     required this.stockMode,
     required this.shelfLifeDays,
+    this.availableOn,
+    this.orderByDate,
   });
 
   factory UpcomingItem.fromJson(Map<String, dynamic> json) => UpcomingItem(
@@ -765,6 +782,8 @@ class UpcomingItem {
     opening: _int(json['opening']),
     stockMode: json['stock_mode'] as String? ?? StockMode.daily,
     shelfLifeDays: _intOrNull(json['shelf_life_days']),
+    availableOn: json['available_on'] == null ? null : _date(json['available_on']),
+    orderByDate: json['order_by_date'] == null ? null : _date(json['order_by_date']),
   );
 
   final String product;
@@ -773,6 +792,10 @@ class UpcomingItem {
   final String currency;
   final int available;
   final String? variantId;
+
+  /// Set: sold on this one day only. [orderByDate] is the last day customers can order it.
+  final DateTime? availableOn;
+  final DateTime? orderByDate;
 
   /// The quantity set for the day; [available] is less once orders hold some.
   final int opening;
@@ -1090,6 +1113,7 @@ class Question {
     this.windowClosesAt,
     this.windowState,
     this.answerDelivery,
+    this.suggestedAnswers = const [],
   });
 
   factory Question.fromJson(Map<String, dynamic> json) => Question(
@@ -1103,11 +1127,17 @@ class Question {
     windowClosesAt: _dateOrNull(json['window_closes_at']),
     windowState: json['window_state'] as String?,
     answerDelivery: json['answer_delivery'] as String?,
+    suggestedAnswers: [
+      for (final s in json['suggested_answers'] as List<dynamic>? ?? const []) s as String,
+    ],
   );
 
   final String id;
   final String conversationId;
   final String question;
+
+  /// The assistant's suggested answers, up to three: one tap picks one for the reply.
+  final List<String> suggestedAnswers;
 
   /// "open", "answered" or "closed".
   final String status;
@@ -1317,6 +1347,8 @@ class ProductDetail {
     this.baseImageUrl,
     required this.stockMode,
     this.shelfLifeDays,
+    this.availableOn,
+    this.orderByDate,
     this.attributes = const {},
     required this.isActive,
     this.variants = const [],
@@ -1332,6 +1364,8 @@ class ProductDetail {
     baseImageUrl: json['base_image_url'] as String?,
     stockMode: json['stock_mode'] as String? ?? StockMode.daily,
     shelfLifeDays: _intOrNull(json['shelf_life_days']),
+    availableOn: json['available_on'] == null ? null : _date(json['available_on']),
+    orderByDate: json['order_by_date'] == null ? null : _date(json['order_by_date']),
     attributes: _map(json['attributes']),
     isActive: json['is_active'] as bool,
     variants: _list(json['variants'], ProductVariantDetail.fromJson),
@@ -1346,6 +1380,10 @@ class ProductDetail {
   final String? baseImageUrl;
   final String stockMode;
   final int? shelfLifeDays;
+
+  /// Set: sold on this one day only (a pre-order item). [orderByDate] is the last day to order.
+  final DateTime? availableOn;
+  final DateTime? orderByDate;
   final Map<String, dynamic> attributes;
   final bool isActive;
   final List<ProductVariantDetail> variants;

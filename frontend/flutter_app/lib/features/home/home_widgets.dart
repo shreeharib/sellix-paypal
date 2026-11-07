@@ -51,6 +51,7 @@ class QuestionCard extends StatelessWidget {
     final chat = data.chatOf(question.conversationId);
     final channel = chat?.channel;
     final aboveBar = !full;
+    final suggestions = question.suggestedAnswers;
     void openChat() => context.push(Routes.chat(question.conversationId));
     return SxNeedsYouCard(
       name: customer,
@@ -64,21 +65,55 @@ class QuestionCard extends StatelessWidget {
       onSecondary: full ? () => dismissQuestionFlow(context, question, customer, aboveBar: aboveBar) : openChat,
       primaryLabel: 'Answer',
       onPrimary: () => answerQuestionFlow(context, question, customer, aboveBar: aboveBar),
-      extra: full
-          ? Padding(
-              padding: const EdgeInsets.only(top: SxSpace.s8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  SxLinkButton(label: 'Open chat', icon: TablerIcons.message_circle, onTap: openChat),
-                  // BACKEND GAP: no voice transcription endpoint, so "Answer by voice" is off.
-                  const Flexible(
-                    child: SxLinkButton(label: 'Voice not ready yet', icon: TablerIcons.microphone, onTap: null),
+      extra: suggestions.isEmpty && !full
+          ? null
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // The assistant's suggested answers: a tap opens the answer with it filled in.
+                if (suggestions.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: SxSpace.s8),
+                    child: Wrap(
+                      spacing: SxSpace.s8,
+                      runSpacing: SxSpace.s8,
+                      children: [
+                        for (final suggestion in suggestions)
+                          SxPickChip(
+                            label: suggestion,
+                            selected: false,
+                            icon: TablerIcons.sparkles,
+                            onTap: () => answerQuestionFlow(
+                              context,
+                              question,
+                              customer,
+                              aboveBar: aboveBar,
+                              initial: suggestion,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
-            )
-          : null,
+                if (full)
+                  Padding(
+                    padding: const EdgeInsets.only(top: SxSpace.s8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        SxLinkButton(label: 'Open chat', icon: TablerIcons.message_circle, onTap: openChat),
+                        // BACKEND GAP: no voice transcription endpoint, so "Answer by voice" is off.
+                        const Flexible(
+                          child: SxLinkButton(
+                            label: 'Voice not ready yet',
+                            icon: TablerIcons.microphone,
+                            onTap: null,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'format.dart';
 import '../design/widgets/sx_snack.dart';
 import '../features/chats/chat_screen.dart';
 import '../features/chats/chats_screen.dart';
@@ -39,6 +40,7 @@ import '../features/signin/prebrief_screen.dart';
 import '../features/signin/splash_screen.dart';
 import '../features/signin/welcome_screen.dart';
 import '../features/stock/addproduct_screen.dart';
+import '../features/stock/day_stock_screen.dart';
 import '../features/stock/morning_screen.dart';
 import '../features/stock/product_screen.dart';
 import '../features/stock/stock_screen.dart';
@@ -80,6 +82,7 @@ abstract final class Routes {
   static const insights = '/insights';
   static const morning = '/morning';
   static const addproduct = '/addproduct';
+  static const stockForDay = '/stock-for';
   static const customers = '/customers';
   static const automations = '/automations';
   static const newauto = '/newauto';
@@ -89,6 +92,8 @@ abstract final class Routes {
   static const shopprofile = '/shopprofile';
   static const hours = '/hours';
 
+  /// Set the stock for a later day, the way today's list is set.
+  static String stockFor(DateTime day) => '$stockForDay?date=${businessDateString(day)}';
   static String chat(String conversationId) => '/chat/${Uri.encodeComponent(conversationId)}';
   static String order(String orderId) => '/order/${Uri.encodeComponent(orderId)}';
   static String product(String variantId) => '/product/${Uri.encodeComponent(variantId)}';
@@ -254,6 +259,15 @@ final routerProvider = Provider<GoRouter>((ref) {
       _route('/chat/:id', _push, (s) => ChatScreen(s.pathParameters['id']!)),
       _route(Routes.morning, _up, (_) => const MorningScreen()),
       _route('/product/:id', _push, (s) => ProductScreen(s.pathParameters['id']!)),
+      _route(
+        Routes.stockForDay,
+        _up,
+        (s) => DayStockScreen(
+          day: s.uri.queryParameters['date'] == null
+              ? null
+              : parseBusinessDate(s.uri.queryParameters['date']!),
+        ),
+      ),
       _route(Routes.addproduct, _up, (s) => AddProductScreen(variantId: s.uri.queryParameters['id'])),
       _route('/order/:id', _push, (s) => OrderScreen(s.pathParameters['id']!)),
       _route(Routes.customers, _push, (_) => const CustomersScreen()),

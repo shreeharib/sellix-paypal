@@ -46,7 +46,16 @@ abstract interface class SellixApi {
   Future<List<UpcomingDay>> upcomingStock();
 
   /// The same quantity each day from [from] to [to], up to 30 days ahead; a later call replaces it.
-  Future<List<UpcomingDay>> setUpcomingStock(DateTime from, DateTime to, List<StockLine> lines);
+  ///
+  /// [oneDayOnly] (a single day): items this call creates are sold on that day alone and stay off
+  /// every other day's stock, today's too. [lastOrderDate] is the last day to order them.
+  Future<List<UpcomingDay>> setUpcomingStock(
+    DateTime from,
+    DateTime to,
+    List<StockLine> lines, {
+    bool oneDayOnly = false,
+    DateTime? lastOrderDate,
+  });
 
   // Catalog
   Future<CatalogSearchResponse> searchCatalog(String query, {int? limit});
@@ -254,12 +263,20 @@ class HttpSellixApi implements SellixApi {
   Future<List<UpcomingDay>> setUpcomingStock(
     DateTime from,
     DateTime to,
-    List<StockLine> lines,
-  ) async => _parseList(
+    List<StockLine> lines, {
+    bool oneDayOnly = false,
+    DateTime? lastOrderDate,
+  }) async => _parseList(
     await _array(
       'PUT',
       '/v1/stock/upcoming',
-      body: UpcomingStock(fromDate: from, toDate: to, lines: lines).toJson(),
+      body: UpcomingStock(
+        fromDate: from,
+        toDate: to,
+        lines: lines,
+        oneDayOnly: oneDayOnly,
+        lastOrderDate: lastOrderDate,
+      ).toJson(),
     ),
     UpcomingDay.fromJson,
   );

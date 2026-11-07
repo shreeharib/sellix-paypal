@@ -92,10 +92,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
-  Future<void> _answer(Question question, Conversation chat) async {
+  /// [suggested] is one of the assistant's suggested answers, tapped on the card: it goes straight
+  /// to the "Send this?" check. Without it the merchant writes the reply.
+  Future<void> _answer(Question question, Conversation chat, {String? suggested}) async {
     final first = firstNameOf(chat.customerHandle);
     final channel = channelName(chat.channel);
-    final draft = await showAnswerSheet(context, question.question);
+    final draft = suggested != null
+        ? AnswerDraft(suggested, always: false)
+        : await showAnswerSheet(context, question.question);
     if (draft == null || !mounted) return;
     final confirmed = await showSxConfirm(
       context,
@@ -365,14 +369,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             for (final question in open)
               SxFadeUp(
                 key: ValueKey(question.id),
-                // BACKEND GAP: questions carry no suggested answers, so the prototype's option
-                // buttons can't be shown. Only "Write my own reply" is real.
                 child: SxEscalationCard(
                   body: question.question,
                   options: [
+                    for (final (i, suggestion) in question.suggestedAnswers.indexed)
+                      SxEscalationOption(
+                        label: suggestion,
+                        recommended: i == 0,
+                        onTap: _busy.contains(question.id)
+                            ? null
+                            : () => _answer(question, chat, suggested: suggestion),
+                      ),
                     SxEscalationOption(
                       label: 'Write my own reply',
-                      recommended: true,
+                      recommended: question.suggestedAnswers.isEmpty,
                       onTap: _busy.contains(question.id) ? null : () => _answer(question, chat),
                     ),
                   ],

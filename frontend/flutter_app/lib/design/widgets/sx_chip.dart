@@ -260,7 +260,15 @@ class SxPickChip extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (icon != null) ...[Icon(icon, size: 16, color: fg), const SizedBox(width: 6)],
-              Text(label, style: SxText.label.copyWith(color: fg)),
+              // A long label (a suggested answer can be a sentence) shrinks to the space it has.
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: SxText.label.copyWith(color: fg),
+                ),
+              ),
               AnimatedSize(
                 duration: SxMotion.base,
                 curve: SxMotion.spring,

@@ -2,15 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/api/models.dart';
 import '../../core/format.dart';
-import '../../core/providers.dart';
+import '../../core/router.dart';
 import '../../design/design.dart';
 import 'stock_model.dart';
 import 'stock_providers.dart';
-import 'stock_widgets.dart';
 
 String _long(DateTime d) => DateFormat('EEE, d MMM').format(d);
 String _weekday(DateTime d) => DateFormat('EEE').format(d);
@@ -37,6 +37,13 @@ class _ComingDaysState extends ConsumerState<ComingDays> {
 
   DateTime _day(int i) => addDays(widget.view.today.businessDate, i);
 
+  String _meta(UpcomingItem item) => [
+    'Set ${item.opening}',
+    if (item.held > 0) 'On hold ${item.held}',
+    if (item.availableOn != null) 'Only this day',
+    if (item.orderByDate != null) 'Order by ${DateFormat('d MMM').format(item.orderByDate!)}',
+  ].join(' · ');
+
   List<UpcomingItem> _itemsOn(List<UpcomingDay> days, DateTime day) => [
     for (final d in days)
       if (daysBetween(d.date, day) == 0)
@@ -44,31 +51,13 @@ class _ComingDaysState extends ConsumerState<ComingDays> {
           if (item.opening > 0) item,
   ];
 
-  Future<void> _openSheet(List<UpcomingDay> days, String? weeklyOff) async {
-    final tracked = widget.view.tracked.toList();
-    if (tracked.isEmpty) {
-      showSxSnack(context, 'No counted products yet. Add a product first.', icon: TablerIcons.info_circle);
-      return;
-    }
-    final from = _day(_index);
-    final saved = await showSxSheet<int>(
-      context,
-      title: 'Stock for ${_long(from)}',
-      subtitle: _closed(from, weeklyOff)
-          ? _closedNote(from)
-          : 'How many can you sell that day? Zero means none.',
-      builder: (_) => _ComingSheet(from: from, items: tracked, days: days),
-    );
-    if (saved == null || !mounted) return;
+  Future<void> _openDay(DateTime day) async {
+    final saved = await context.push<String>(Routes.stockFor(day));
+    if (!mounted) return;
     ref.invalidate(upcomingProvider);
+    if (saved == null) return;
     HapticFeedback.mediumImpact();
-    showSxSnack(
-      context,
-      saved == 1
-          ? 'Stock set for ${_long(from)}.'
-          : 'Stock set from ${_long(from)} to ${_long(addDays(from, saved - 1))}.',
-      icon: TablerIcons.check,
-    );
+    showSxSnack(context, saved, icon: TablerIcons.check);
   }
 
   @override
@@ -133,7 +122,7 @@ class _ComingDaysState extends ConsumerState<ComingDays> {
                     for (final item in items)
                       SxRowCard(
                         title: itemName(item.product, item.variant),
-                        meta: 'Set ${item.opening}${item.held > 0 ? ' · On hold ${item.held}' : ''}',
+                        meta: _meta(item),
                         leading: const SxIconTile(icon: TablerIcons.package),
                         chevron: false,
                         trailing: Column(
@@ -148,7 +137,7 @@ class _ComingDaysState extends ConsumerState<ComingDays> {
                     kind: SxButtonKind.secondary,
                     icon: TablerIcons.calendar_plus,
                     fullWidth: true,
-                    onTap: () => _openSheet(days, weeklyOff),
+                    onTap: () => _openDay(selected),
                   ),
                 ],
               ),
@@ -156,130 +145,6 @@ class _ComingDaysState extends ConsumerState<ComingDays> {
           ],
         );
       },
-    );
-  }
-}
-
-class _ComingSheet extends ConsumerStatefulWidget {
-  const _ComingSheet({required this.from, required this.items, required this.days});
-
-  final DateTime from;
-  final List<StockItem> items;
-  final List<UpcomingDay> days;
-
-  @override
-  ConsumerState<_ComingSheet> createState() => _ComingSheetState();
-}
-
-class _ComingSheetState extends ConsumerState<_ComingSheet> {
-  late final Map<String, int> _counts = {
-    for (final item in widget.items) item.variantId: _on(widget.from, item)?.opening ?? 0,
-  };
-  int _range = 1;
-  bool _saving = false;
-  String? _error;
-
-  UpcomingItem? _on(DateTime day, StockItem item) {
-    for (final d in widget.days) {
-      if (daysBetween(d.date, day) != 0) continue;
-      for (final u in d.items) {
-        if (u.variantId == item.variantId ||
-            (u.variantId == null && u.product == item.name && u.variant == item.variant)) {
-          return u;
-        }
-      }
-    }
-    return null;
-  }
-
-  /// One day's lines. A count below what orders hold on that day stays at the held number.
-  List<StockLine> _linesFor(DateTime day) => [
-    for (final item in widget.items)
-      if ((_counts[item.variantId] ?? 0) > 0 || (_on(day, item)?.opening ?? 0) > 0)
-        item.line(
-          _counts[item.variantId]! > (_on(day, item)?.held ?? 0)
-              ? _counts[item.variantId]!
-              : (_on(day, item)?.held ?? 0),
-        ),
-  ];
-
-  String _key(List<StockLine> lines) => lines.map((l) => '${l.label}:${l.quantity}').join('|');
-
-  Future<void> _save() async {
-    final had = widget.items.any((i) => (_on(widget.from, i)?.opening ?? 0) > 0);
-    if (!had && _counts.values.every((v) => v == 0)) {
-      HapticFeedback.heavyImpact();
-      setState(() => _error = 'All counts are zero. Set a count for at least one product.');
-      return;
-    }
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    final api = ref.read(sellixApiProvider);
-    final days = [for (var i = 0; i < _range; i++) addDays(widget.from, i)];
-    final perDay = [for (final d in days) _linesFor(d)];
-    try {
-      if (perDay.every((l) => _key(l) == _key(perDay.first))) {
-        if (perDay.first.isNotEmpty) await api.setUpcomingStock(days.first, days.last, perDay.first);
-      } else {
-        for (final (i, lines) in perDay.indexed) {
-          if (lines.isNotEmpty) await api.setUpcomingStock(days[i], days[i], lines);
-        }
-      }
-      if (mounted) Navigator.of(context).pop(_range);
-    } on Exception catch (error) {
-      if (!mounted) return;
-      ref.invalidate(upcomingProvider);
-      setState(() {
-        _saving = false;
-        _error = sxErrorMessage(error);
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = context.sx;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      spacing: SxSpace.s8,
-      children: [
-        for (final item in widget.items)
-          Builder(
-            builder: (_) {
-              final held = _on(widget.from, item)?.held ?? 0;
-              return WhyStockRow(
-                title: item.label,
-                meta: '${item.shelf}${held > 0 ? ' · On hold $held' : ''}',
-                value: _counts[item.variantId]!,
-                min: held,
-                whyMin: held > 0
-                    ? '$held on hold for this day. You can’t go below $held.'
-                    : 'Zero means none. You can’t go below zero.',
-                whyMax: 'The most you can set is $stepperMax.',
-                onChanged: (v) => setState(() => _counts[item.variantId] = v),
-              );
-            },
-          ),
-        const SizedBox(height: SxSpace.s8),
-        Text('Same count for', style: SxText.label.copyWith(color: p.textPrimary)),
-        Wrap(
-          spacing: SxSpace.s8,
-          runSpacing: SxSpace.s8,
-          children: [
-            for (final (n, label) in const [(1, 'This day'), (3, 'Next 3 days'), (7, 'Next 7 days')])
-              SxPickChip(
-                label: label,
-                selected: _range == n,
-                onTap: () => setState(() => _range = n),
-              ),
-          ],
-        ),
-        if (_error != null) WhyText(_error!),
-        const SizedBox(height: SxSpace.s16),
-        SxButton(label: 'Save stock', fullWidth: true, loading: _saving, onTap: _saving ? null : _save),
-      ],
     );
   }
 }

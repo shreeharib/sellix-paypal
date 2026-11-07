@@ -25,8 +25,8 @@ void _afterQuestionChange(ProviderContainer container) {
 }
 
 /// sellix's first-person note on a question card, from what the API knows about the reply window.
-// BACKEND GAP: questions have no reason, photo, sellix note or suggested answers, so the prototype's
-// reason chip, note and one-tap options can't be shown. The merchant writes the answer.
+// BACKEND GAP: questions have no reason, photo or sellix note, so the prototype's reason chip and
+// note are built here from the reply window. The assistant's suggested answers are real.
 String questionNote(Question question) {
   final closes = question.windowClosesAt;
   return switch (question.windowState) {
@@ -54,11 +54,14 @@ String _deliveryText(String customer, String? delivery) => switch (delivery) {
 
 /// Opens the answer sheet. Nothing is sent until the merchant taps "Send answer".
 // BACKEND GAP: a sent answer can't be taken back, so the prototype's Undo isn't offered.
+///
+/// [initial] fills the answer, e.g. a suggested answer the merchant tapped; they can still edit it.
 Future<void> answerQuestionFlow(
   BuildContext context,
   Question question,
   String customer, {
   bool aboveBar = true,
+  String? initial,
 }) async {
   final container = ProviderScope.containerOf(context, listen: false);
   final result = await showSxSheet<_Answered>(
@@ -66,6 +69,7 @@ Future<void> answerQuestionFlow(
     title: 'Answer $customer',
     builder: (sheet) => _AnswerSheet(
       question: question,
+      initial: initial,
       onSend: (text, always) =>
           container.read(sellixApiProvider).answerQuestion(question.id, text, always: always),
       onStale: () => _afterQuestionChange(container),
@@ -118,9 +122,15 @@ class _Answered {
 }
 
 class _AnswerSheet extends StatefulWidget {
-  const _AnswerSheet({required this.question, required this.onSend, required this.onStale});
+  const _AnswerSheet({
+    required this.question,
+    required this.onSend,
+    required this.onStale,
+    this.initial,
+  });
 
   final Question question;
+  final String? initial;
   final Future<Question> Function(String text, bool always) onSend;
 
   /// A refused answer usually means the question moved on elsewhere.
@@ -131,7 +141,7 @@ class _AnswerSheet extends StatefulWidget {
 }
 
 class _AnswerSheetState extends State<_AnswerSheet> {
-  final _text = TextEditingController();
+  late final _text = TextEditingController(text: widget.initial);
   var _always = false;
   var _sending = false;
   String? _error;
@@ -174,6 +184,25 @@ class _AnswerSheetState extends State<_AnswerSheet> {
       spacing: SxSpace.s12,
       children: [
         Text('“${widget.question.question}”', style: SxText.bodyS.copyWith(color: p.textPrimary)),
+        if (widget.question.suggestedAnswers.isNotEmpty)
+          Wrap(
+            spacing: SxSpace.s8,
+            runSpacing: SxSpace.s8,
+            children: [
+              for (final suggestion in widget.question.suggestedAnswers)
+                SxPickChip(
+                  label: suggestion,
+                  selected: _text.text.trim() == suggestion,
+                  onTap: _sending
+                      ? null
+                      : () => setState(() {
+                          _text.text = suggestion;
+                          _text.selection = TextSelection.collapsed(offset: suggestion.length);
+                          _error = null;
+                        }),
+                ),
+            ],
+          ),
         SxField(
           controller: _text,
           hint: 'Type your answer',

@@ -225,6 +225,38 @@ void main() {
   });
 
   group('Needs you', () {
+    testWidgets('suggested answers are one tap: the answer opens with the text filled in', (tester) async {
+      final fake = FakeSellixApi();
+      fake.questionList = [
+        for (final q in fake.questionList)
+          Question(
+            id: q.id,
+            conversationId: q.conversationId,
+            question: q.question,
+            status: q.status,
+            answer: q.answer,
+            createdAt: q.createdAt,
+            answeredAt: q.answeredAt,
+            windowClosesAt: q.windowClosesAt,
+            windowState: q.windowState,
+            suggestedAnswers: const ['Yes, tomorrow at 11', 'Not tomorrow'],
+          ),
+      ];
+      await pumpScreen(tester, fake, const NeedsScreen());
+      await settle(tester);
+      expect(find.text('Yes, tomorrow at 11'), findsOneWidget);
+      expect(find.text('Not tomorrow'), findsOneWidget);
+
+      await tapText(tester, 'Not tomorrow');
+      expect(find.widgetWithText(TextField, 'Not tomorrow'), findsOneWidget);
+      expect(fake.calls, isNot(contains('answerQuestion'))); // filled in, not sent
+
+      await tapText(tester, 'Send answer');
+      await settle(tester);
+      expect(fake.calls, contains('answerQuestion'));
+      await tester.pump(const Duration(seconds: 5));
+    });
+
     testWidgets('shows the queue, and dismissing asks first and closes the question', (tester) async {
       final fake = FakeSellixApi();
       await pumpScreen(tester, fake, const NeedsScreen());

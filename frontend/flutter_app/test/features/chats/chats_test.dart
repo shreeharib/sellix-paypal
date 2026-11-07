@@ -367,6 +367,41 @@ void main() {
       await _clearSnack(tester);
     });
 
+    testWidgets('a suggested answer goes straight to the send check, then sends as is', (tester) async {
+      final fake = _RecordingApi()
+        ..messagesByConversation = {
+          FakeIds.conversationA: [_message('m1', 'customer', 'Hello')],
+        };
+      fake.questionList = [
+        for (final q in fake.questionList)
+          Question(
+            id: q.id,
+            conversationId: q.conversationId,
+            question: q.question,
+            status: q.status,
+            answer: q.answer,
+            createdAt: q.createdAt,
+            answeredAt: q.answeredAt,
+            windowClosesAt: q.windowClosesAt,
+            windowState: q.windowState,
+            suggestedAnswers: const ['Ready by noon', 'Ask them to wait'],
+          ),
+      ];
+      await _pump(tester, fake, start: start);
+      await _settle(tester);
+      expect(find.text('Ready by noon'), findsOneWidget);
+      expect(find.text('Write my own reply'), findsOneWidget);
+
+      await _tapText(tester, 'Ready by noon');
+      expect(find.text('Send this to customer.one?'), findsOneWidget);
+      expect(fake.calls, isNot(contains('answerQuestion')));
+      await _tapText(tester, 'Send');
+
+      expect(fake.answer, 'Ready by noon');
+      expect(fake.always, isFalse);
+      await _clearSnack(tester);
+    });
+
     testWidgets('a question closed meanwhile says so', (tester) async {
       final fake = _ClosedQuestionApi();
       await _pump(tester, fake, start: start);
