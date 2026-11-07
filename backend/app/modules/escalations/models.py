@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, text
+from sqlalchemy import Text, func, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -17,6 +18,10 @@ class Escalation(Base):
     conversation_id: Mapped[uuid.UUID]
     trigger_message_id: Mapped[uuid.UUID | None]
     question: Mapped[str]
+    # The agent's suggested answers, shown to the merchant as one-tap replies.
+    suggested_answers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), server_default=text("'{}'"), default=list
+    )
     status: Mapped[str] = mapped_column(server_default="open")
     answer: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

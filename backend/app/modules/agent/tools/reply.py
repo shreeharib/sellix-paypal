@@ -4,6 +4,7 @@ code fills in its tokens, then it goes to the outbox.
 
 from pydantic import BaseModel, Field
 
+from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.money import format_money
 from app.modules.agent import items
@@ -33,24 +34,39 @@ class SendReply(Tool):
             health_fields_seen=ctx.health_fields_seen,
             never_promise=ctx.merchant.never_promise,
             owner_asked=ctx.owner_asked,
+            previous_reply=ctx.last_agent_reply,
+            expects_new=ctx.trigger_event is not None,
+            mention_one_of=_preorders_to_mention(ctx),
         )
+        text = check.text
         if not check.ok:
-            ctx.reply_rejections += 1
-            return ToolResult.fail(
-                "reply_rejected",
-                "; ".join(check.problems),
-                "Fix these and call send_reply again",
-            )
+            # Only tone slipped (an introduction, "madam") and the model has had its chance to
+            # fix it: send the cleaned-up reply, not the holding message.
+            if check.sanitized is not None and ctx.reply_rejections >= (
+                get_settings().agent_repair_attempts
+            ):
+                text = check.sanitized
+            else:
+                ctx.reply_rejections += 1
+                return ToolResult.fail(
+                    "reply_rejected",
+                    "; ".join(check.problems),
+                    "Fix these and call send_reply again",
+                )
         if ctx.mode == "shadow":
-            ctx.would_send = check.text
+            ctx.would_send = text
         else:
             async with session_scope() as session:
                 await conversations.queue_message(
                     session,
                     conversation_id=ctx.conversation_id,
-                    text=check.text,
+                    text=text,
                     key=f"turn:{ctx.turn_id}:reply",
-                    details={"language": args.language, "turn_id": str(ctx.turn_id)},
+                    details={
+                        "language": args.language,
+                        "turn_id": str(ctx.turn_id),
+                        "trigger_id": str(ctx.trigger_message_id),
+                    },
                     quick_replies=tuple((choice, f"CHOICE:{choice}") for choice in args.choices),
                     draft=ctx.mode == "draft",
                 )
@@ -64,6 +80,16 @@ class SendReply(Tool):
             ctx.would_send = result.private.get("would_send")
         else:
             ctx.reply_rejections += 1
+
+
+def _preorders_to_mention(ctx: TurnContext) -> list[str]:
+    """On a menu answer: the pre-orders open for booking, which the reply should include."""
+    if ctx.playbook != "menu":
+        return []
+    names = {
+        item.product for stock in ctx.upcoming.values() for item in stock if item.available > 0
+    }
+    return sorted(names)
 
 
 async def token_values(ctx: TurnContext) -> output.TokenValues:

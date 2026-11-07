@@ -11,8 +11,10 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.catalog import service as catalog
 from app.modules.inventory import service as inventory
 from app.modules.inventory.schemas import StockItem
+from app.modules.merchants import service as merchants
 from app.modules.orders.models import (
     Order,
     OrderEvent,
@@ -83,6 +85,19 @@ async def quote(
         elif matches[0].variant_id is not None:
             items[matches[0].variant_id] = matches[0]
             wanted[matches[0].variant_id] += line.quantity
+
+    # Fixed-day items and last order dates (a Diwali cake for pickup on 9 Nov, order by 4 Nov).
+    merchant = await merchants.get_merchant(session, merchant_id)
+    today = merchants.business_date(merchant)
+    policies = {
+        v.variant_id: v
+        for v in await catalog.list_variants_by_ids(session, merchant_id, wanted.keys())
+    }
+    for variant_id in list(wanted):
+        reason = policies[variant_id].ordering_problem(business_date, today)
+        if reason is not None:
+            problems.append(reason)
+            del wanted[variant_id]
 
     lines: list[QuoteLine] = []
     for variant_id, quantity in wanted.items():
@@ -174,7 +189,7 @@ async def place_order(
     session.add(order)
     await session.flush()
 
-    for line in offer.lines:
+    for line in sorted(offer.lines, key=lambda line: line.variant_id):
         held = await inventory.hold(
             session,
             variant_id=line.variant_id,
@@ -518,7 +533,7 @@ async def record_payment(
     items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
     outcome: PaymentOutcome = "paid"
     if previous == "awaiting_payment":
-        for item in items:
+        for item in sorted(items, key=lambda item: item.variant_id):
             if not await inventory.confirm_sale(
                 session,
                 variant_id=item.variant_id,
@@ -532,7 +547,7 @@ async def record_payment(
         # The hold had expired (or the order was cancelled): sell again if the stock is still there.
         try:
             async with session.begin_nested():
-                for item in items:
+                for item in sorted(items, key=lambda item: item.variant_id):
                     if not await inventory.sell_unheld(
                         session,
                         variant_id=item.variant_id,
@@ -634,7 +649,7 @@ async def settle_refund(
     previous = order.status
     if request.is_restocked and previous in ("paid", "completed", "confirmed"):
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
-        for item in items:
+        for item in sorted(items, key=lambda item: item.variant_id):
             await inventory.release(
                 session,
                 variant_id=item.variant_id,
@@ -849,7 +864,7 @@ async def cancel_order(
     if previous == "awaiting_payment":
         # Release the held stock back to available inventory
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
-        for item in items:
+        for item in sorted(items, key=lambda item: item.variant_id):
             await inventory.release(
                 session,
                 variant_id=item.variant_id,
@@ -891,7 +906,8 @@ async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> l
     )
     expired: list[ExpiredOrder] = []
     for order in due:
-        for item in await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)):
+        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+        for item in sorted(items, key=lambda item: item.variant_id):
             await inventory.release(
                 session,
                 variant_id=item.variant_id,

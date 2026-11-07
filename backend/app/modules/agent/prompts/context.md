@@ -1,6 +1,6 @@
 ---
 id: context
-version: 3
+version: 4
 description: "The per-turn context block: shop, time, menu, stage, draft, quote, open questions."
 ---
 # The shop: {{ shop_name }}
@@ -27,9 +27,9 @@ description: "The per-turn context block: shop, time, menu, stage, draft, quote,
 {% for fact in facts %}- {{ fact.key }}: {{ fact.value }}
 {% endfor %}
 {% endif -%}
-{% if coming_up %}# Coming up (pre-orders: pass the day as `date` to update_order_draft)
+{% if coming_up %}# Coming up (open for pre-order on the days shown: take these orders, pass the day as `date` to update_order_draft)
 {% for item in coming_up -%}
-- {{ item.name }} | id {{ item.id }} | price [[price:{{ item.id }}]] | {{ item.days | join(", ") }}
+- {{ item.name }} | id {{ item.id }} | price [[price:{{ item.id }}]] | {{ item.days | join(", ") }}{% if item.order_by %} | last day to order {{ item.order_by }}{% endif %}{% if item.only_on %} | sold only on {{ item.only_on }}{% endif %}
 {% endfor %}
 {% endif -%}
 # This conversation

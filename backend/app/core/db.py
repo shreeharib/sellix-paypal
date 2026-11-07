@@ -40,12 +40,20 @@ def libpq_url(database_url: str) -> str:
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
-        url = libpq_url(get_settings().database_url)
+        settings = get_settings()
+        url = libpq_url(settings.database_url)
+        connect_args: dict[str, object] = {"prepare_threshold": None}
+        if settings.db_statement_timeout_ms > 0:
+            connect_args["options"] = f"-c statement_timeout={settings.db_statement_timeout_ms}"
         _engine = create_async_engine(
             url.replace("postgresql://", "postgresql+psycopg://", 1),
             pool_pre_ping=True,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_seconds,
+            pool_recycle=settings.db_pool_recycle_seconds,
             # No server-side prepared statements, so a pooler in front of Postgres is safe.
-            connect_args={"prepare_threshold": None},
+            connect_args=connect_args,
         )
     return _engine
 

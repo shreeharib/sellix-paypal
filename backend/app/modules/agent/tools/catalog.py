@@ -17,6 +17,7 @@ def context_day(day: date) -> str:
 
 # Product attributes that answer health and diet questions (section 2, rule 6).
 HEALTH_FIELDS = ("ingredients", "allergens", "dietary")
+MAX_LISTED_DETAILS = 12  # other saved facts shown to the model, so one item can't flood it
 
 
 class SearchCatalogArgs(BaseModel):
@@ -98,19 +99,32 @@ class GetProductDetails(Tool):
         product, variants, _ = found
         attributes: dict[str, Any] = product.attributes or {}
         details = {field: attributes.get(field) or None for field in HEALTH_FIELDS}
+        # Everything else the shop saved for the item: material, fabric, size notes, care, and so
+        # on. Shops of every kind keep their facts here, not only food shops' ingredients.
+        listed = {
+            key: value
+            for key, value in attributes.items()
+            if key not in HEALTH_FIELDS and value not in (None, "", [], {})
+        }
         data = {
             "id": args.item_id,
             "name": item.label,
             "description": product.description or None,
             **details,
+            "details": dict(list(listed.items())[:MAX_LISTED_DETAILS]) or None,
             "options": [v.name for v in variants if v.name] or None,
         }
-        if all(value is None for value in details.values()):
+        has_health = any(value is not None for value in details.values())
+        if not has_health:
+            nothing_listed = not listed and not product.description
             return ToolResult(
                 True,
                 data,
-                hint="The shop hasn't listed ingredients or allergens: don't guess, "
-                "use ask_shop_owner",
+                hint="The shop hasn't listed anything about this item: don't guess, use "
+                "ask_shop_owner"
+                if nothing_listed
+                else "Answer only from what is listed. If the customer asks for something that "
+                "isn't (ingredients, allergens, size, material ...), use ask_shop_owner",
             )
         ctx.health_fields_seen = True
         return ToolResult(True, data, private={"health_fields_seen": True})

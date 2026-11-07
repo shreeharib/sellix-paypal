@@ -184,7 +184,9 @@ async def _start_session(
     )
 
 
-def _access_token(user_id: uuid.UUID, session_id: uuid.UUID) -> str:
+def _access_token(
+    user_id: uuid.UUID, session_id: uuid.UUID, ttl: timedelta = ACCESS_TOKEN_TTL
+) -> str:
     now = datetime.now(UTC)
     return jwt.encode(
         {
@@ -193,7 +195,7 @@ def _access_token(user_id: uuid.UUID, session_id: uuid.UUID) -> str:
             "sub": str(user_id),
             "sid": str(session_id),
             "iat": now,
-            "exp": now + ACCESS_TOKEN_TTL,
+            "exp": now + ttl,
         },
         _signing_key(),
         algorithm="HS256",
@@ -211,12 +213,23 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-async def operator_token(session: AsyncSession, merchant_id: uuid.UUID) -> str:
+MAX_OPERATOR_TOKEN_MINUTES = 24 * 60
+
+
+async def operator_token(
+    session: AsyncSession, merchant_id: uuid.UUID, *, minutes: int | None = None
+) -> str:
     """An access token for an operator user of this shop (simulator, evals in CI).
 
     Goes through the same login code and PKCE exchange as the app, so it's an ordinary
-    session that expires and can be revoked like any other.
+    session that expires and can be revoked like any other. `minutes` makes the token last
+    longer than the usual 15 (up to a day) for local development; never in prod.
     """
+    if minutes is not None:
+        if get_settings().app_env == "prod":
+            raise ValueError("Long-lived operator tokens aren't issued in prod")
+        if not 1 <= minutes <= MAX_OPERATOR_TOKEN_MINUTES:
+            raise ValueError(f"minutes must be from 1 to {MAX_OPERATOR_TOKEN_MINUTES}")
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
     user_id = await sign_in(
@@ -230,4 +243,7 @@ async def operator_token(session: AsyncSession, merchant_id: uuid.UUID) -> str:
     pair = await redeem_login_code(
         session, code=code, code_verifier=verifier, user_agent="sellix-cli"
     )
-    return pair.access_token
+    if minutes is None:
+        return pair.access_token
+    claims = jwt.decode(pair.access_token, options={"verify_signature": False})
+    return _access_token(user_id, uuid.UUID(claims["sid"]), timedelta(minutes=minutes))

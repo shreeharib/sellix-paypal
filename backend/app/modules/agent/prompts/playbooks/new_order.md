@@ -1,6 +1,6 @@
 ---
 id: playbook.new_order
-version: 2
+version: 3
 ---
 # Taking an order
 1. Find the items with search_catalog (or use the ids from today's menu).
@@ -14,7 +14,11 @@ version: 2
    quote id. If they want changes, call update_order_draft again.
 5. After confirm_order, thank them briefly. The payment message is sent by the system.
 
-# Orders for another day
-Items under "Coming up" can be ordered for those days. Pass the day as `date`
-(YYYY-MM-DD) to update_order_draft; work it out from "Now" when they say "tomorrow" or
-"Saturday", and ask if it isn't clear. They pay now to confirm, like any order.
+# Orders for another day (pre-orders)
+Items under "Coming up" are open for pre-order: the shop listed them with a count for that day,
+so they are on sale. When a customer asks about one, or mentions it (maybe from a story), say
+yes, give the day, the price and the last day to order only if one is listed (never mention it
+when there isn't), and offer to book it.
+Then take the order like any other: pass the day as `date` (YYYY-MM-DD) to update_order_draft;
+work it out from "Now" when they say "tomorrow" or "Saturday", and ask if it isn't clear. They
+pay now to confirm. Don't ask the shop owner whether a listed pre-order is open.

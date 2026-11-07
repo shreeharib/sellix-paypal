@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.catalog import service as catalog
 from app.modules.stories.models import MediaResult, ProductPost, StoryRegistry
 from app.modules.stories.schemas import StoryInfo
 
@@ -105,7 +106,12 @@ async def save_result(
 async def link_post(
     session: AsyncSession, merchant_id: uuid.UUID, product_id: uuid.UUID, ig_media_id: str
 ) -> None:
-    """The shop's own Instagram post for this product (Catalog), for share_post."""
+    """The shop's own Instagram post for this product (Catalog), for share_post.
+
+    Raises LookupError if the product isn't this shop's.
+    """
+    if not await catalog.product_exists(session, merchant_id, product_id):
+        raise LookupError(f"No product {product_id}")
     await session.execute(
         pg_insert(ProductPost)
         .values(merchant_id=merchant_id, product_id=product_id, ig_media_id=ig_media_id)

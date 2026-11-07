@@ -64,8 +64,11 @@ async def confirm_story(shop: Shop, story_id: str, body: StoryConfirmation) -> d
 @router.put("/posts/{product_id}")
 async def link_post(shop: Shop, product_id: uuid.UUID, body: PostLink) -> dict[str, bool]:
     """Link the shop's own Instagram post to a product, so the assistant can share it."""
-    async with session_scope() as session:
-        await stories.link_post(session, shop.merchant_id, product_id, body.ig_media_id)
+    try:
+        async with session_scope() as session:
+            await stories.link_post(session, shop.merchant_id, product_id, body.ig_media_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Product not found") from exc
     return {"linked": True}
 
 

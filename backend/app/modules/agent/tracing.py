@@ -216,3 +216,53 @@ async def stalled_conversations(older_than: timedelta) -> list[uuid.UUID]:
             .distinct()
         )
         return list(rows)
+
+
+async def health(merchant_id: uuid.UUID | None, since: datetime) -> dict[str, Any]:
+    """How the agent's turns ended since `since`: the numbers to watch in production.
+
+    `fallback` turns sent the holding message (or the owner's own words); a rising share means
+    the model, a prompt or a tool is failing. `errors` lists the most common causes.
+    """
+    scope = [AgentTurn.started_at >= since, AgentTurn.mode == "live"]
+    if merchant_id is not None:
+        scope.append(AgentTurn.merchant_id == merchant_id)
+    async with session_scope() as session:
+        by_status = dict(
+            (
+                await session.execute(
+                    select(AgentTurn.status, func.count()).where(*scope).group_by(AgentTurn.status)
+                )
+            )
+            .tuples()
+            .all()
+        )
+        found = await session.scalars(
+            select(AgentTurn.latency_ms).where(*scope, AgentTurn.latency_ms.is_not(None))
+        )
+        latencies = sorted(value for value in found if value is not None)
+        cost = await session.scalar(select(func.sum(AgentTurn.cost_usd)).where(*scope))
+        errors = (
+            (
+                await session.execute(
+                    select(AgentTurn.error, func.count())
+                    .where(*scope, AgentTurn.error.is_not(None))
+                    .group_by(AgentTurn.error)
+                    .order_by(func.count().desc())
+                    .limit(5)
+                )
+            )
+            .tuples()
+            .all()
+        )
+    total = sum(by_status.values())
+    return {
+        "turns": total,
+        "by_status": by_status,
+        "fallback_rate": round(by_status.get("fallback", 0) / total, 3) if total else 0.0,
+        "stuck_running": by_status.get("running", 0),
+        "p50_latency_ms": latencies[len(latencies) // 2] if latencies else None,
+        "p95_latency_ms": latencies[int(0.95 * (len(latencies) - 1))] if latencies else None,
+        "cost_usd": float(cost) if cost is not None else None,
+        "top_errors": [{"error": (error or "")[:120], "count": count} for error, count in errors],
+    }

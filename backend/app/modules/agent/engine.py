@@ -10,6 +10,7 @@ a failed job) replays the stored steps instead of running them again, so an orde
 link or a message is never created twice.
 """
 
+import asyncio
 import json
 import time
 import uuid
@@ -19,6 +20,7 @@ from typing import Any
 
 import structlog
 
+from app.core import locks
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.modules.agent import context, llm, memory, prompt_store, tracing
@@ -45,8 +47,31 @@ FALLBACK_QUESTION = (
 _REPLY_TRIGGERS = ("customer", "system")
 
 
+# A turn takes at most agent_turn_deadline_seconds; waiting a little longer than that for a
+# running copy to finish covers it.
+TURN_LOCK_WAIT_SECONDS = 90.0
+
+
 async def run_turn(conversation_id: uuid.UUID, *, shadow: bool = False) -> None:
-    """Answer the chat's latest message. `shadow`: run without writing or sending anything."""
+    """Answer the chat's latest message. `shadow`: run without writing or sending anything.
+
+    One copy of a chat's turn runs at a time. A second start (a redelivered job, the sweeper,
+    the simulator running a turn the worker also picked up) waits for the first and then finds
+    the message already answered; two copies at once sent the customer a real reply and then a
+    contradictory holding message (live eval, 7 Nov).
+    """
+    async with locks.advisory_lock(
+        "agent_turn_shadow" if shadow else "agent_turn",
+        str(conversation_id),
+        wait_seconds=TURN_LOCK_WAIT_SECONDS,
+    ) as held:
+        if not held:
+            log.warning("agent.turn_busy", conversation_id=str(conversation_id))
+            return  # the sweeper tries again if the message is still unanswered
+        await _run_turn(conversation_id, shadow=shadow)
+
+
+async def _run_turn(conversation_id: uuid.UUID, *, shadow: bool) -> None:
     started = time.monotonic()
     loaded = await _load(conversation_id, shadow=shadow)
     if loaded is None:
@@ -102,7 +127,9 @@ async def _loop(
         if time.monotonic() - started > settings.agent_turn_deadline_seconds:
             log.warning("agent.turn_deadline", turn_id=str(trace.turn_id))
             return "fallback"
-        completion = await _model_step(ctx, trace, step, messages)
+        completion = await _model_step(
+            ctx, trace, step, messages, deadline=started + settings.agent_turn_deadline_seconds
+        )
         if not completion.tool_calls:
             if corrected:
                 return "fallback"
@@ -133,13 +160,24 @@ async def _loop(
 
 
 async def _model_step(
-    ctx: TurnContext, trace: tracing.Trace, step: int, messages: list[llm.Message]
+    ctx: TurnContext,
+    trace: tracing.Trace,
+    step: int,
+    messages: list[llm.Message],
+    *,
+    deadline: float,
 ) -> llm.Completion:
     key = f"{trace.turn_id}:{step}:model"
     stored = trace.steps.get(key)
     if stored is not None:
         return _completion(stored)
-    completion = await llm.generate(messages, tools=registry.offered(ctx))
+    # The gateway retries a slow model (timeout x retries can be minutes); the turn's own time
+    # limit still holds, so a stalled model costs the customer seconds, not minutes.
+    try:
+        async with asyncio.timeout(max(deadline - time.monotonic(), 1.0)):
+            completion = await llm.generate(messages, tools=registry.offered(ctx))
+    except TimeoutError as exc:
+        raise llm.LLMError("The model didn't answer within the turn's time limit") from exc
     await tracing.record(
         trace,
         step=step,
@@ -256,22 +294,52 @@ async def _gated(ctx: TurnContext, gate: inbound.Gate) -> None:
 
 
 async def _fall_back(ctx: TurnContext) -> None:
-    """Never leave the customer silent: the holding message, and a question for the owner."""
+    """Never leave the customer silent: the holding message, and a question for the owner.
+
+    If the turn was answering the owner's reply, the customer already waited for it: send the
+    owner's own words instead, so the answer always reaches them even when the model failed.
+    """
+    if ctx.trigger_answer:
+        async with session_scope() as session:
+            await conversations.queue_message(
+                session,
+                conversation_id=ctx.conversation_id,
+                text=prompt_store.text(
+                    "owner_answer_relay", ctx.language, answer=ctx.trigger_answer
+                ),
+                key=f"turn:{ctx.turn_id}:owner_answer_relay",
+                details={
+                    "kind": "owner_answer_relay",
+                    "language": ctx.language,
+                    "trigger_id": str(ctx.trigger_message_id),
+                },
+            )
+        ctx.prompt_refs.add(prompt_store.ref("owner_answer_relay"))
+        return
     async with session_scope() as session:
         await conversations.queue_message(
             session,
             conversation_id=ctx.conversation_id,
             text=prompt_store.text("holding", ctx.language),
             key=f"turn:{ctx.turn_id}:holding",
-            details={"kind": "holding", "language": ctx.language},
+            details={
+                "kind": "holding",
+                "language": ctx.language,
+                "trigger_id": str(ctx.trigger_message_id),
+            },
         )
-        await escalations.open_escalation(
-            session,
-            merchant_id=ctx.merchant.id,
-            conversation_id=ctx.conversation_id,
-            question=FALLBACK_QUESTION,
-            trigger_message_id=ctx.trigger_message_id,
-        )
+        # Not when the owner already has this customer's question, and not again and again while
+        # the model is down: one open "couldn't finish" per chat is enough.
+        if not ctx.asked_owner_this_turn and not await escalations.has_open(
+            session, ctx.conversation_id, FALLBACK_QUESTION
+        ):
+            await escalations.open_escalation(
+                session,
+                merchant_id=ctx.merchant.id,
+                conversation_id=ctx.conversation_id,
+                question=FALLBACK_QUESTION,
+                trigger_message_id=ctx.trigger_message_id,
+            )
     ctx.prompt_refs.add(prompt_store.ref("holding"))
 
 
@@ -363,6 +431,8 @@ async def _gather(
         history = await conversations.chat_history(
             session, conversation_id, limit=500 if for_replay else settings.history_messages
         )
+        if not for_replay:
+            history = causal_order(history)
         if trigger_id is None:
             trigger = _trigger(history)
         else:
@@ -382,9 +452,15 @@ async def _gather(
             trigger=trigger,
             business_date=business_date,
             now=now,
-            stock=await inventory.today_stock(session, merchant.id, business_date),
+            stock=await inventory.today_stock(
+                session, merchant.id, business_date, ordering_today=business_date
+            ),
             upcoming=await inventory.upcoming_stock(
-                session, merchant.id, business_date, settings.agent_order_days_ahead
+                session,
+                merchant.id,
+                business_date,
+                settings.agent_order_days_ahead,
+                ordering_today=business_date,
             ),
             profile=await shop_profile.latest_profile(session, merchant.id),
             quote=await orders.current_quote(session, conversation_id),
@@ -427,6 +503,11 @@ def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, contex
         customer_handle=state.customer_handle,
         owner_asked=bool(gathered.open_questions),
         upcoming=gathered.upcoming,
+        trigger_event=None if by_customer else context.event_name(trigger),
+        trigger_answer=None if by_customer else context.owner_answer(trigger),
+        last_agent_reply=next(
+            (line.body for line in reversed(seen) if line.sender == "agent"), None
+        ),
     )
     built = context.build(
         ctx,
@@ -442,7 +523,44 @@ def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, contex
         glossary=gathered.glossary,
         summary=gathered.summary,
     )
+    ctx.playbook = built.playbook
     return ctx, built
+
+
+def causal_order(history: list[ChatLine]) -> list[ChatLine]:
+    """The chat in the order the replies were written, not the order they were stored.
+
+    A reply is written for the message that triggered it. If the customer wrote more while that
+    turn was running, the reply is stored after their newer message, but it never saw it. Read
+    in storage order, the next turn would not know it was already said (live run, 7 Nov: an
+    owner's answer was passed on, then the customer's "okay" got the same answer again). Each
+    reply moves up to just after its own trigger, so the newer message reads as the answer to it.
+    """
+    position = {line.id: index for index, line in enumerate(history)}
+    moved: dict[uuid.UUID, list[ChatLine]] = {}
+    for index, line in enumerate(history):
+        if line.sender != "agent":
+            continue
+        raw = line.details.get("trigger_id")
+        try:
+            trigger = uuid.UUID(str(raw)) if raw else None
+        except ValueError:
+            trigger = None
+        if trigger is None or position.get(trigger, index) >= index:
+            continue
+        between = history[position[trigger] + 1 : index]
+        if any(other.sender in ("customer", "system") for other in between):
+            moved.setdefault(trigger, []).append(line)
+    if not moved:
+        return history
+    skipped = {line.id for lines in moved.values() for line in lines}
+    ordered: list[ChatLine] = []
+    for line in history:
+        if line.id in skipped:
+            continue
+        ordered.append(line)
+        ordered.extend(moved.get(line.id, []))
+    return ordered
 
 
 def _trigger(history: list[ChatLine]) -> ChatLine | None:

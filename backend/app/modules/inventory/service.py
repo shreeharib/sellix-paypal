@@ -64,8 +64,18 @@ async def day_ledger(
 
 
 async def today_stock(
-    session: AsyncSession, merchant_id: uuid.UUID, business_date: date
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    business_date: date,
+    *,
+    ordering_today: date | None = None,
 ) -> list[StockItem]:
+    """The day's stock with something left to list.
+
+    `ordering_today`: for customers' menus, the shop's local date now. Items customers can't
+    order for `business_date` (sold on another day, or past their last order date) are left out;
+    leave it None for the merchant's own views.
+    """
     stocks = {
         s.variant_id: s
         for s in await session.scalars(
@@ -78,6 +88,10 @@ async def today_stock(
     variants = await catalog.list_variants_by_ids(
         session, merchant_id, stocks.keys(), active_only=True
     )
+    if ordering_today is not None:
+        variants = [
+            v for v in variants if v.ordering_problem(business_date, ordering_today) is None
+        ]
     return [
         StockItem(
             product=v.product_name,
@@ -86,15 +100,28 @@ async def today_stock(
             currency=v.currency,
             available=stocks[v.variant_id].available,
             variant_id=v.variant_id,
+            opening=stocks[v.variant_id].opening,
+            stock_mode=v.effective_stock_mode,
+            shelf_life_days=v.effective_shelf_life_days,
+            available_on=v.available_on,
+            order_by_date=v.order_by_date,
         )
         for v in variants
     ]
 
 
 async def upcoming_stock(
-    session: AsyncSession, merchant_id: uuid.UUID, after: date, days: int
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    after: date,
+    days: int,
+    *,
+    ordering_today: date | None = None,
 ) -> dict[date, list[StockItem]]:
-    """Stock the merchant has set for the days after `after` (pre-orders), by day."""
+    """Stock the merchant has set for the days after `after` (pre-orders), by day.
+
+    `ordering_today`: as in `today_stock`; days left with no orderable item are dropped.
+    """
     dates = await session.scalars(
         select(DailyStock.business_date)
         .where(
@@ -105,7 +132,11 @@ async def upcoming_stock(
         .distinct()
         .order_by(DailyStock.business_date)
     )
-    return {day: await today_stock(session, merchant_id, day) for day in list(dates)}
+    by_day = {
+        day: await today_stock(session, merchant_id, day, ordering_today=ordering_today)
+        for day in list(dates)
+    }
+    return {day: items for day, items in by_day.items() if items or ordering_today is None}
 
 
 async def set_opening_stock(

@@ -65,6 +65,13 @@ async def shadow_report(merchant_id: uuid.UUID, *, days: int = 1) -> list[dict[s
     return rows
 
 
+async def health_report(merchant_id: uuid.UUID | None, *, days: int = 1) -> dict[str, Any]:
+    """Turn outcomes, fallback rate, latency and cost for one shop (or all) over the last days."""
+    from app.modules.agent import tracing
+
+    return await tracing.health(merchant_id, datetime.now(UTC) - timedelta(days=days))
+
+
 async def stalled_turn_conversations(older_than: timedelta) -> list[uuid.UUID]:
     """Chats whose v2 turn was left running (a crashed worker): run_turn resumes them."""
     from app.modules.agent import tracing
@@ -167,7 +174,8 @@ async def reply_to_customer(
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, merchant_id)
         profile = await shop_profile.latest_profile(session, merchant_id)
-        stock = await inventory.today_stock(session, merchant_id, merchants.business_date(merchant))
+        today = merchants.business_date(merchant)
+        stock = await inventory.today_stock(session, merchant_id, today, ordering_today=today)
 
     messages = [
         ChatMessage("system", customer_agent.build_system_prompt(profile, stock)),

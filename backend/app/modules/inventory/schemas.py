@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from datetime import date
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,11 @@ class StockItem:
     currency: str
     available: int
     variant_id: uuid.UUID | None = None
+    opening: int = 0  # what the merchant set for the day; `available` is less once orders hold some
+    stock_mode: str = "daily"
+    shelf_life_days: int | None = None
+    available_on: date | None = None  # sold on this one day only
+    order_by_date: date | None = None  # the last day to order
 
     @property
     def label(self) -> str:

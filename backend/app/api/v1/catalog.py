@@ -9,6 +9,7 @@ from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
 from app.modules.catalog import service as catalog
+from app.modules.merchants import service as merchants
 
 router = APIRouter(prefix="/products", tags=["catalog"])
 
@@ -80,6 +81,8 @@ async def list_products(
                     base_image_url=prod.base_image_url,
                     stock_mode=prod.stock_mode,
                     shelf_life_days=prod.shelf_life_days,
+                    available_on=prod.available_on,
+                    order_by_date=prod.order_by_date,
                     attributes=prod.attributes or {},
                     is_active=prod.is_active,
                     variants=[
@@ -132,6 +135,8 @@ async def get_product(
             base_image_url=prod.base_image_url,
             stock_mode=prod.stock_mode,
             shelf_life_days=prod.shelf_life_days,
+            available_on=prod.available_on,
+            order_by_date=prod.order_by_date,
             attributes=prod.attributes or {},
             is_active=prod.is_active,
             variants=[
@@ -169,18 +174,26 @@ async def update_product(
     payload: schemas.ProductUpdate,
 ) -> schemas.ProductDetail:
     """Update product metadata, description, category, and dietary/size attributes."""
+    sent = payload.model_fields_set  # a date sent as null clears it; one left out stays
     async with session_scope() as session:
-        updated = await catalog.update_product(
-            session,
-            merchant_id=shop.merchant_id,
-            product_id=product_id,
-            name=payload.name,
-            title=payload.title,
-            description=payload.description,
-            category=payload.category,
-            base_image_url=payload.base_image_url,
-            attributes=payload.attributes,
-        )
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        try:
+            updated = await catalog.update_product(
+                session,
+                merchant_id=shop.merchant_id,
+                product_id=product_id,
+                name=payload.name,
+                title=payload.title,
+                description=payload.description,
+                category=payload.category,
+                base_image_url=payload.base_image_url,
+                attributes=payload.attributes,
+                available_on=payload.available_on if "available_on" in sent else catalog.UNSET,
+                order_by_date=payload.order_by_date if "order_by_date" in sent else catalog.UNSET,
+                today=merchants.business_date(merchant),
+            )
+        except catalog.AvailabilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not updated:
             raise HTTPException(status_code=404, detail="Product not found")
 
@@ -196,6 +209,8 @@ async def update_product(
             base_image_url=prod.base_image_url,
             stock_mode=prod.stock_mode,
             shelf_life_days=prod.shelf_life_days,
+            available_on=prod.available_on,
+            order_by_date=prod.order_by_date,
             attributes=prod.attributes or {},
             is_active=prod.is_active,
             variants=[

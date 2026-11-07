@@ -107,6 +107,15 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--days", type=int, default=1)
 
     command = commands.add_parser(
+        "agent-health",
+        help="how the agent's turns ended: fallback rate, latency, cost, top errors",
+    )
+    command.add_argument(
+        "--merchant-id", type=uuid.UUID, default=None, help="all shops if left out"
+    )
+    command.add_argument("--days", type=int, default=1)
+
+    command = commands.add_parser(
         "replay-turn", help="re-run a v2 turn's first model call with today's prompts and model"
     )
     command.add_argument("--turn-id", type=uuid.UUID, required=True)
@@ -115,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
         "issue-token", help="an access token for a merchant (simulator, evals); keep it secret"
     )
     command.add_argument("--merchant-id", type=uuid.UUID, required=True)
+    command.add_argument(
+        "--minutes",
+        type=int,
+        default=None,
+        help="how long the token lasts (default 15; up to 1440; local development only)",
+    )
     return parser
 
 
@@ -162,11 +177,18 @@ async def _run(args: argparse.Namespace) -> int:
                 case "shadow-report":
                     report = await agent.shadow_report(args.merchant_id, days=args.days)
                     print(json.dumps(report, indent=2, ensure_ascii=False))
+                case "agent-health":
+                    health = await agent.health_report(args.merchant_id, days=args.days)
+                    print(json.dumps(health, indent=2, ensure_ascii=False))
                 case "replay-turn":
                     print(json.dumps(await agent.replay_turn(args.turn_id), indent=2))
                 case "issue-token":
                     await merchants.get_merchant(session, args.merchant_id)
-                    print(await accounts.operator_token(session, args.merchant_id))
+                    print(
+                        await accounts.operator_token(
+                            session, args.merchant_id, minutes=args.minutes
+                        )
+                    )
                 case _:
                     raise ValueError(f"Unknown command {args.command}")
     except (ValueError, LookupError, OSError) as exc:

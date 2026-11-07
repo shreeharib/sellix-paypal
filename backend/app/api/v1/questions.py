@@ -78,4 +78,5 @@ def _question(escalation: EscalationItem, windows: Mapping[uuid.UUID, Any]) -> s
         window_closes_at=current.closes_at if current else None,
         window_state=current.state if current else None,
         answer_delivery=escalation.answer_delivery,
+        suggested_answers=list(escalation.suggested_answers),
     )

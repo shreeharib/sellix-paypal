@@ -163,3 +163,193 @@ def test_promising_to_check_with_the_shop_needs_a_question_to_the_owner(text: st
 
     assert not without.ok and any("ask_shop_owner" in p for p in without.problems)
     assert with_question.ok, with_question.problems
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Today we have i3f9a2c and ie19dca.",  # a known id, and one that only looks like an id
+        "Chocolate cookie i3f9a2c is [[price:i3f9a2c]].",
+    ],
+)
+def test_item_ids_never_reach_the_customer(text: str) -> None:
+    result = check(text)
+
+    assert not result.ok
+    assert any("item ids" in problem for problem in result.problems)
+
+
+def test_words_that_look_a_little_like_ids_are_fine() -> None:
+    assert check("Chocolate cookie [[price:i3f9a2c]] each. Idea: try the brownie too!").ok
+
+
+def test_a_shop_event_reply_cant_repeat_the_last_message() -> None:
+    last = "That's all for now. Available today: Brownie, Chocolate cookie and scoop cookie."
+    nearly = "That's all for now! Available today: Brownie, Chocolate cookie and scoop cookie."
+
+    repeated = output.check_reply(
+        nearly,
+        values=VALUES,
+        customer_text="anything else?",
+        health_fields_seen=False,
+        never_promise=(),
+        previous_reply=last,
+        expects_new=True,
+    )
+    fresh = output.check_reply(
+        "The shop has your payment, so your order is all set.",
+        values=VALUES,
+        customer_text="anything else?",
+        health_fields_seen=False,
+        never_promise=(),
+        previous_reply=last,
+        expects_new=True,
+    )
+    same_for_a_customer_message = output.check_reply(
+        nearly,
+        values=VALUES,
+        customer_text="anything else?",
+        health_fields_seen=False,
+        never_promise=(),
+        previous_reply=last,
+        expects_new=False,  # a customer who asks again can be told again
+    )
+
+    assert not repeated.ok and "repeats your last message" in repeated.problems[0]
+    assert fresh.ok
+    assert same_for_a_customer_message.ok
+
+
+def asked(text: str, *, owner_asked: bool, health_fields_seen: bool = False) -> output.Check:
+    return output.check_reply(
+        text,
+        values=VALUES,
+        customer_text="are your brownies eggless?",
+        health_fields_seen=health_fields_seen,
+        never_promise=(),
+        owner_asked=owner_asked,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'll check with the shop and get back to you on the brownie eggless detail.",
+        "The eggless info isn't listed. I've asked the shop and will get back to you soon.",
+    ],
+)
+def test_a_reply_that_hands_a_diet_question_to_the_shop_is_allowed_once_the_owner_is_asked(
+    text: str,
+) -> None:
+    assert asked(text, owner_asked=True).ok
+    assert not asked(text, owner_asked=False).ok  # a promise to ask, with nobody asked
+
+
+def test_a_diet_claim_still_needs_the_shops_own_data() -> None:
+    claim = asked("Yes, our brownies are eggless!", owner_asked=True)
+    deferring_claim_is_still_a_claim_without_data = asked(
+        "Yes, it is eggless.", owner_asked=True, health_fields_seen=False
+    )
+    backed_by_data = asked(
+        "Yes, our brownies are eggless!", owner_asked=True, health_fields_seen=True
+    )
+
+    assert not claim.ok and "ask_shop_owner" in claim.problems[0]
+    assert not deferring_claim_is_still_a_claim_without_data.ok
+    assert backed_by_data.ok
+
+
+def said(text: str, customer: str) -> output.Check:
+    return output.check_reply(
+        text, values=VALUES, customer_text=customer, health_fields_seen=False, never_promise=()
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hi, I am Sweet Crumbs’s assistant, madam. How can I help?",
+        "Hi! I'm the shop's virtual assistant and I can help you order.",
+        "This is the AI assistant of Sweet Crumbs.",
+        "As an AI, I can't do that.",
+        "I'm a bot, but I can help.",
+    ],
+)
+def test_the_assistant_does_not_introduce_itself_unprompted(text: str) -> None:
+    result = said(text, "do you have brownies?")
+
+    assert not result.ok
+    assert any("introduce yourself" in problem for problem in result.problems)
+
+
+@pytest.mark.parametrize(
+    "customer",
+    [
+        "Are you a bot or a real person?",
+        "is this a robot?",
+        "who are you",
+        "are you human",
+        "AI aa?",
+    ],
+)
+def test_a_customer_who_asks_gets_an_honest_answer(customer: str) -> None:
+    reply = "I'm the shop's virtual assistant. The owner steps in whenever it's needed."
+
+    assert said(reply, customer).ok
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Yes sir/madam, we have it.",
+        "Hii madam, welcome to the shop!",
+        "Sure sir, one moment.",
+        "Kindly share your address.",
+        "Please revert soon.",
+    ],
+)
+def test_stiff_office_phrases_are_rejected(text: str) -> None:
+    assert not said(text, "do you have it?").ok
+
+
+def test_ordinary_replies_that_mention_similar_words_pass() -> None:
+    assert said("It's a digital print kurti, pure cotton. Want size M?", "kurti material?").ok
+    assert said("We have it for 4 people, a robot toy and a bottle too.", "what do you have?").ok
+
+
+@pytest.mark.parametrize(
+    ("said", "tidied"),
+    [
+        (
+            "Hi, I am Sweet Crumbs’s assistant. Today we have Brownie, madam.",
+            "Hi! Today we have Brownie.",
+        ),
+        ("Yes, sir/madam, we have it.", "Yes, we have it."),
+        ("We can book it right away, madam.", "We can book it right away."),
+        ("Kindly share your address.", "Share your address."),
+        ("Hello madam, welcome!", "Hello, welcome!"),
+    ],
+)
+def test_tone_slips_are_cleaned_up_without_losing_the_content(said: str, tidied: str) -> None:
+    result = output.check_reply(
+        said,
+        values=VALUES,
+        customer_text="what do you have?",
+        health_fields_seen=False,
+        never_promise=(),
+    )
+
+    assert not result.ok  # the model still gets its chance to fix it itself
+    assert result.sanitized == tidied
+
+
+def test_only_tone_slips_are_cleaned_up_not_other_problems() -> None:
+    result = output.check_reply(
+        "Hi, I am the assistant. It costs Rs.60, madam.",
+        values=VALUES,
+        customer_text="price?",
+        health_fields_seen=False,
+        never_promise=(),
+    )
+
+    assert not result.ok and result.sanitized is None  # a typed amount must be fixed by the model

@@ -1,0 +1,14 @@
+id: owner_answer_relay
+version: 1
+description: "Sent when the assistant can't write a reply to the shop owner's answer: the owner's own words, so the customer always gets them."
+texts:
+  en: |-
+    Update from the shop: {{ answer }}
+  ta-en: |-
+    Shop-la irundhu update: {{ answer }}
+  ta: |-
+    கடையிலிருந்து தகவல்: {{ answer }}
+  hi-en: |-
+    Shop se update: {{ answer }}
+  hi: |-
+    दुकान से अपडेट: {{ answer }}

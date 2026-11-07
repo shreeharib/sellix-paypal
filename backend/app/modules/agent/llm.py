@@ -7,7 +7,7 @@ Every call (agent-phase-2.md section 13.1):
 - is retried on timeouts, HTTP 429 and 5xx, up to MAX_RETRIES times with backoff and jitter,
   respecting Retry-After;
 - falls back to the next model in LLM_MODELS when a model's retries run out;
-- skips a model whose circuit is open (THRESHOLD failures within a minute -> 2 minutes off);
+- skips a model whose circuit is open (THRESHOLD failed calls within a minute -> 30 seconds off);
 - fails at once on a non-retryable error (400, 401, ...): retrying can't fix the request.
 
 `generate` is the v2 entry point with tool calling. When the provider has no native tool
@@ -35,6 +35,7 @@ from app.modules.agent.schemas import ChatMessage
 log = structlog.get_logger()
 
 MAX_RETRIES = 2
+CONNECT_TIMEOUT_SECONDS = 5.0
 RETRY_DELAYS = (0.5, 1.5)  # seconds, before jitter
 MAX_RETRY_AFTER_SECONDS = 10.0
 
@@ -89,9 +90,13 @@ class Completion:
 class CircuitBreaker:
     """Stops calling a model that keeps failing, for a while."""
 
-    THRESHOLD = 5
+    # Counted per call that failed after its retries (so a blip of 3 failed attempts is one),
+    # and only for failures of the model service itself: a request the model refuses (a 400, such
+    # as a content filter on one customer's message) says nothing about the service. Otherwise a
+    # few flagged messages could switch the assistant off for every customer of the shop.
+    THRESHOLD = 3
     WINDOW_SECONDS = 60.0
-    COOLDOWN_SECONDS = 120.0
+    COOLDOWN_SECONDS = 30.0
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
@@ -215,7 +220,6 @@ async def _with_fallbacks(body: Callable[[str], dict[str, Any]]) -> Completion:
                 data = await _post(body(model))
                 completion = _parse(data, model, round((time.perf_counter() - started) * 1000))
             except LLMError as exc:
-                breaker.failure(model)
                 log.warning(
                     "llm.call_failed",
                     model=model,
@@ -228,6 +232,7 @@ async def _with_fallbacks(body: Callable[[str], dict[str, Any]]) -> Completion:
                 if attempt < MAX_RETRIES:
                     await _sleep(_delay(attempt, exc.retry_after))
                     continue
+                breaker.failure(model)  # retries used up: the service itself isn't answering
                 errors.append(f"{model}: {exc}")
                 failed.append(model)
                 break
@@ -254,7 +259,10 @@ async def _post(body: dict[str, Any]) -> dict[str, Any]:
     if settings.llm_reasoning_effort:
         body = body | {"reasoning_effort": settings.llm_reasoning_effort}
     try:
-        async with httpx2.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
+        # Opening the connection is quick or it is not going to work: don't wait the full read
+        # timeout (a reasoning model legitimately takes tens of seconds to answer) to find out.
+        timeout = httpx2.Timeout(settings.llm_timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS)
+        async with httpx2.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{settings.llm_base_url.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {settings.llm_api_key}"},

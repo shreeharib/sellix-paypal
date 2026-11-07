@@ -24,6 +24,7 @@ jobs = procrastinate.App(
     connector=procrastinate.PsycopgConnector(
         conninfo=libpq_url(get_settings().database_url),
         kwargs={"prepare_threshold": None},
+        max_size=get_settings().jobs_pool_max_size,
     ),
     import_paths=TASK_MODULES,
 )
@@ -32,7 +33,7 @@ jobs = procrastinate.App(
 async def run_worker(*, install_signal_handlers: bool) -> None:
     """Process jobs until cancelled. The app must already be open."""
     await jobs.run_worker_async(
-        concurrency=4,
+        concurrency=get_settings().worker_concurrency,
         delete_jobs="successful",
         install_signal_handlers=install_signal_handlers,
         # On shutdown, give running jobs this long to finish, so deploys never hang.

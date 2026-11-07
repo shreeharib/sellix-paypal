@@ -19,3 +19,4 @@ class EscalationItem:
     answered_at: datetime | None
     answer_delivery: str | None = None
     window_warned_at: datetime | None = None
+    suggested_answers: tuple[str, ...] = ()

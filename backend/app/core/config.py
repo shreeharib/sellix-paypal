@@ -22,6 +22,33 @@ class Settings(BaseSettings):
     # Run the job worker inside the API process (local development, small deployments).
     run_worker_in_process: bool = True
 
+    # Database connections. Each API process (see API_WORKERS in the Dockerfile) and each job
+    # worker has its own pool, so keep (API processes x (pool + overflow)) + worker pools below
+    # Postgres's max_connections (100 by default; Supabase's plan sets its own, and its
+    # pooler has a client limit too).
+    # A running agent turn holds one extra connection for its per-chat lock, so a worker with
+    # WORKER_CONCURRENCY turns at once needs that many more.
+    db_pool_size: int = 10  # connections kept open per API process
+    db_max_overflow: int = 10  # extra connections allowed in a burst, closed again afterwards
+    db_pool_timeout_seconds: float = 10.0  # wait this long for a free connection, then fail fast
+    db_pool_recycle_seconds: int = (
+        1800  # replace connections older than this (proxies drop idle ones)
+    )
+    # A query running longer than this is cancelled, so a stuck lock can't pile up requests.
+    # 0 turns it off (needed if your pooler rejects startup options).
+    db_statement_timeout_ms: int = 30000
+    # Connections of the job queue itself (separate from the pool above, it uses LISTEN/NOTIFY).
+    jobs_pool_max_size: int = 6
+    # Jobs a worker process runs at once (each holds a database connection while it runs).
+    worker_concurrency: int = 4
+
+    # Rate limits per minute, per signed-in user (or per client address when not signed in).
+    # Counted in each API process, so with N processes the real limit is up to N times higher.
+    # 0 turns a limit off.
+    rate_limit_api_per_minute: int = 240  # the merchant app's /v1 endpoints
+    rate_limit_auth_per_minute: int = 20  # sign-in, token and refresh: stops guessing
+    rate_limit_webhook_per_minute: int = 600  # Meta and PayPal callbacks, per address
+
     # Comma-separated Fernet keys that encrypt channel access tokens; the first one encrypts.
     token_encryption_keys: str = ""
     # Signs OAuth `state` values.
@@ -83,7 +110,13 @@ class Settings(BaseSettings):
     # v2 turn budgets (agent-phase-2.md section 6.2): beyond them, the holding message.
     agent_max_model_calls: int = 6
     agent_max_tool_calls: int = 10
-    agent_turn_deadline_seconds: float = 30.0
+    # A turn is several model calls (look up, ask, reply), each 5-15 seconds on a reasoning model:
+    # 30 seconds cut real turns off before their reply (live eval, 7 Nov). Customers aren't
+    # blocked meanwhile: turns run as background jobs.
+    agent_turn_deadline_seconds: float = 60.0
+    # ask_shop_owner: a question the model is at least this sure (0-100) it can answer itself is
+    # sent back once, so the owner isn't asked what the shop's own data already says.
+    agent_self_answer_confidence: int = 75
     agent_repair_attempts: int = 1  # send_reply retries after failing the output checks
     agent_order_days_ahead: int = 14  # how far ahead customers can order (pre-orders)
     agent_max_images_per_turn: int = 3  # sent to the vision model; more: ask which one

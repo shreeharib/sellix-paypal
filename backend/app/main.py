@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.db import dispose_engine
 from app.core.jobs import jobs, run_worker
 from app.core.logging import configure_logging
+from app.core.ratelimit import RateLimitMiddleware
 from app.modules.agent import service as agent
 from app.modules.channels.router import router as channels_router
 from app.modules.payments.router import router as payments_router
@@ -60,6 +61,8 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level, json_logs=settings.app_env != "local")
 
     app = FastAPI(title="sellix API", version="0.1.0", lifespan=lifespan)
+    # Added first, so CORS wraps it: a "too many requests" answer still reaches the web app.
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.web_app_origins.split(",") if o.strip()],

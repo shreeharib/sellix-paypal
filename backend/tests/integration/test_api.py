@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from urllib.parse import parse_qs, urlparse
 
 import httpx2
+import jwt
 import pytest
 from procrastinate.testing import InMemoryConnector
 from sqlalchemy import select
@@ -728,3 +729,69 @@ async def test_an_operator_token_works_like_an_app_session(
     response = await api.get("/v1/questions", headers=bearer(token))
 
     assert response.status_code == 200
+
+
+async def test_a_client_over_the_limit_gets_429_with_retry_after(
+    api: httpx2.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "rate_limit_auth_per_minute", 3)
+    replies = [await api.post("/v1/auth/refresh", json={"refresh_token": "x"}) for _ in range(5)]
+
+    assert [r.status_code == 429 for r in replies] == [False, False, False, True, True]
+    assert int(replies[-1].headers["retry-after"]) >= 1
+    assert (await api.get("/health")).status_code == 200  # health checks are never limited
+
+
+async def test_an_operator_token_can_last_longer_for_local_development(
+    api: httpx2.AsyncClient, shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with session_scope() as session:
+        short = await accounts.operator_token(session, shop.merchant_id)
+        long = await accounts.operator_token(session, shop.merchant_id, minutes=480)
+
+    def lifetime(token: str) -> int:
+        claims = jwt.decode(token, options={"verify_signature": False})
+        return claims["exp"] - claims["iat"]
+
+    assert lifetime(short) == 15 * 60
+    assert lifetime(long) == 480 * 60
+    assert (await api.get("/v1/me", headers=bearer(long))).status_code == 200
+
+    for minutes in (0, 24 * 60 + 1):
+        with pytest.raises(ValueError):
+            async with session_scope() as session:
+                await accounts.operator_token(session, shop.merchant_id, minutes=minutes)
+    monkeypatch.setattr(get_settings(), "app_env", "prod")
+    with pytest.raises(ValueError, match="prod"):
+        async with session_scope() as session:
+            await accounts.operator_token(session, shop.merchant_id, minutes=60)
+
+
+async def test_questions_come_with_their_suggested_answers(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    turn = await start_conversation()
+    async with session_scope() as session:
+        await escalations.open_escalation(
+            session,
+            merchant_id=shop.merchant_id,
+            conversation_id=turn.conversation_id,
+            question="When can they pick up order #1001?",
+            suggested_answers=["Anytime today", "Ready in 30 minutes"],
+        )
+        # A question asked before suggestions had their own column.
+        await escalations.open_escalation(
+            session,
+            merchant_id=shop.merchant_id,
+            conversation_id=turn.conversation_id,
+            question="Discount?\nSuggested answers: No discount / 10% for regulars",
+        )
+    token = await sign_in_as(shop.merchant_id)
+
+    response = await api.get("/v1/questions", headers=bearer(token))
+
+    by_question = {q["question"]: q["suggested_answers"] for q in response.json()}
+    assert by_question == {
+        "When can they pick up order #1001?": ["Anytime today", "Ready in 30 minutes"],
+        "Discount?": ["No discount", "10% for regulars"],
+    }

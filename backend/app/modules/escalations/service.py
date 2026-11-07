@@ -1,6 +1,7 @@
 """Public interface of the escalations module: questions the agent asks the merchant."""
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import structlog
@@ -34,12 +35,14 @@ async def open_escalation(
     conversation_id: uuid.UUID,
     question: str,
     trigger_message_id: uuid.UUID | None = None,
+    suggested_answers: Sequence[str] = (),
 ) -> EscalationItem:
     escalation = Escalation(
         merchant_id=merchant_id,
         conversation_id=conversation_id,
         trigger_message_id=trigger_message_id,
         question=question.strip(),
+        suggested_answers=_clean_options(suggested_answers),
     )
     session.add(escalation)
     await session.flush()
@@ -52,6 +55,20 @@ async def open_escalation(
         question=escalation.question,
     )
     return _to_item(escalation)
+
+
+async def has_open(session: AsyncSession, conversation_id: uuid.UUID, question: str) -> bool:
+    """Is this exact question already waiting for the owner in this chat?"""
+    found = await session.scalar(
+        select(Escalation.id)
+        .where(
+            Escalation.conversation_id == conversation_id,
+            Escalation.status == "open",
+            Escalation.question == question.strip(),
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 class EscalationNotFound(LookupError):
@@ -147,17 +164,45 @@ async def _get(
     return escalation
 
 
+_LEGACY_MARK = "Suggested answers: "
+
+
+def _split_legacy(question: str) -> tuple[str, list[str]]:
+    """Older questions end with a "Suggested answers:" line instead of the column."""
+    lines = question.strip().splitlines()
+    if len(lines) > 1 and lines[-1].startswith(_LEGACY_MARK):
+        options = lines[-1].removeprefix(_LEGACY_MARK).split(" / ")
+        return chr(10).join(lines[:-1]).strip(), _clean_options(options)
+    return question.strip(), []
+
+
 def _to_item(escalation: Escalation) -> EscalationItem:
+    question, legacy = _split_legacy(escalation.question)
     return EscalationItem(
         id=escalation.id,
         merchant_id=escalation.merchant_id,
         conversation_id=escalation.conversation_id,
         trigger_message_id=escalation.trigger_message_id,
-        question=escalation.question,
+        question=question,
         status=escalation.status,
         answer=escalation.answer,
         created_at=escalation.created_at,
         answered_at=escalation.answered_at,
         answer_delivery=escalation.answer_delivery,
         window_warned_at=escalation.window_warned_at,
+        suggested_answers=tuple(escalation.suggested_answers or legacy),
     )
+
+
+MAX_SUGGESTIONS = 3
+MAX_SUGGESTION_CHARS = 120
+
+
+def _clean_options(options: Sequence[str]) -> list[str]:
+    """The suggested answers, trimmed, without blanks or repeats, as many as the app shows."""
+    cleaned: list[str] = []
+    for option in options:
+        text = " ".join(option.split())[:MAX_SUGGESTION_CHARS]
+        if text and text.lower() not in (seen.lower() for seen in cleaned):
+            cleaned.append(text)
+    return cleaned[:MAX_SUGGESTIONS]

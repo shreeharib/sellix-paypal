@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, text
@@ -26,6 +26,10 @@ class Product(Base):
     )
     stock_mode: Mapped[str] = mapped_column(server_default=text("'daily'"))
     shelf_life_days: Mapped[int | None] = mapped_column(nullable=True, server_default=text("null"))
+    # Sold on this one day only (a pre-order item); None: sold whenever it has stock.
+    available_on: Mapped[date | None] = mapped_column(nullable=True)
+    # The last day orders are taken (the merchant's local date); None: until the stock is gone.
+    order_by_date: Mapped[date | None] = mapped_column(nullable=True)
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())

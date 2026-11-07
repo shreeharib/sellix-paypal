@@ -52,13 +52,20 @@ class TurnContext:
     playbook_loaded: bool = False
     upcoming: dict[date, list[StockItem]] = field(default_factory=dict)  # pre-order days
     owner_asked: bool = False  # an Ask me question is open for this chat, or asked this turn
+    asked_owner_this_turn: bool = False  # ask_shop_owner ran in this turn
+    ask_refusals: int = 0  # questions to the owner sent back this turn (the data had the answer)
     mode: str = "live"  # live | shadow (nothing written or sent) | draft (replies wait)
     would_send: str | None = None  # shadow mode: the reply that would have gone out
     trigger_details: dict[str, Any] = field(default_factory=dict)
     vision_calls: int = 0
     trigger_text: str = ""  # the customer message this turn answers, as received
     customer_handle: str = "the customer"
+    # Set when a shop event (the owner's answer, a payment) triggered this turn, not a message.
+    trigger_event: str | None = None
+    trigger_answer: str | None = None  # the owner's words, when the trigger is their answer
+    last_agent_reply: str | None = None  # what we last told the customer
     prompt_refs: set[str] = field(default_factory=set)
+    playbook: str = ""  # the playbook chosen for this turn
 
     def stock_on(self, day: date | None) -> list[StockItem]:
         """The stock for a day: today's, or one of the coming days' (empty if none was set)."""
@@ -141,15 +148,34 @@ def register(tool: Tool) -> None:
     TOOLS[tool.name] = tool
 
 
+# A turn that answers the owner's reply must pass the answer on. It may not send the owner
+# another question: live evals (7 Nov) showed the model inventing follow-ups (sizes, prices) for an
+# answer that was already complete, and never telling the customer.
+NOT_ON_ANSWER_TURNS = frozenset({"ask_shop_owner"})
+
+
+def _usable(ctx: TurnContext, tool: "Tool") -> bool:
+    if ctx.stage not in tool.stages:
+        return False
+    return not (ctx.trigger_answer and tool.name in NOT_ON_ANSWER_TURNS)
+
+
 def offered(ctx: TurnContext) -> list[llm.ToolSpec]:
     """The tools the model may call in the conversation's current stage."""
-    return [tool.spec(ctx) for tool in TOOLS.values() if ctx.stage in tool.stages]
+    return [tool.spec(ctx) for tool in TOOLS.values() if _usable(ctx, tool)]
 
 
 async def execute(ctx: TurnContext, call: llm.ToolCall) -> ToolResult:
     tool = TOOLS.get(call.name)
     if tool is None:
         return ToolResult.fail("unknown_tool", f"There is no tool called {call.name!r}")
+    if ctx.stage in tool.stages and not _usable(ctx, tool):
+        return ToolResult.fail(
+            "not_allowed",
+            f"{call.name} can't be used while passing on the shop owner's answer",
+            "Tell the customer what the owner said with send_reply. If something is still open, "
+            "say what you know and ask the customer for what you need",
+        )
     if ctx.stage not in tool.stages:
         allowed = sorted(name for name, t in TOOLS.items() if ctx.stage in t.stages)
         return ToolResult.fail(

@@ -26,6 +26,7 @@ SHOP_EVENT = "shop_event"
 
 _COMPLAINT = re.compile(
     r"\b(?:complain|complaint|refund|bad|stale|worst|disappointed|wrong order|not happy|"
+    r"damaged|defective|faulty|broken|torn|wrong (?:size|item|colou?r)|not received|never arrived|"
     r"mosam|kevalam|bekar|kharab)\b",
     re.IGNORECASE,
 )
@@ -35,7 +36,8 @@ _STATUS = re.compile(
 )
 _PRODUCT = re.compile(
     r"\b(?:ingredient|allerg|egg|eggless|vegan|gluten|nut|sugar|jain|dairy|contain|size|"
-    r"flavou?r)\w*",
+    r"flavou?r|colou?r|fabric|material|wash|measur|weigh|dimension|length|warrant|return|"
+    r"exchange|waterproof|made of|fit|skin|hair|suitable|paraben|organic|shade|scent|fragrance)\w*",
     re.IGNORECASE,
 )
 _CUSTOM = re.compile(
@@ -45,6 +47,15 @@ _CUSTOM = re.compile(
 )
 _GREETING = re.compile(
     r"^\W*(?:hi|hello|hey|hii+|vanakkam|namaste|good (?:morning|evening))\W*$", re.IGNORECASE
+)
+# "What do you have?": the customer wants the menu, not a greeting or an order.
+_MENU = re.compile(
+    r"\b(?:menu|catalogue|catalog|price\s?list|(?:all|your)\s+(?:products?|items?)"
+    r"|what(?:'s|\s+is|\s+are)?\s+(?:all\s+)?(?:the\s+)?(?:you\s+)?"
+    r"(?:have|sell|available|there|in\s+stock|products?|items?)"
+    r"|what\s+do\s+you\s+(?:have|sell|offer)|what\s+all|(?:any|anything)\s+(?:else|other)"
+    r"|(?:more|other)\s+(?:products?|items?|options?)|show\s+me|available\s+today)\b",
+    re.IGNORECASE,
 )
 _PAYMENT_STAGES = ("payment_pending",)
 _ORDER_STAGES = ("collecting_details", "awaiting_confirmation")
@@ -56,14 +67,35 @@ class Context:
     playbook: str
 
 
+def event_name(line: ChatLine) -> str | None:
+    """ "owner_answered", "payment_received" ...: the shop event a system line carries, if any."""
+    event = line.details.get("event") if line.sender == "system" else None
+    name = event.get("event") if isinstance(event, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def owner_answer(line: ChatLine) -> str | None:
+    """The owner's words, if this system line carries their answer to a question."""
+    event = line.details.get("event") if line.sender == "system" else None
+    if isinstance(event, dict) and event.get("event") == "owner_answered":
+        answer = event.get("answer")
+        return answer.strip() if isinstance(answer, str) and answer.strip() else None
+    return None
+
+
 def choose_playbook(stage: str, text: str, details: dict[str, object]) -> str:
     """One playbook per turn, from the stage and cheap checks on the latest message."""
+    event = details.get("event")
+    if isinstance(event, dict) and event.get("event") == "owner_answered":
+        return "owner_answer"  # the owner's answer comes first, whatever the stage
     if stage in _ORDER_STAGES:
         return "new_order"
     if details.get("story_reply_url") or details.get("attachments"):
         return "story_or_photo"
     if _COMPLAINT.search(text):
         return "complaint"
+    if _MENU.search(text) and not _PRODUCT.search(text):
+        return "menu"  # also while an order waits for payment: it isn't a payment question
     if stage in _PAYMENT_STAGES:
         return "order_status" if _STATUS.search(text) else "payment_problem"
     if _STATUS.search(text):
@@ -213,7 +245,13 @@ def _coming_up(ctx: TurnContext) -> list[dict[str, object]]:
                 continue
             entry = by_item.setdefault(
                 items.ref(item.variant_id),
-                {"name": item.label, "id": items.ref(item.variant_id), "days": []},
+                {
+                    "name": item.label,
+                    "id": items.ref(item.variant_id),
+                    "days": [],
+                    "order_by": _day_text(item.order_by_date),
+                    "only_on": _day_text(item.available_on),
+                },
             )
             entry["days"].append(  # pyright: ignore[reportAttributeAccessIssue]
                 f"{_day_text(day)}: {item.available} left"

@@ -286,6 +286,8 @@ class Question(BaseModel):
     window_state: Literal["open", "closing", "human_agent_only", "closed"] | None = None
     # How the answer reached the customer: sent | pending_window | human_agent | expired
     answer_delivery: str | None = None
+    # The assistant's suggested answers: one tap fills the reply (up to 3).
+    suggested_answers: list[str] = Field(default_factory=list)
 
 
 class Answer(BaseModel):
@@ -360,6 +362,8 @@ class ProductDetail(BaseModel):
     base_image_url: str | None = None
     stock_mode: str
     shelf_life_days: int | None = None
+    available_on: date | None = None  # sold on this one day only; None: any day
+    order_by_date: date | None = None  # last day to order; None: until the stock is gone
     attributes: dict[str, Any] = Field(default_factory=dict)
     is_active: bool
     variants: list[ProductVariantDetail] = Field(default_factory=list)
@@ -373,6 +377,9 @@ class ProductUpdate(BaseModel):
     category: str | None = Field(default=None, max_length=100)
     base_image_url: str | None = Field(default=None, max_length=500)
     attributes: dict[str, Any] | None = None
+    # Send null to clear, leave out to keep.
+    available_on: date | None = None
+    order_by_date: date | None = None
 
 
 class CreateAliasRequest(BaseModel):

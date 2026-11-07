@@ -8,6 +8,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -26,6 +27,17 @@ class VariantCatalogInfo:
     currency: str
     effective_stock_mode: str
     effective_shelf_life_days: int | None
+    available_on: date | None = None
+    order_by_date: date | None = None
+
+    def ordering_problem(self, pickup_date: date, today: date) -> str | None:
+        """Why customers can't order this for `pickup_date` as of `today`, or None if they can."""
+        label = self.product_name
+        if self.available_on is not None and pickup_date != self.available_on:
+            return f"{label} is only available on {self.available_on:%d %b}"
+        if self.order_by_date is not None and today > self.order_by_date:
+            return f"Orders for {label} closed on {self.order_by_date:%d %b}"
+        return None
 
 
 async def list_variants_by_ids(
@@ -49,6 +61,8 @@ async def list_variants_by_ids(
             ProductVariant.currency,
             func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily"),
             func.coalesce(ProductVariant.shelf_life_days, Product.shelf_life_days),
+            Product.available_on,
+            Product.order_by_date,
         )
         .join(Product, Product.id == ProductVariant.product_id)
         .where(
@@ -69,6 +83,8 @@ async def list_variants_by_ids(
             currency=row[5],
             effective_stock_mode=row[6],
             effective_shelf_life_days=row[7],
+            available_on=row[8],
+            order_by_date=row[9],
         )
         for row in rows
     ]
@@ -365,6 +381,48 @@ async def list_products(
     return list(await session.scalars(query))
 
 
+async def products_by_names(
+    session: AsyncSession, merchant_id: uuid.UUID, names: Iterable[str]
+) -> dict[str, Product]:
+    """The shop's products with these names (case-insensitive), by lower-cased name."""
+    wanted = {name.strip().lower() for name in names}
+    if not wanted:
+        return {}
+    rows = await session.scalars(
+        select(Product).where(
+            Product.merchant_id == merchant_id, func.lower(Product.name).in_(wanted)
+        )
+    )
+    return {product.name.lower(): product for product in rows}
+
+
+async def set_sold_on(
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    names: Iterable[str],
+    *,
+    day: date,
+    order_by_date: date | None,
+) -> None:
+    """Make these products one-day items: sold on `day`, orders until `order_by_date`."""
+    for product in (await products_by_names(session, merchant_id, names)).values():
+        product.available_on = day
+        if order_by_date is not None:
+            product.order_by_date = order_by_date
+        product.updated_at = func.now()
+    await session.flush()
+
+
+async def product_exists(
+    session: AsyncSession, merchant_id: uuid.UUID, product_id: uuid.UUID
+) -> bool:
+    """Whether the shop has this product (another shop's product counts as missing)."""
+    found = await session.scalar(
+        select(Product.id).where(Product.merchant_id == merchant_id, Product.id == product_id)
+    )
+    return found is not None
+
+
 async def get_product_with_variants(
     session: AsyncSession, merchant_id: uuid.UUID, product_id: uuid.UUID
 ) -> tuple[Product, list[ProductVariant], list[ProductAlias]] | None:
@@ -391,6 +449,17 @@ async def get_product_with_variants(
     return prod, variants, aliases
 
 
+class _Unset:
+    """Marks "leave as it is" for fields where None means "clear it"."""
+
+
+UNSET = _Unset()
+
+
+class AvailabilityError(ValueError):
+    """The availability dates don't make sense together."""
+
+
 async def update_product(
     session: AsyncSession,
     *,
@@ -402,13 +471,33 @@ async def update_product(
     category: str | None = None,
     base_image_url: str | None = None,
     attributes: dict[str, Any] | None = None,
+    available_on: date | None | _Unset = UNSET,
+    order_by_date: date | None | _Unset = UNSET,
+    today: date | None = None,
 ) -> Product | None:
-    """Update a product's details and attributes."""
+    """Update a product's details, attributes and when it can be ordered.
+
+    `available_on`: the one day it's sold (None: any day). `order_by_date`: the last day to
+    order (None: until the stock is gone). Dates must not be in the past (`today`), and the
+    last order date can't come after the day it's sold.
+    """
     prod = await session.scalar(
         select(Product).where(Product.merchant_id == merchant_id, Product.id == product_id)
     )
     if not prod:
         return None
+    if not isinstance(available_on, _Unset) or not isinstance(order_by_date, _Unset):
+        new_on = prod.available_on if isinstance(available_on, _Unset) else available_on
+        new_by = prod.order_by_date if isinstance(order_by_date, _Unset) else order_by_date
+        if today is not None:
+            if not isinstance(available_on, _Unset) and available_on and available_on < today:
+                raise AvailabilityError("The sale day can't be in the past")
+            if not isinstance(order_by_date, _Unset) and order_by_date and order_by_date < today:
+                raise AvailabilityError("The last order date can't be in the past")
+        if new_on is not None and new_by is not None and new_by > new_on:
+            raise AvailabilityError("The last order date can't be after the day it's sold")
+        prod.available_on = new_on
+        prod.order_by_date = new_by
     if name is not None:
         prod.name = name.strip()
     if title is not None:

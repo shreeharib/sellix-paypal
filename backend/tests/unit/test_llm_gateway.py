@@ -192,16 +192,58 @@ async def test_when_every_model_fails_the_error_says_so(monkeypatch: pytest.Monk
 async def test_a_failing_model_is_skipped_for_a_while(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = use(
         monkeypatch,
-        Provider(primary=[unavailable()] * 6, fallback=[answer("a"), answer("b"), answer("c")]),
+        Provider(
+            primary=[unavailable()] * 9,
+            fallback=[answer("a"), answer("b"), answer("c"), answer("d")],
+        ),
     )
 
-    for _ in range(3):
+    for _ in range(4):
         await llm.generate([llm.Message("user", "hi")])
 
-    # Two turns of 3 failures open the circuit; the third goes straight to the fallback.
-    assert provider.models_called().count("primary") == 6
+    # Three calls that failed after their retries open the circuit; the fourth goes straight on.
+    assert provider.models_called().count("primary") == 9
     assert provider.models_called()[-1] == "fallback"
     assert provider.models_called()[-2] == "fallback"
+
+
+async def test_requests_the_model_refuses_never_open_the_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A content-filtered message (a 400) is about that message, not about the service."""
+    refused = llm.LLMError("Model returned 400: filtered", retryable=False)
+    provider = use(
+        monkeypatch,
+        Provider(primary=[refused] * 6 + [answer("fine")], fallback=[]),
+    )
+
+    for _ in range(6):
+        with pytest.raises(llm.LLMError, match="400"):
+            await llm.generate([llm.Message("user", "something flagged")])
+    completion = await llm.generate([llm.Message("user", "hello")])
+
+    assert completion.content == "fine"
+    assert (
+        provider.models_called() == ["primary"] * 7
+    )  # still being asked: the circuit stayed closed
+
+
+async def test_one_blip_of_failed_attempts_is_a_single_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = use(
+        monkeypatch,
+        Provider(
+            primary=[unavailable()] * 6 + [answer("back")], fallback=[answer("x"), answer("y")]
+        ),
+    )
+
+    for _ in range(2):  # two calls, 3 failed attempts each: 2 failures, one short of opening
+        await llm.generate([llm.Message("user", "hi")])
+    completion = await llm.generate([llm.Message("user", "hi")])
+
+    assert completion.content == "back"  # the primary was still tried, and answered
+    assert provider.models_called().count("primary") == 7
 
 
 def test_the_circuit_closes_again_after_the_cooldown() -> None:
