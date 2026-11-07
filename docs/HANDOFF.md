@@ -23,7 +23,8 @@ uses a Flutter app (Home, Chats, Stock, Orders, Profile) to set stock, answer qu
 | Evals | `evals/` | Multi-turn scenarios against the real LLM through the simulator API |
 | Plan docs | `docs/agent-phase-2.md` (the spec), `docs/agent-final-plan.md` (order of work) | |
 
-The repo is `D:\Products\sellix`. Branch **`feat/flutter-merchant-app`**. The work of 7 Nov 2026 is committed
+The repo is `D:\Products\sellix`. Work branch **`feat/preorders-and-agent-hardening`** (cut from `feat/flutter-merchant-app` at `961f0ce`; the older branch
+holds the same commits). The work of 7 Nov 2026 is committed
 (commit `86e4307` by the user: the whole `backend/` folder; then `46a2a39` migrations and deploy config,
 `47f9a8a` Flutter app, `ee4fb7d` evals and docs, `b18f382`/the next docs commit, made by Claude at the user's
 request) and **pushed to `origin`** (`git@github.com:shreeharib/sellix-paypal.git`). The user's standing rule:
@@ -167,7 +168,7 @@ Behaviour fixes this session (each has tests and, where useful, a live-eval scen
 **Needs a decision from the user**
 1. Lower `sdk: ^3.13.7` to `^3.13.5` in the real `pubspec.yaml`? (Teammates' Dart may be newer. Today we run from a copy.)
 2. How to get Instagram working: network-team allowlist vs. a cloud-hosted backend (Render is drafted). Until then, test with the simulator and the dev token.
-3. Open a pull request for `feat/flutter-merchant-app` and have a teammate review it.
+3. Open a pull request for `feat/preorders-and-agent-hardening` and have a teammate review it.
 
 **Do next (suggested order)**
 1. Pull request and review (the diff is large: 61 backend files in `86e4307` plus the commits above).
