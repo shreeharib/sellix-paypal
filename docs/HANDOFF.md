@@ -25,10 +25,11 @@ uses a Flutter app (Home, Chats, Stock, Orders, Profile) to set stock, answer qu
 
 The repo is `D:\Products\sellix`. Branch **`feat/flutter-merchant-app`**. The work of 7 Nov 2026 is committed
 (commit `86e4307` by the user: the whole `backend/` folder; then `46a2a39` migrations and deploy config,
-`47f9a8a` Flutter app, `ee4fb7d` evals and docs, made by Claude at the user's request). `46a2a39`, `47f9a8a`
-and `ee4fb7d` are **not pushed**; the user pushes. The user's standing rule: commit only when they say so, show
-the diff first, never push. `gh` is not installed. Note `86e4307` has the backend code but not its migrations
-(they are in `46a2a39`): push them together.
+`47f9a8a` Flutter app, `ee4fb7d` evals and docs, `b18f382`/the next docs commit, made by Claude at the user's
+request) and **pushed to `origin`** (`git@github.com:shreeharib/sellix-paypal.git`). The user's standing rule:
+commit and push only when they say so, show the diff first. `gh` is not installed; `origin` works over SSH from
+this laptop. A second remote, `azure`, exists (Azure DevOps): nothing was pushed there. A stray local branch named
+`origin/feat/flutter-merchant-app` makes that ref name ambiguous: use `refs/remotes/origin/...` in scripts.
 
 ## 2. The user and how they like to work
 
@@ -166,10 +167,10 @@ Behaviour fixes this session (each has tests and, where useful, a live-eval scen
 **Needs a decision from the user**
 1. Lower `sdk: ^3.13.7` to `^3.13.5` in the real `pubspec.yaml`? (Teammates' Dart may be newer. Today we run from a copy.)
 2. How to get Instagram working: network-team allowlist vs. a cloud-hosted backend (Render is drafted). Until then, test with the simulator and the dev token.
-3. Push the three local commits (they stay local until the user pushes).
+3. Open a pull request for `feat/flutter-merchant-app` and have a teammate review it.
 
 **Do next (suggested order)**
-1. Push, open a pull request, have a teammate review (the diff is large: 86 files in `86e4307` plus the three commits above).
+1. Pull request and review (the diff is large: 61 backend files in `86e4307` plus the commits above).
 2. Deploy the backend off the laptop (Render + Supabase), put real secrets in the host's environment, run the worker as its own service, set `FORWARDED_ALLOW_IPS`, and apply migrations with `supabase db push` (there is no tracker for the raw SQL files).
 3. Build an APK against that public `https` URL; sign in with Instagram on the phone.
 4. First real merchant in `draft` mode; watch `agent-health`; set `LLM_MODELS` to a second model as a backup; consider an alert on the fallback rate.
