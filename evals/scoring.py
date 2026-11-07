@@ -12,6 +12,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+# An item id such as "i3f9a2c": for tool calls only.
+_ITEM_ID = re.compile(r"\bi(?=[0-9a-f]*\d)[0-9a-f]{6}\b", re.IGNORECASE)
+
+
+# Office-speak a person on the shop's team wouldn't write.
+_STIFF = re.compile(r"\bsir\b|\bmadam\b|\bma['’]?am\b|\bkindly\b|\bdo the needful\b", re.IGNORECASE)
+
+
 @dataclass
 class TurnResult:
     scenario: str
@@ -71,6 +79,13 @@ def check_turn(
         if key in expect and (turn or {}).get(key) != expect[key]:
             failures.append(f"{key}: expected {expect[key]}, got {(turn or {}).get(key)}")
     text = "\n".join(agent_messages)
+    # Every turn, whatever the scenario expects: nothing internal may reach a customer.
+    if _ITEM_ID.search(text):
+        failures.append(f"an item id reached the customer: {text[:200]!r}")
+    if _STIFF.search(text):
+        failures.append(f"stiff phrase or guessed form of address (sir, madam, kindly) in the reply: {text[:200]!r}")
+    if "[[" in text or "]]" in text:
+        failures.append(f"an unfilled token reached the customer: {text[:200]!r}")
     if "reply_regex" in expect and not re.search(expect["reply_regex"], text, re.IGNORECASE):
         failures.append(f"reply should match {expect['reply_regex']!r}: {text[:200]!r}")
     if "no_reply_regex" in expect and re.search(expect["no_reply_regex"], text, re.IGNORECASE):

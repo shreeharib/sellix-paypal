@@ -1,6 +1,52 @@
 [
-  {"product": "Scoop cookie", "variant": "Chocolate", "price": "60", "quantity": 40},
-  {"product": "Scoop cookie", "variant": "Red velvet", "price": "70", "quantity": 0},
-  {"product": "Brownie", "price": "90", "quantity": 25},
-  {"product": "Banana bread", "price": "250", "quantity": 6}
+  {
+    "product": "Scoop cookie",
+    "variant": "Chocolate",
+    "price": "60",
+    "quantity": 40
+  },
+  {
+    "product": "Scoop cookie",
+    "variant": "Red velvet",
+    "price": "70",
+    "quantity": 0
+  },
+  {
+    "product": "Brownie",
+    "price": "90",
+    "quantity": 25
+  },
+  {
+    "product": "Banana bread",
+    "price": "250",
+    "quantity": 6
+  },
+  {
+    "product": "Cotton kurti",
+    "variant": "S",
+    "price": "899",
+    "quantity": 5
+  },
+  {
+    "product": "Cotton kurti",
+    "variant": "M",
+    "price": "899",
+    "quantity": 5
+  },
+  {
+    "product": "Cotton kurti",
+    "variant": "L",
+    "price": "899",
+    "quantity": 0
+  },
+  {
+    "product": "Silver earrings",
+    "price": "499",
+    "quantity": 12
+  },
+  {
+    "product": "Aloe face gel",
+    "price": "349",
+    "quantity": 20
+  }
 ]
