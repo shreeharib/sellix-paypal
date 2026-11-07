@@ -1,6 +1,6 @@
 ---
 id: context
-version: 3
+version: 4
 description: "The per-turn context block: shop, time, menu, stage, draft, quote, open questions."
 ---
 # The shop: {{ shop_name }}
@@ -18,11 +18,12 @@ description: "The per-turn context block: shop, time, menu, stage, draft, quote,
 {{ now }} (the shop's local time)
 
 # Today's menu
-{% for item in menu -%}
+{% if menu_count %}- {{ menu_count }} items today: use search_catalog to find them
+{% else %}{% for item in menu -%}
 - {{ item.name }} | id {{ item.id }} | price [[price:{{ item.id }}]] | {% if item.available > 0 %}{{ item.available }} left{% else %}sold out{% endif %}
 {% else -%}
 - Nothing has been added to today's stock yet.
-{% endfor %}
+{% endfor %}{% endif %}
 {% if facts %}# About this customer
 {% for fact in facts %}- {{ fact.key }}: {{ fact.value }}
 {% endfor %}

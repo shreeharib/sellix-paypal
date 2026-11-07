@@ -11,6 +11,7 @@
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -92,50 +93,131 @@ def build(
     glossary: list[tuple[str, str]] = (),  # pyright: ignore[reportArgumentType]
     summary: str | None = None,
 ) -> Context:
+    settings = get_settings()
     playbook = choose_playbook(ctx.stage, ctx.customer_text, trigger.details)
-    system = "\n\n".join(
-        [
-            _use(ctx, "base"),
-            _use(ctx, f"playbook.{playbook}"),
-            _use(
-                ctx,
-                "context",
-                shop_name=ctx.merchant.name,
-                profile=(profile or "").strip(),
-                now=_local_now(ctx.now, ctx.merchant.timezone),
-                menu=[
-                    {
-                        "name": item.label,
-                        "id": items.ref(item.variant_id),
-                        "available": item.available,
-                    }
-                    for item in ctx.stock
-                    if item.variant_id
-                ],
-                stage=ctx.stage,
-                coming_up=_coming_up(ctx),
-                draft_date=_day_text(_draft_date(draft)),
-                draft_lines=_draft_lines(draft, ctx),
-                fulfilment=draft.get("fulfilment"),
-                needed_by=draft.get("needed_by"),
-                quote_id=str(quote.id) if quote and quote.status == "open" else None,
-                quote_shown=bool(quote and quote.shown_message_id),
-                open_questions=open_questions,
-                window_closing=window_closing,
-                facts=[{"key": key, "value": value} for key, value in facts],
-                rules=[{"question": q, "answer": a} for q, a in rules],
-                glossary=[{"term": t, "meaning": m} for t, m in glossary],
-                summary=summary,
-            ),
-        ]
-    )
-    messages = [llm.Message("system", system)]
+    menu = [
+        {"name": item.label, "id": items.ref(item.variant_id), "available": item.available}
+        for item in ctx.stock
+        if item.variant_id
+    ]
+    too_many = len(menu) > settings.agent_menu_items
+    values: dict[str, object] = {
+        "shop_name": ctx.merchant.name,
+        "profile": (profile or "").strip(),
+        "now": _local_now(ctx.now, ctx.merchant.timezone),
+        "menu": [] if too_many else menu,
+        "menu_count": len(menu) if too_many else None,
+        "stage": ctx.stage,
+        "coming_up": _coming_up(ctx)[: settings.agent_menu_items],
+        "draft_date": _day_text(_draft_date(draft)),
+        "draft_lines": _draft_lines(draft, ctx),
+        "fulfilment": draft.get("fulfilment"),
+        "needed_by": draft.get("needed_by"),
+        "quote_id": str(quote.id) if quote and quote.status == "open" else None,
+        "quote_shown": bool(quote and quote.shown_message_id),
+        "open_questions": open_questions,
+        "window_closing": window_closing,
+        "facts": _facts_within_budget(list(facts), settings.agent_customer_facts_tokens),
+        "rules": [{"question": q, "answer": a} for q, a in rules],
+        "glossary": [{"term": t, "meaning": m} for t, m in glossary],
+        "summary": summary,
+    }
+
     customer_texts = _customer_texts(ctx, history)
-    for line in history:
-        if line.sender == "customer" and line.id not in customer_texts:
-            continue  # cut from a long burst: the newest messages matter most
-        messages.extend(_as_messages(ctx, line, customer_texts))
+    groups = [
+        _as_messages(ctx, line, customer_texts)
+        for line in history
+        # cut from a long burst: the newest messages matter most
+        if not (line.sender == "customer" and line.id not in customer_texts)
+    ]
+    latest = groups[-1] if groups else []
+    room_for_latest = sum(estimate_tokens(m.content) for m in latest)
+
+    # The system part, shrunk (least useful first) until it leaves room for the latest message.
+    system = _system(ctx, playbook, values)
+    for shrink in _SHRINK_ORDER:
+        if estimate_tokens(system) + room_for_latest <= settings.agent_context_tokens:
+            break
+        shrink(values)
+        system = _system(ctx, playbook, values)
+
+    # Then the conversation, newest first, while it fits (the latest message always does).
+    budget = settings.agent_context_tokens - estimate_tokens(system) - room_for_latest
+    kept: list[list[llm.Message]] = [latest] if latest else []
+    for group in reversed(groups[:-1]):
+        cost = sum(estimate_tokens(m.content) for m in group)
+        if cost > budget:
+            break
+        budget -= cost
+        kept.append(group)
+    messages = [llm.Message("system", system)]
+    for group in reversed(kept):
+        messages.extend(group)
     return Context(messages, playbook)
+
+
+def estimate_tokens(text: str) -> int:
+    """About 4 UTF-8 bytes a token: rough for English, cautious for Tamil and Hindi script
+    (3 bytes a character), so budgets hold for the languages customers actually write."""
+    return (len(text.encode()) + 3) // 4
+
+
+# Most useful first: what's kept in "About this customer" when its budget runs out.
+_FACT_PRIORITY = (
+    "name",
+    "preferred_language",
+    "address",
+    "usual_order",
+    "dietary_note",
+    "occasion",
+)
+
+
+def _facts_within_budget(facts: list[tuple[str, object]], budget: int) -> list[dict[str, object]]:
+    ranked = sorted(
+        facts,
+        key=lambda fact: _FACT_PRIORITY.index(fact[0]) if fact[0] in _FACT_PRIORITY else 99,
+    )
+    kept: list[dict[str, object]] = []
+    for key, value in ranked:
+        cost = estimate_tokens(f"- {key}: {value}\n")
+        if cost <= budget:
+            kept.append({"key": key, "value": value})
+            budget -= cost
+    return kept
+
+
+def _system(ctx: TurnContext, playbook: str, values: dict[str, object]) -> str:
+    return "\n\n".join(
+        [_use(ctx, "base"), _use(ctx, f"playbook.{playbook}"), _use(ctx, "context", **values)]
+    )
+
+
+def _drop(key: str) -> Callable[[dict[str, object]], None]:
+    def shrink(values: dict[str, object]) -> None:
+        values[key] = [] if isinstance(values[key], list) else None
+
+    return shrink
+
+
+def _halve(key: str) -> Callable[[dict[str, object]], None]:
+    def shrink(values: dict[str, object]) -> None:
+        kept = list(values[key])  # pyright: ignore[reportArgumentType]
+        values[key] = kept[: len(kept) // 2]
+
+    return shrink
+
+
+# When the system part is too big: the summary goes first, then the glossary, then older saved
+# answers (newest kept), then the coming days' items, then the rest of the saved answers.
+_SHRINK_ORDER: tuple[Callable[[dict[str, object]], None], ...] = (
+    _drop("summary"),
+    _drop("glossary"),
+    _halve("rules"),
+    _halve("rules"),
+    _drop("coming_up"),
+    _drop("rules"),
+)
 
 
 def _customer_texts(ctx: TurnContext, history: list[ChatLine]) -> dict[uuid.UUID, str]:

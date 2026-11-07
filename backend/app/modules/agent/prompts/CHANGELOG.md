@@ -11,3 +11,4 @@ eval result).
 | templates `holding`, `quote_card*`, `payment_*`, `handed_off`, `too_long`, `rate_limited` | First versions, en / ta / ta-en / hi / hi-en | Tamil and Hindi texts need a native speaker's review |
 | `playbook.custom_or_future_order@2` | Ask the owner in the same turn as promising to check (live eval: the model promised without asking) | Live evals 29 Oct: 0.95 before |
 | `context@3`, `playbook.new_order@2`, `playbook.custom_or_future_order@3`, `quote_card@2` | Pre-orders: "Coming up" items with per-day stock, a `date` on the draft, the day on the quote card | To run |
+| `context@4` | A menu over 40 items is summarised (use search_catalog); the context is kept within its token budgets | To run |

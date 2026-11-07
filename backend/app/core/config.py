@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = 10
     agent_turn_deadline_seconds: float = 30.0
     agent_repair_attempts: int = 1  # send_reply retries after failing the output checks
+    # Context budgets (agent-phase-2.md section 8.1), in estimated tokens.
+    agent_context_tokens: int = 6000  # everything before tool results
+    agent_customer_facts_tokens: int = 150  # "About this customer"
+    agent_menu_items: int = 40  # beyond this, the menu is summarised: use search_catalog
     agent_order_days_ahead: int = 14  # how far ahead customers can order (pre-orders)
     agent_max_images_per_turn: int = 3  # sent to the vision model; more: ask which one
     # Inbound protection (agent-phase-2.md section 12).
