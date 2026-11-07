@@ -21,3 +21,6 @@ class Escalation(Base):
     answer: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     answered_at: Mapped[datetime | None]
+    # sent | pending_window | human_agent | expired (see the window_and_pending migration)
+    answer_delivery: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    window_warned_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)

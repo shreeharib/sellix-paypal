@@ -1,0 +1,14 @@
+id: payment_offline
+version: 1
+description: "Sent by code after an order is placed when online payment isn't available for it."
+texts:
+  en: |-
+    Order {{ number }} is confirmed: {{ total }}. The shop will send you payment details shortly.
+  ta-en: |-
+    Order {{ number }} confirm aachu: {{ total }}. Payment details shop seekiram anuppuvanga.
+  ta: |-
+    ஆர்டர் {{ number }} உறுதியானது: {{ total }}. பணம் செலுத்தும் விவரங்களை கடை விரைவில் அனுப்பும்.
+  hi-en: |-
+    Order {{ number }} confirm ho gaya: {{ total }}. Shop jaldi payment details bhejega.
+  hi: |-
+    ऑर्डर {{ number }} पक्का हो गया: {{ total }}। दुकान जल्दी भुगतान की जानकारी भेजेगी।

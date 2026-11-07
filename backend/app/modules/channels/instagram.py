@@ -1,5 +1,6 @@
 """Instagram API with Instagram login: OAuth, account lookup, webhooks, sending DMs."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
@@ -14,13 +15,21 @@ GRAPH_URL = "https://graph.instagram.com"
 SCOPES = ("instagram_business_basic", "instagram_business_manage_messages")
 WEBHOOK_FIELDS = "messages,messaging_postbacks"
 MAX_TEXT_LENGTH = 1000  # Instagram's limit for one text message
+MAX_TEXT_BYTES = 1000  # the same limit, as Instagram counts it: UTF-8 bytes
+# To confirm on the test account (agent-phase-2.md section 21, item 2).
+MAX_QUICK_REPLIES = 13
+MAX_QUICK_REPLY_TITLE = 20
 TIMEOUT_SECONDS = 15
 
 
 class InstagramAPIError(RuntimeError):
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(
+        self, status: int, message: str, *, code: int | None = None, subcode: int | None = None
+    ) -> None:
         super().__init__(f"Instagram API error {status}: {message}")
         self.status = status
+        self.code = code  # Meta's error code, e.g. 10, 190, 551, 613
+        self.subcode = subcode  # Meta's error_subcode, e.g. 2018278 (outside the window)
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,13 @@ def parse_messages(payload: dict[str, Any]) -> list[IncomingMessage]:
                         for attachment in message.get("attachments", [])
                     ),
                     story_reply_url=story.get("url"),
+                    story_reply_id=story.get("id"),
+                    attachment_urls=tuple(
+                        str((attachment.get("payload") or {}).get("url") or "")
+                        for attachment in message.get("attachments", [])
+                    ),
                     is_echo=is_echo,
+                    quick_reply_payload=(message.get("quick_reply") or {}).get("payload"),
                 )
             )
     return messages
@@ -151,13 +166,48 @@ async def subscribe_webhooks(*, api_version: str, token: str) -> None:
 
 
 async def send_text(
-    *, api_version: str, account_id: str, token: str, recipient_id: str, text: str
+    *,
+    api_version: str,
+    account_id: str,
+    token: str,
+    recipient_id: str,
+    text: str,
+    tag: str | None = None,
+    quick_replies: Sequence[tuple[str, str]] = (),
 ) -> str:
-    """Send a DM from the shop's account. Returns Instagram's message ID."""
+    """Send a DM from the shop's account. Returns Instagram's message ID.
+
+    `tag` is a message tag such as "HUMAN_AGENT" (a person's reply outside the 24 hours).
+    `quick_replies` are (title, payload) buttons; a tap comes back with the payload.
+    """
+    message: dict[str, Any] = {"text": text[:MAX_TEXT_LENGTH]}
+    if quick_replies:
+        message["quick_replies"] = [
+            {"content_type": "text", "title": title[:MAX_QUICK_REPLY_TITLE], "payload": payload}
+            for title, payload in quick_replies[:MAX_QUICK_REPLIES]
+        ]
+    body: dict[str, Any] = {"recipient": {"id": recipient_id}, "message": message}
+    if tag:
+        body |= {"messaging_type": "MESSAGE_TAG", "tag": tag}
+    data = await _request(
+        "POST", f"{GRAPH_URL}/{api_version}/{account_id}/messages", json=body, token=token
+    )
+    return str(data.get("message_id", ""))
+
+
+async def send_attachment(
+    *,
+    api_version: str,
+    account_id: str,
+    token: str,
+    recipient_id: str,
+    attachment: dict[str, Any],
+) -> str:
+    """Send an image ({"type": "image", ...}) or the shop's own post ({"type": "MEDIA_SHARE"})."""
     data = await _request(
         "POST",
         f"{GRAPH_URL}/{api_version}/{account_id}/messages",
-        json={"recipient": {"id": recipient_id}, "message": {"text": text[:MAX_TEXT_LENGTH]}},
+        json={"recipient": {"id": recipient_id}, "message": {"attachment": attachment}},
         token=token,
     )
     return str(data.get("message_id", ""))
@@ -185,8 +235,25 @@ async def _request(
     except ValueError:
         body = {}
     if response.is_error:
-        raise InstagramAPIError(response.status_code, _error_message(body) or response.text[:300])
+        raise error_from_response(response.status_code, body, fallback=response.text[:300])
     return body
+
+
+def error_from_response(
+    status: int, body: dict[str, Any], *, fallback: str = ""
+) -> InstagramAPIError:
+    error = body.get("error")
+    details: dict[str, Any] = error if isinstance(error, dict) else {}
+    return InstagramAPIError(
+        status,
+        _error_message(body) or fallback,
+        code=_as_int(details.get("code")),
+        subcode=_as_int(details.get("error_subcode")),
+    )
+
+
+def _as_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _error_message(body: dict[str, Any]) -> str:

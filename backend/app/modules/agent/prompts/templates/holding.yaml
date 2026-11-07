@@ -1,0 +1,14 @@
+id: holding
+version: 1
+description: "Sent when the assistant can't finish a reply; the shop owner is asked to follow up."
+texts:
+  en: |-
+    Thanks for your message! Let me check with the shop and get back to you shortly.
+  ta-en: |-
+    Message-ku nandri! Shop-la check panni seekiram solren.
+  ta: |-
+    உங்கள் செய்திக்கு நன்றி! கடையில் கேட்டு விரைவில் சொல்கிறேன்.
+  hi-en: |-
+    Message ke liye thanks! Shop se check karke jaldi batata hoon.
+  hi: |-
+    आपके संदेश के लिए धन्यवाद! दुकान से पूछकर जल्दी बताता हूँ।

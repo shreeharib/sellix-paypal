@@ -16,6 +16,8 @@ TASK_MODULES = [
     "app.modules.conversations.tasks",
     "app.modules.channels.tasks",
     "app.modules.orders.tasks",
+    "app.modules.payments.tasks",
+    "app.modules.agent.tasks",
 ]
 
 jobs = procrastinate.App(

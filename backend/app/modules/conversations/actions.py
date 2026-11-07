@@ -13,14 +13,18 @@ import structlog
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.money import format_money
+from app.modules.agent import service as agent
 from app.modules.agent.schemas import AgentAction, OrderDraft
 from app.modules.escalations import service as escalations
 from app.modules.orders import service as orders
-from app.modules.orders.schemas import OrderLineRequest, OrderRequest, Quote
+from app.modules.orders.schemas import OrderLineRequest, OrderRequest, PlacedOrder, Quote
 from app.modules.payments import service as payments
 from app.modules.shop_profile import service as shop_profile
 
 log = structlog.get_logger()
+
+# v1 fallbacks go out in English: the turn failed before we learned the customer's language.
+FALLBACK_LANGUAGE = "en"
 
 
 @dataclass(frozen=True)
@@ -72,8 +76,7 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
             )
     except orders.OrderProblem as problem:
         return ActionOutcome(
-            note=f"The order couldn't be placed: {'; '.join(problem.problems)}. Tell the customer "
-            "and suggest alternatives from today's stock."
+            note=agent.prompt("v1.note.order_failed", problems=list(problem.problems))
         )
 
     total = format_money(placed.total_minor, placed.currency)
@@ -84,12 +87,10 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
         if vpa:
             upi_link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=context.shop_name)
             return ActionOutcome(
-                note=f"Order #{placed.number} is placed, total {total}. The items are held for "
-                f"{placed.hold_minutes} minutes. A UPI payment link has been added to your "
-                "message: put {payment_link} where it belongs.",
+                note=_placed_note(placed, total, "upi"),
                 payment_link=upi_link,
                 order_id=placed.order_id,
-                fallback_text=f"Order #{placed.number} ({total}): {upi_link}",
+                fallback_text=_fallback(placed, total, upi_link),
             )
 
     if payments.accepts(placed.currency):
@@ -101,12 +102,10 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
             )
         else:
             return ActionOutcome(
-                note=f"Order #{placed.number} is placed, total {total}. The items are held for "
-                f"{placed.hold_minutes} minutes. A PayPal payment link will be added to your "
-                "message: put {payment_link} where it belongs.",
+                note=_placed_note(placed, total, "paypal"),
                 payment_link=link,
                 order_id=placed.order_id,
-                fallback_text=f"Order #{placed.number} ({total}): {link}",
+                fallback_text=_fallback(placed, total, link),
             )
 
     # No online payment for this order: the merchant shares payment details.
@@ -120,28 +119,44 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
             trigger_message_id=context.trigger_message_id,
         )
     return ActionOutcome(
-        note=f"Order #{placed.number} is placed, total {total}. Online payment isn't available "
-        "for this order: tell the customer the shop will share payment details shortly.",
+        note=agent.prompt("v1.note.order_placed_offline", number=placed.number, total=total),
         order_id=placed.order_id,
-        fallback_text=f"Order #{placed.number} ({total}) is confirmed. "
-        "We'll share payment details shortly.",
+        fallback_text=agent.fixed_text(
+            "v1.order_fallback_offline", FALLBACK_LANGUAGE, number=placed.number, total=total
+        ),
+    )
+
+
+def _placed_note(placed: PlacedOrder, total: str, method: str) -> str:
+    return agent.prompt(
+        "v1.note.order_placed",
+        number=placed.number,
+        total=total,
+        hold_minutes=placed.hold_minutes,
+        method=method,
+    )
+
+
+def _fallback(placed: PlacedOrder, total: str, link: str) -> str:
+    return agent.fixed_text(
+        "v1.order_fallback", FALLBACK_LANGUAGE, number=placed.number, total=total, link=link
     )
 
 
 def _quote_note(offer: Quote) -> str:
     if not offer.ok or offer.currency is None:
-        problems = "; ".join(offer.problems) or "no items were given"
-        return (
-            f"No quote: {problems}. Tell the customer and suggest alternatives from today's stock."
-        )
-    lines = ", ".join(
-        f"{line.quantity} x {line.label} at {format_money(line.unit_price_minor, line.currency)}"
-        f" = {format_money(line.subtotal_minor, line.currency)}"
+        return agent.prompt("v1.note.no_quote", problems=list(offer.problems))
+    lines = [
+        {
+            "quantity": line.quantity,
+            "label": line.label,
+            "unit_price": format_money(line.unit_price_minor, line.currency),
+            "subtotal": format_money(line.subtotal_minor, line.currency),
+        }
         for line in offer.lines
-    )
-    return (
-        f"Quote: {lines}. Total {format_money(offer.total_minor, offer.currency)}. Everything is "
-        "available. Summarise this for the customer, with the total, and ask them to confirm."
+    ]
+    return agent.prompt(
+        "v1.note.quote", lines=lines, total=format_money(offer.total_minor, offer.currency)
     )
 
 

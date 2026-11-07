@@ -1,0 +1,14 @@
+id: quote_card.confirm
+version: 1
+description: "Title of the quote card's Confirm button (Instagram allows 20 characters)."
+texts:
+  en: |-
+    Confirm
+  ta-en: |-
+    Confirm
+  ta: |-
+    உறுதி
+  hi-en: |-
+    Confirm
+  hi: |-
+    पक्का करें

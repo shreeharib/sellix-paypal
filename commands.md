@@ -124,11 +124,18 @@ just cli --help
 just cli create-merchant --name "Sweet Crumbs"                         # prints the merchant ID
 just cli set-shop-profile --merchant-id <id> --file shop.md            # Markdown: hours, policies, FAQs
 just cli set-stock --merchant-id <id> --file stock.json                # today's items (format below)
+just cli set-stock --merchant-id <id> --file stock.json --date 2026-11-01 --until 2026-11-05   # the same stock each day (pre-orders)
 just cli connect-instagram --merchant-id <id>                          # prints the link to open
 just cli set-agent --merchant-id <id> off                              # or: on
 just cli resume-conversation --conversation-id <id>                    # agent back on for one chat
 just cli generate-secrets                                              # fresh values for .env
+just cli set-agent-engine --merchant-id <id> v2                        # v1 | v2 | shadow | draft
+just cli shadow-report --merchant-id <id> --days 1                     # v1 replies next to v2's
+just cli replay-turn --turn-id <id>                                    # re-run a v2 turn's model call
+just cli issue-token --merchant-id <id>                                # token for the simulator/evals
 ```
+
+**Simulator:** open http://localhost:8000/simulator, paste a token from `issue-token`, and chat with the shop's assistant through the real pipeline (nothing is sent to Instagram).
 
 Without just: `cd backend && uv run python -m app.cli <command> ...`
 

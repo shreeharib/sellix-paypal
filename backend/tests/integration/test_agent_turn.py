@@ -9,7 +9,7 @@ from app.modules.agent import service as agent
 from app.modules.agent.schemas import ChatMessage, CustomerReply
 from app.modules.channels import service as channels
 from app.modules.channels.models import ChannelConnection
-from app.modules.conversations import service
+from app.modules.conversations import outbox, service
 from app.modules.conversations.models import Message
 from app.modules.escalations.models import Escalation
 from tests.integration.factories import CUSTOMER_ID, start_conversation
@@ -122,7 +122,7 @@ async def test_failed_send_is_recorded_and_escalated(
         failed = await session.scalar(select(Message).where(Message.sender == "agent"))
         escalation = await session.scalar(select(Escalation))
     assert failed is not None and (failed.status, failed.error) == ("failed", "token expired")
-    assert escalation is not None and escalation.question == service.SEND_FAILED_QUESTION
+    assert escalation is not None and escalation.question == outbox.SEND_FAILED_QUESTION
 
 
 async def test_model_outage_escalates_without_messaging_the_customer(

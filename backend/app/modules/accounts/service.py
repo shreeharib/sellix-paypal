@@ -209,3 +209,25 @@ def _signing_key() -> str:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+async def operator_token(session: AsyncSession, merchant_id: uuid.UUID) -> str:
+    """An access token for an operator user of this shop (simulator, evals in CI).
+
+    Goes through the same login code and PKCE exchange as the app, so it's an ordinary
+    session that expires and can be revoked like any other.
+    """
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    user_id = await sign_in(
+        session,
+        provider="email",
+        subject=f"operator-{merchant_id}@sellix.local",
+        merchant_id=merchant_id,
+        display_name="operator",
+    )
+    code = await create_login_code(session, user_id, challenge.rstrip(b"=").decode())
+    pair = await redeem_login_code(
+        session, code=code, code_verifier=verifier, user_agent="sellix-cli"
+    )
+    return pair.access_token

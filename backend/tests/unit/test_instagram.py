@@ -81,3 +81,22 @@ def test_authorize_url_asks_for_messaging_permissions() -> None:
     assert query["response_type"] == ["code"]
     assert query["state"] == ["abc"]
     assert set(query["scope"][0].split(",")) == set(instagram.SCOPES)
+
+
+def test_story_replies_keep_the_story_id_and_attachments_their_urls() -> None:
+    [message] = instagram.parse_messages(
+        payload(
+            customer_event(
+                {
+                    "mid": "m1",
+                    "text": "idhu venum",
+                    "reply_to": {"story": {"id": "story-9", "url": "https://cdn/story-9"}},
+                    "attachments": [{"type": "image", "payload": {"url": "https://cdn/p.jpg"}}],
+                }
+            )
+        )
+    )
+
+    assert (message.story_reply_id, message.story_reply_url) == ("story-9", "https://cdn/story-9")
+    assert message.attachment_types == ("image",)
+    assert message.attachment_urls == ("https://cdn/p.jpg",)

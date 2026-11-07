@@ -29,4 +29,8 @@ class IncomingMessage:
     text: str = ""
     attachment_types: tuple[str, ...] = ()  # e.g. ("image",)
     story_reply_url: str | None = None  # set when the customer replied to a story
+    story_reply_id: str | None = None  # that story's id (stable; the URL expires)
+    attachment_urls: tuple[str, ...] = ()  # CDN links, same order as attachment_types
     is_echo: bool = False  # sent by the shop (from the Instagram app, or by sellix itself)
+    # A tapped quick reply, e.g. "CONFIRM:<quote id>": proof of what the customer chose.
+    quick_reply_payload: str | None = None

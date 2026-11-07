@@ -1,0 +1,75 @@
+# Live-model evals (agent-phase-2.md section 17): the v2 agent on the real pipeline, through the
+# simulator, with the configured model. Runs nightly and on PRs labelled "run-evals"; a score
+# below the bar fails the run, so prompt, tool and model changes can't lower it unnoticed.
+name: evals
+
+on:
+  schedule:
+    - cron: "30 20 * * *"  # 02:00 IST
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+
+jobs:
+  evals:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sellix
+        ports: ["54322:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      APP_ENV: ci
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:54322/sellix
+      RUN_WORKER_IN_PROCESS: "false"
+      LLM_BASE_URL: ${{ secrets.EVALS_LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.EVALS_LLM_API_KEY }}
+      LLM_MODEL: ${{ vars.EVALS_LLM_MODEL }}
+      LLM_MODELS: ${{ vars.EVALS_LLM_MODELS }}
+      LLM_PRICES: ${{ vars.EVALS_LLM_PRICES }}
+      TOKEN_ENCRYPTION_KEYS: ${{ secrets.EVALS_TOKEN_ENCRYPTION_KEYS }}
+      SESSION_SIGNING_KEY: ${{ secrets.EVALS_SESSION_SIGNING_KEY }}
+      OAUTH_STATE_SECRET: ${{ secrets.EVALS_OAUTH_STATE_SECRET }}
+      AGENT_DAILY_BUDGET_USD: "20"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - name: Apply migrations
+        run: |
+          for f in ../supabase/migrations/*.sql; do
+            PGPASSWORD=postgres psql -h localhost -p 54322 -U postgres -d sellix -q -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Seed the demo shop on the v2 engine
+        run: |
+          MERCHANT=$(uv run python -m app.cli create-merchant --name "Eval Bakery" | grep -oE '[0-9a-f-]{36}')
+          uv run python -m app.cli set-stock --merchant-id "$MERCHANT" --file ../evals/demo_stock.json
+          uv run python -m app.cli set-agent-engine --merchant-id "$MERCHANT" v2
+          echo "EVAL_TOKEN=$(uv run python -m app.cli issue-token --merchant-id "$MERCHANT")" >> "$GITHUB_ENV"
+      - name: Start the API
+        run: |
+          uv run uvicorn app.main:app --port 8000 > ../api.log 2>&1 &
+          for _ in $(seq 30); do curl -sf http://localhost:8000/health && break; sleep 1; done
+      - name: Run the evals
+        run: >-
+          uv run python ../evals/run.py --base-url http://localhost:8000 --token "$EVAL_TOKEN"
+          ../evals/datasets/scenarios.jsonl ../evals/datasets/adversarial.jsonl
+          --min-score 0.9 --out ../evals-report.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-report
+          path: |
+            evals-report.json
+            api.log

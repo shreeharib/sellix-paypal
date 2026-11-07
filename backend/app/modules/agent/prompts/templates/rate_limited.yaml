@@ -1,0 +1,14 @@
+id: rate_limited
+version: 1
+description: "Sent once when a customer goes over the turn limits; then silence for a while."
+texts:
+  en: |-
+    Thanks for all your messages! The shop will get back to you soon.
+  ta-en: |-
+    Ungal messages-ku nandri! Shop seekiram reply pannuvanga.
+  ta: |-
+    உங்கள் செய்திகளுக்கு நன்றி! கடை விரைவில் பதில் சொல்லும்.
+  hi-en: |-
+    Aapke messages ke liye thanks! Shop jaldi reply karega.
+  hi: |-
+    आपके संदेशों के लिए धन्यवाद! दुकान जल्दी जवाब देगी।
