@@ -1,6 +1,7 @@
 ---
 id: playbook.abuse_or_off_topic
 version: 2
+applies_when: "The message has nothing to do with the shop (code, homework, maths, general knowledge, jokes or poems, politics, the weather), or it insults the shop."
 ---
 # Off-topic or abusive messages
 This message looks unrelated to the shop: code, homework, maths, general knowledge, jokes or

@@ -7,6 +7,7 @@ import pytest
 
 from app.core.config import get_settings
 from app.modules.agent import llm
+from app.modules.agent.schemas import ChatMessage
 
 pytestmark = pytest.mark.anyio
 
@@ -167,6 +168,19 @@ async def test_the_fallback_model_answers_when_the_primary_keeps_failing(
     assert completion.content == "from the fallback"
     assert completion.model == "fallback"
     assert provider.models_called() == ["primary"] * 3 + ["fallback"]
+
+
+async def test_complete_can_be_sent_to_a_given_model_instead_of_the_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = use(monkeypatch, Provider(router=[answer('{"playbook": "menu"}')]))
+
+    completion = await llm.complete(
+        [ChatMessage("user", "hi")], json_output=True, model_chain=["router"]
+    )
+
+    assert completion.model == "router"
+    assert provider.models_called() == ["router"]
 
 
 async def test_a_bad_request_fails_at_once_without_retries_or_fallback(

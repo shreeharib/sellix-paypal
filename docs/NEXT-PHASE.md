@@ -5,7 +5,7 @@ Written 8 Nov 2026 and updated 9 Nov 2026 for the next Claude session. It says w
 ## 0. Start here (10 minutes)
 
 1. Read [CLAUDE.md](../CLAUDE.md), then [HANDOFF.md](HANDOFF.md) sections 1, 3 (how to run and check everything on this PC, and the traps, now up to 13), 4.6 to 4.10 (what was built on 8 and 9 Nov) and 7 (open items), then this file.
-2. `git status` and `git log -3`. **All of 8 and 9 Nov is uncommitted: 95 entries in `git status`** on branch `feat/preorders-and-agent-hardening` (58 backend, 31 Flutter, plus docs, the evals datasets and one migration). The user's rule: commit only when they say so, show the diff first, never push.
+2. `git status` and `git log -3`. **All of 8 and 9 Nov is committed** in `c3b2994` (9 Nov, 100 files) on branch `feat/preorders-and-agent-hardening`; on 9 Nov the branch matched origin and `git status` was clean. The user's rule: commit only when they say so, show the diff first, never push.
 3. The running dev servers are **older builds**. Nothing from 8 Nov is live until the user restarts them (they use Windows **Command Prompt**, not Git Bash):
    - API: `D:\Tools\sellix\restart-sellix-api.cmd` (real PayPal sandbox) or `D:\Tools\sellix\restart-sellix-api.cmd simulator` (the Accept / Reject page). Claude is not allowed to kill their processes: ask them to run it.
    - Web app: `D:\Tools\sellix\run-sellix-web.cmd`. It runs the Flutter code from the copy at `D:\Android\cache\tmp\sellix_copy`, so first `cp -r lib test /d/Android/cache/tmp/sellix_copy/` from `frontend/flutter_app` (synced on 9 Nov after the last change).
@@ -16,7 +16,7 @@ Written 8 Nov 2026 and updated 9 Nov 2026 for the next Claude session. It says w
 
 **Product:** an Instagram DM assistant plus a Flutter merchant app for small online shops (HANDOFF section 1). Demo shop "Sweet Crumbs" (a bakery), merchant id `88fa6847-ea60-48d3-9be7-4877c2073130`, DB `sellix`, engine v2.
 
-**Built and tested on 8 Nov (uncommitted):**
+**Built and tested on 8 Nov (committed in `c3b2994`):**
 - PayPal for a rupee shop: the order stays in ₹, PayPal charges dollars at a live rate (`payments/fx.py`). The real sandbox rejects INR, so this was the only way.
 - Payment retries: cooldown, max attempts, time window (`payments.service._retry_policy`), a "New payment link" button handled in code, the order cancelled when tries or time run out.
 - A built-in payment simulator (`PAYMENT_PROVIDER=simulator`): a page with Accept and Reject buttons that sends a signed webhook through the real inbox and job. PayPal has no such page (docs checked); the real PayPal path stays the default.
@@ -25,7 +25,11 @@ Written 8 Nov 2026 and updated 9 Nov 2026 for the next Claude session. It says w
 - Shop-type templates (`shop_profile/shop_types.yaml`: bakery, jewellery, beauty, plants, handmade_gifts, dress_shop, other) and the Flutter add-product form that follows them. Shelf life is asked only for fresh-batch shops.
 - "1 week / until sold" was silently dropped by the API: fixed. `/v1/today` rows now carry the stock type.
 
-**Built and tested on 9 Nov (uncommitted, HANDOFF 4.10):** a typed "ok" no longer places an order (Confirm tap or a clear "confirm" only); off-topic messages and insults get `abuse_or_off_topic`; the profile and the app no longer carry "Introduce yourself" or "Sir or madam" (Sweet Crumbs re-saved, profile v5); "+" on the stock screens works in the web app again (a web-only bug: `-1 << 31` is positive on the web) and its count is exposed to screen readers. Marking an order ready / packed / delivered / sent now messages the customer (fixed templates; it was never built). Backend 521 passed, Flutter 402 passed; live evals 37/37 twice (one earlier run 36/37 on a too-strict check) and owner answers + pre-orders 11/11 twice.
+**Playbook router (9 Nov, uncommitted, HANDOFF 4.12):** a small model call now picks each turn's playbook (`agent/router.py`, `prompts/router/playbook.md`); the regexes are the fallback. Backend 542 passed; live evals 37/37 twice and 11/11 (one earlier 10/11 from an Azure network timeout). The router adds about 3.7 s per turn on the current model: consider `LLM_ROUTER_MODEL` with a fast model. The two explainer pages still describe regex routing.
+
+**Explainer (9 Nov, HANDOFF 4.11):** `docs/agent-harness.html` explains the whole agent harness from the code, for the team, judges and interviews; it also lists four small agent findings (open item 5 in HANDOFF section 7).
+
+**Built and tested on 9 Nov (committed in `c3b2994`, HANDOFF 4.10):** a typed "ok" no longer places an order (Confirm tap or a clear "confirm" only); off-topic messages and insults get `abuse_or_off_topic`; the profile and the app no longer carry "Introduce yourself" or "Sir or madam" (Sweet Crumbs re-saved, profile v5); "+" on the stock screens works in the web app again (a web-only bug: `-1 << 31` is positive on the web) and its count is exposed to screen readers. Marking an order ready / packed / delivered / sent now messages the customer (fixed templates; it was never built). Backend 521 passed, Flutter 402 passed; live evals 37/37 twice (one earlier run 36/37 on a too-strict check) and owner answers + pre-orders 11/11 twice.
 
 **Verified on 8 Nov:** backend 470 passed; the 4 real PayPal sandbox tests; Flutter `analyze` clean and 400 passed; the app's 18 live contract tests against the new backend code; live evals (real model) 31/31 twice and 11/11 (owner answers, pre-orders). **Not verified:** nobody has looked at the new screens in a real browser; no real sandbox buyer has paid with the converted dollar amount; the simulator pages have not been seen by eye.
 
@@ -68,8 +72,8 @@ Pick by demo value. Cheap and visible: the one-day (pre-order) item cannot be ed
 ### T7. Native-speaker review
 Tamil and Hindi wording needs a native speaker (the user, or someone they ask): the templates `payment_link` (charge line), `payment_declined`, `payment_retry_button`, `payment_retry_wait`, `payment_gave_up`, `event_payment_received`, `event_hold_expired`, `owner_answer_relay`, and the shop-type labels and notes in `shop_types.yaml`.
 
-### T8. Commit hygiene (only when the user says)
-Show the diff first. A sensible split: (1) payments: fx, retries, simulator, migration; (2) agent: order references, playbook, fallbacks, templates, prompts CHANGELOG; (3) shop types backend and stock-type fixes; (4) Flutter shop-type form and onboarding; (5) audit fixes; (6) 9 Nov agent work (`affirmation.py`, `context.py` routing, `base@4`, playbooks, `render_profile`, their tests and the prompts CHANGELOG rows); (7) 9 Nov Flutter (onboarding and Settings talk step, `SxStepper` semantics, tests); (8) docs and evals. Never push. Open a pull request only when asked. Note `commands.md` has a block appended at the end that looks like a pasted chat reply ("To run it ..."): it is the user's edit, so ask whether to tidy it.
+### T8. Commit hygiene: done on 9 Nov
+The 8 and 9 Nov work went in as one commit, `c3b2994`, rather than the split once proposed here. For later work the rule stands: show the diff first, never push, open a pull request only when asked. Note `commands.md` has a block appended at the end that looks like a pasted chat reply ("To run it ..."): it is the user's edit, so ask whether to tidy it.
 
 ## 4. Decisions waiting on the user
 

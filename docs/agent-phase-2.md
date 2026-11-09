@@ -222,7 +222,7 @@ applies_when: stage in [browsing, collecting_details, awaiting_confirmation]
 - A PR that changes anything under `prompts/` must include an eval run (section 17), as `CONTRIBUTING.md` already requires.
 - Keep `base.md` short and stable so providers can cache it. Playbooks are swapped per turn; templates are never sent to the model.
 
-**Which playbook loads:** code picks one playbook per turn from the conversation state plus a cheap intent check (keywords, attachment types, story reply flag; a small classifier call only if those are ambiguous). The model can also call `load_playbook(name)` once per turn if the conversation clearly moved to another situation.
+**Which playbook loads:** one playbook per turn, chosen before the main model call (`agent/router.py`, changed 9 Nov 2026; it was keyword rules before). The owner's answer is an event, so code gives it `owner_answer` with no model call. For everything else a small model call (`prompts/router/playbook.md`) reads the stage, an attachment or story flag, each playbook's `applies_when` header line and the last 6 messages, and answers `{"playbook": "<name>"}`. If that call fails, takes longer than `AGENT_ROUTER_TIMEOUT_SECONDS` or names a playbook it wasn't offered, the keyword rules (`context.choose_playbook`) decide. `AGENT_PLAYBOOK_ROUTER=rules` uses the rules alone; `LLM_ROUTER_MODEL` can name a cheaper model for the call. The router runs after the inbound gate, and its choice is stored on the turn, so a resumed turn keeps it. The model can also call `load_playbook(name)` once per turn if the conversation clearly moved to another situation.
 
 ---
 

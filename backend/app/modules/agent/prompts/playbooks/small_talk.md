@@ -1,6 +1,7 @@
 ---
 id: playbook.small_talk
 version: 3
+applies_when: "Only a greeting or a pleasantry, with nothing asked yet."
 ---
 # Small talk
 Greet the customer the way a person on the shop's team would: warm, one short line, and ask

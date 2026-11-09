@@ -1,0 +1,1709 @@
+<title>Sellix Agent Harness</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="How the sellix backend answers an Instagram DM: webhook, job queue, turn engine, tools, playbooks, memory, state, guardrails and outbox, read from the code.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a reference manual. A sticky contents rail beside one reading column (about 70ch);
+   diagrams, tables and code may use the full width of the main column.
+   Colour carries meaning: amber is what the model decides, teal is what code decides, dashed is a Postgres table. */
+:root {
+  --bg: #F2F5F4;
+  --surface: #FFFFFF;
+  --sunk: #E7EDEB;
+  --ink: #13201E;
+  --muted: #56635F;
+  --line: #D2DBD8;
+  --code: #0B6870;
+  --code-soft: #DCEFEF;
+  --model: #995700;
+  --model-soft: #FBEAD2;
+  --bad: #B42318;
+  --bad-soft: #FBE3DF;
+  --good: #2B7A3D;
+  --good-soft: #DFF1E2;
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1514; --surface: #151F1E; --sunk: #1B2726; --ink: #E1E9E7; --muted: #9AA8A5; --line: #2B3937;
+    --code: #5CC3CA; --code-soft: #12393A; --model: #F0A54A; --model-soft: #3B2A12;
+    --bad: #F08A7E; --bad-soft: #3D1D19; --good: #83C990; --good-soft: #17331D;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1514; --surface: #151F1E; --sunk: #1B2726; --ink: #E1E9E7; --muted: #9AA8A5; --line: #2B3937;
+  --code: #5CC3CA; --code-soft: #12393A; --model: #F0A54A; --model-soft: #3B2A12;
+  --bad: #F08A7E; --bad-soft: #3D1D19; --good: #83C990; --good-soft: #17331D;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+body::before {
+  content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px);
+  z-index: 10; background: var(--bg);
+}
+a { color: var(--code); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--code); outline-offset: 2px; border-radius: 4px;
+}
+code, kbd, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+:not(pre) > code {
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 5px;
+  padding: 0.05em 0.35em; overflow-wrap: anywhere;
+}
+h1, h2, h3, h4 { font-family: var(--f-display); line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.3rem, 5.5vw, 3.6rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.55rem, 3vw, 2rem); font-weight: 700; letter-spacing: -0.01em; }
+h3 { font-size: 1.2rem; font-weight: 700; margin-top: 8px; }
+h4 { font-family: var(--f-body); font-size: 1rem; font-weight: 600; }
+p { margin: 0; }
+ul, ol { margin: 0; padding-left: 1.25em; }
+li + li { margin-top: 0.3em; }
+
+.wrap {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 56px;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 96px;
+}
+main { min-width: 0; display: grid; gap: 88px; padding-top: 48px; }
+
+/* contents rail */
+nav.toc {
+  position: sticky; top: calc(env(safe-area-inset-top, 0px) + 28px); align-self: start;
+  max-height: calc(100vh - 56px); overflow: auto; padding-top: 48px; font-size: 0.875rem;
+}
+nav.toc .toc-title {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted);
+  margin-bottom: 10px; font-weight: 600;
+}
+nav.toc ol { list-style: none; padding: 0; display: grid; gap: 2px; }
+nav.toc li + li { margin-top: 0; }
+nav.toc a {
+  display: grid; grid-template-columns: 2.1em 1fr; gap: 4px; padding: 5px 8px; border-radius: 6px;
+  color: var(--muted); text-decoration: none; line-height: 1.35;
+}
+nav.toc a span { font-family: var(--f-mono); font-size: 0.78rem; padding-top: 1px; }
+nav.toc a:hover { background: var(--sunk); color: var(--ink); }
+nav.toc a.active { background: var(--code-soft); color: var(--ink); }
+
+@media (max-width: 960px) {
+  .wrap { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav.toc {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; max-height: none;
+    padding: 10px 0; background: var(--bg); border-bottom: 1px solid var(--line);
+    overflow-x: auto; overflow-y: hidden; white-space: nowrap;
+  }
+  nav.toc .toc-title { display: none; }
+  nav.toc ol { display: flex; gap: 4px; }
+  nav.toc a { display: inline-flex; gap: 6px; }
+  main { padding-top: 32px; gap: 72px; }
+}
+
+/* hero */
+.hero { display: grid; gap: 22px; }
+.eyebrow {
+  font-family: var(--f-mono); font-size: 0.78rem; letter-spacing: 0.06em; color: var(--code);
+  text-transform: lowercase;
+}
+.lede { font-size: 1.15rem; line-height: 1.55; max-width: 64ch; color: var(--ink); }
+.facts {
+  display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 0.85rem; color: var(--muted);
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding-block: 12px;
+}
+.facts b { color: var(--ink); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 0.86rem; color: var(--muted); }
+.key { display: inline-flex; align-items: center; gap: 8px; }
+.swatch { width: 22px; height: 14px; border-radius: 4px; border: 2px solid; flex: none; }
+.swatch.model { border-color: var(--model); background: var(--model-soft); }
+.swatch.code { border-color: var(--code); background: var(--code-soft); }
+.swatch.db { border-color: var(--muted); border-style: dashed; background: var(--surface); }
+
+/* sections */
+section { display: grid; gap: 20px; scroll-margin-top: 72px; }
+.sec-head { display: grid; gap: 8px; }
+.sec-num { font-family: var(--f-mono); font-size: 0.8rem; color: var(--muted); letter-spacing: 0.04em; }
+.prose { max-width: 70ch; display: grid; gap: 14px; }
+.prose p, .prose li { color: var(--ink); }
+.muted { color: var(--muted); }
+.small { font-size: 0.875rem; }
+
+.thesis {
+  border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius);
+  padding: 22px 24px; font-family: var(--f-display); font-weight: 500;
+  font-size: clamp(1.15rem, 2.2vw, 1.4rem); line-height: 1.4; max-width: 62ch;
+}
+.thesis em { font-style: normal; color: var(--model); }
+.thesis strong { color: var(--code); font-weight: 700; }
+
+.ideas { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.idea { display: grid; gap: 6px; align-content: start; padding: 16px 18px; border-top: 2px solid var(--code); background: var(--surface); border-radius: 0 0 var(--radius) var(--radius); }
+.idea.m { border-top-color: var(--model); }
+.idea p { font-size: 0.93rem; color: var(--muted); }
+
+.triggers { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.trig { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; background: var(--surface); display: grid; gap: 4px; align-content: start; }
+.trig .tag { font-family: var(--f-mono); font-size: 0.75rem; color: var(--code); }
+.trig p { font-size: 0.9rem; color: var(--muted); }
+
+/* inventory */
+.inv { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+.inv-card {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0;
+}
+.inv-card .count { font-family: var(--f-display); font-size: 2rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.inv-card .count small { font-size: 0.95rem; font-weight: 500; color: var(--muted); margin-left: 6px; font-family: var(--f-body); }
+.inv-card h3 { margin: 0; font-size: 1.02rem; }
+.inv-card p { font-size: 0.88rem; color: var(--muted); }
+.inv-card .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  font-family: var(--f-mono); font-size: 0.72rem; padding: 2px 7px; border-radius: 999px;
+  background: var(--sunk); border: 1px solid var(--line); color: var(--ink); white-space: nowrap;
+}
+.chip.m { background: var(--model-soft); border-color: transparent; }
+.chip.c { background: var(--code-soft); border-color: transparent; }
+.inv-card a.more { font-size: 0.82rem; }
+
+/* figures */
+figure.diagram { margin: 0; display: grid; gap: 10px; }
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.scroll-x svg { display: block; width: 100%; height: auto; min-width: 780px; }
+figcaption { font-size: 0.875rem; color: var(--muted); max-width: 80ch; }
+svg text { font-family: var(--f-body); fill: var(--ink); }
+svg .t { font-size: 13px; font-weight: 600; }
+svg .s { font-size: 11px; fill: var(--muted); }
+svg .lb { font-size: 11px; fill: var(--muted); }
+svg .mono { font-family: var(--f-mono); font-size: 12px; }
+svg .n { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+svg .n-code { fill: var(--code-soft); stroke: var(--code); stroke-width: 1.5; }
+svg .n-model { fill: var(--model-soft); stroke: var(--model); stroke-width: 1.5; }
+svg .n-db { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; stroke-dasharray: 5 4; }
+svg .n-bad { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.4; }
+svg .n-good { fill: var(--good-soft); stroke: var(--good); stroke-width: 1.4; }
+svg .region { fill: var(--sunk); stroke: var(--line); stroke-width: 1; }
+svg .a { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+svg .a-m { stroke: var(--model); stroke-width: 1.8; fill: none; }
+svg .a-c { stroke: var(--code); stroke-width: 1.6; fill: none; }
+svg .a-bad { stroke: var(--bad); stroke-width: 1.5; fill: none; }
+svg .a-dash { stroke: var(--muted); stroke-width: 1.3; fill: none; stroke-dasharray: 5 4; }
+svg .life { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5; }
+svg .ah { fill: var(--muted); }
+svg .ah-m { fill: var(--model); }
+svg .ah-c { fill: var(--code); }
+svg .ah-bad { fill: var(--bad); }
+
+/* steps timeline */
+ol.steps { list-style: none; padding: 0; display: grid; gap: 0; counter-reset: step; max-width: 78ch; }
+ol.steps > li { position: relative; padding: 0 0 22px 52px; margin: 0; counter-increment: step; }
+ol.steps > li::before {
+  content: counter(step); position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; font-family: var(--f-mono); font-size: 0.85rem; font-weight: 500;
+  background: var(--surface); border: 1.5px solid var(--code); color: var(--code);
+}
+ol.steps > li.m::before { border-color: var(--model); color: var(--model); }
+ol.steps > li::after { content: ""; position: absolute; left: 15.5px; top: 34px; bottom: 2px; width: 1.5px; background: var(--line); }
+ol.steps > li:last-child::after { display: none; }
+ol.steps h4 { padding-top: 4px; }
+ol.steps p, ol.steps ul { margin-top: 6px; font-size: 0.95rem; }
+.where { display: inline-block; margin-top: 8px; font-family: var(--f-mono); font-size: 0.75rem; color: var(--muted); }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-family: inherit; font-size: 0.9rem; line-height: 1.5; color: inherit; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; background: var(--sunk); white-space: nowrap; }
+td code { white-space: nowrap; }
+td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; }
+table.matrix td.y { text-align: center; color: var(--code); font-weight: 700; }
+table.matrix td.n { text-align: center; color: var(--line); }
+table.matrix th.stage { text-align: center; white-space: normal; min-width: 92px; }
+.group-row td { background: var(--sunk); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; padding-block: 6px; }
+.pill { display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.pill.hard { background: var(--bad-soft); color: var(--bad); }
+.pill.style { background: var(--model-soft); color: var(--model); }
+.pill.w { background: var(--code-soft); color: var(--code); }
+.pill.r { background: var(--sunk); color: var(--muted); }
+
+/* code */
+pre.code {
+  margin: 0; overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; font-family: var(--f-mono); font-size: 0.8rem; line-height: 1.55; color: var(--ink);
+}
+pre.code .c { color: var(--muted); }
+pre.code .k { color: var(--code); font-weight: 500; }
+pre.code .m { color: var(--model); font-weight: 500; }
+.codehead { font-family: var(--f-mono); font-size: 0.75rem; color: var(--muted); margin-bottom: -12px; }
+
+/* prompt stack */
+.stack { display: grid; gap: 6px; max-width: 900px; }
+.layer { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; padding: 11px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); font-size: 0.9rem; }
+.layer .role { font-family: var(--f-mono); font-size: 0.78rem; color: var(--muted); padding-top: 2px; }
+.layer.sys { border-left: 4px solid var(--code); }
+.layer.hist { border-left: 4px solid var(--muted); }
+.layer.turn { border-left: 4px solid var(--model); }
+.layer.tools { border-left: 4px dashed var(--code); }
+.layer p { min-width: 0; }
+@media (max-width: 560px) { .layer { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+
+/* two columns */
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.split > * { min-width: 0; }
+.panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 16px 18px; display: grid; gap: 10px; align-content: start; }
+.panel h3 { margin: 0; font-size: 1.02rem; }
+.panel.m { border-top: 3px solid var(--model); }
+.panel.c { border-top: 3px solid var(--code); }
+.panel ul { font-size: 0.92rem; }
+
+/* chat card sample */
+.dm { max-width: 360px; display: grid; gap: 8px; }
+.bubble { border-radius: 16px; padding: 10px 14px; font-size: 0.92rem; white-space: pre-line; line-height: 1.45; }
+.bubble.in { background: var(--sunk); border-bottom-left-radius: 4px; justify-self: start; }
+.bubble.out { background: var(--code-soft); border-bottom-right-radius: 4px; justify-self: end; }
+.btns { display: flex; gap: 8px; justify-content: flex-end; }
+.btns span { border: 1px solid var(--code); color: var(--code); border-radius: 999px; padding: 3px 14px; font-size: 0.85rem; font-weight: 600; }
+
+/* try-it widgets */
+.tool-ui { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 18px; display: grid; gap: 14px; }
+.tool-ui .row { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 12px; }
+@media (max-width: 640px) { .tool-ui .row { grid-template-columns: minmax(0, 1fr); } }
+.tool-ui label { display: grid; gap: 4px; font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+.tool-ui input[type="text"], .tool-ui select {
+  font: inherit; font-size: 0.95rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 9px 11px; width: 100%; min-width: 0;
+}
+.checks { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 0.88rem; }
+.checks label { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; color: var(--ink); font-size: 0.88rem; }
+.examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.examples button {
+  font: inherit; font-size: 0.8rem; color: var(--ink); background: var(--sunk); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 10px; cursor: pointer;
+}
+.examples button:hover { border-color: var(--code); }
+.result { display: grid; gap: 4px; padding: 12px 14px; border-radius: 8px; background: var(--code-soft); }
+.result .big { font-family: var(--f-mono); font-size: 1.05rem; font-weight: 500; color: var(--ink); }
+.result .why { font-size: 0.86rem; color: var(--muted); }
+.result.model { background: var(--model-soft); }
+
+/* Q&A */
+.qa-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.btn {
+  font: inherit; font-size: 0.86rem; font-weight: 600; color: var(--code); background: var(--surface);
+  border: 1.5px solid var(--code); border-radius: 999px; padding: 5px 14px; cursor: pointer;
+}
+.btn:hover { background: var(--code-soft); }
+.qa { display: grid; gap: 10px; }
+.qa details { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.qa summary { cursor: pointer; padding: 13px 16px; font-weight: 600; list-style: none; display: grid; grid-template-columns: 1.6em 1fr; gap: 6px; }
+.qa summary::-webkit-details-marker { display: none; }
+.qa summary .qn { font-family: var(--f-mono); font-size: 0.8rem; color: var(--muted); padding-top: 2px; }
+.qa .ans { padding: 0 16px 15px 16px; display: grid; gap: 8px; font-size: 0.94rem; max-width: 82ch; }
+.qa .ans p, .qa .ans li { color: var(--ink); }
+
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.flag { display: grid; gap: 4px; padding: 12px 14px; border-radius: 8px; border-left: 3px solid var(--model); background: var(--surface); font-size: 0.92rem; }
+.flag.found { border-left-color: var(--bad); }
+.flag b { font-weight: 600; }
+
+footer { border-top: 1px solid var(--line); padding-top: 18px; font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-width: 80ch; }
+</style>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <div class="toc-title">Contents</div>
+  <ol>
+    <li><a href="#overview"><span>1</span>The short version</a></li>
+    <li><a href="#inventory"><span>2</span>What it is made of</a></li>
+    <li><a href="#architecture"><span>3</span>Architecture</a></li>
+    <li><a href="#first-message"><span>4</span>The first message</a></li>
+    <li><a href="#playbooks"><span>5</span>Choosing a playbook</a></li>
+    <li><a href="#context"><span>6</span>The next message</a></li>
+    <li><a href="#memory"><span>7</span>Memory</a></li>
+    <li><a href="#tools"><span>8</span>Tool calling</a></li>
+    <li><a href="#state"><span>9</span>State</a></li>
+    <li><a href="#guardrails"><span>10</span>Guardrails</a></li>
+    <li><a href="#reliability"><span>11</span>Reliability</a></li>
+    <li><a href="#owner"><span>12</span>The shop owner</a></li>
+    <li><a href="#events"><span>13</span>Payments and events</a></li>
+    <li><a href="#ops"><span>14</span>Modes, traces, evals</a></li>
+    <li><a href="#status"><span>15</span>Status</a></li>
+    <li><a href="#interview"><span>16</span>Interview questions</a></li>
+    <li><a href="#files"><span>17</span>Where things are</a></li>
+  </ol>
+</nav>
+
+<main id="top">
+
+<header class="hero">
+  <div class="eyebrow">sellix · backend · agent harness</div>
+  <h1>Sellix Agent Harness</h1>
+  <p class="lede">How the sellix backend answers a shop's Instagram DMs: the webhook that receives a customer's first message, the job that starts a turn, the engine that runs the model with tools, and the playbooks, memory, state and checks around it, up to the reply leaving through the outbox. Everything on this page was read from the code. Project status comes from the team's handoff notes.</p>
+  <div class="facts">
+    <span>Branch <b>feat/preorders-and-agent-hardening</b></span>
+    <span>Commit <b>c3b2994</b>, 9 Nov 2026, same as origin</span>
+    <span>Engine <b>v2</b> (<code>backend/app/modules/agent/</code>)</span>
+    <span>Python 3.12 · FastAPI · Postgres 17 · procrastinate</span>
+  </div>
+  <div class="legend" aria-label="Colour key">
+    <span class="key"><span class="swatch model"></span>the model decides</span>
+    <span class="key"><span class="swatch code"></span>code decides</span>
+    <span class="key"><span class="swatch db"></span>a Postgres table</span>
+  </div>
+</header>
+
+<!-- 1 -->
+<section id="overview">
+  <div class="sec-head"><span class="sec-num">§1</span><h2>The short version</h2></div>
+  <p class="thesis">The <em>model chooses tools and writes words</em>. <strong>Code owns everything that can cost money or trust</strong>: which tools exist right now, every price, total and link, every change of state, whether a "yes" places an order, and whether a reply may be sent at all.</p>
+  <div class="ideas">
+    <div class="idea"><h4>A tool-calling loop, built in-house</h4><p><code>engine.py</code> calls the model with the tools the chat's stage allows, runs the tool calls it returns, feeds the results back, and stops when <code>send_reply</code> passes the output checks. There is no agent framework.</p></div>
+    <div class="idea"><h4>A state machine gates the tools</h4><p>Each chat is in one of five stages (<code>conversations.order_stage</code>). Only tools move it, and the model only sees the tools its stage allows: <code>confirm_order</code> does not exist until <code>create_quote</code> has queued a quote card.</p></div>
+    <div class="idea"><h4>Code picks the playbook</h4><p>Ordered regex rules on the stage and the latest message pick one of 11 playbooks per turn. The playbook is a markdown prompt added to the system prompt, the project's version of a "skill".</p></div>
+    <div class="idea"><h4>Tokens instead of facts</h4><p>The model writes <code>[[price:i3f9a2c]]</code>, <code>[[quote_total]]</code>, <code>[[payment_link]]</code>. Code fills them from the database when the reply is sent, and rejects any amount, link or item id the model typed itself.</p></div>
+    <div class="idea"><h4>Durable from webhook to send</h4><p>A webhook inbox, a job queue in Postgres, a trace row for every turn and every step, and an outbox. A crashed turn resumes from its stored steps without placing an order or sending a message twice.</p></div>
+    <div class="idea m"><h4>Never silent, owner in the loop</h4><p>When a turn can't finish, code sends a fixed message and asks the shop owner. The owner's answer comes back as a shop event that starts a new turn, which passes it on in the customer's language.</p></div>
+  </div>
+  <div class="prose">
+    <h3>Three things start a turn</h3>
+    <p>Every turn answers one row in the <code>messages</code> table, called the trigger. Three kinds of row can be a trigger, and all three take the same path into the engine.</p>
+  </div>
+  <div class="triggers">
+    <div class="trig"><span class="tag">sender = customer</span><h4>A customer message</h4><p>A DM, a story reply, a photo, or a tap on a button (Confirm, Change, New payment link, a choice).</p></div>
+    <div class="trig"><span class="tag">sender = system · event</span><h4>A shop event</h4><p>Payment received, paid after items sold out, hold expired. Written by code as a system note with the event as data.</p></div>
+    <div class="trig"><span class="tag">event = owner_answered</span><h4>The owner's answer</h4><p>The shop owner answered an "Ask me" question in the app. It becomes a system note and gets its own playbook.</p></div>
+  </div>
+</section>
+
+<!-- 2 -->
+<section id="inventory">
+  <div class="sec-head"><span class="sec-num">§2</span><h2>What the harness is made of</h2></div>
+  <p class="prose">Counts were taken from the code on 9 Nov 2026 by importing the tool registry and the prompt store, not from the docs.</p>
+  <div class="inv">
+    <div class="inv-card">
+      <div class="count">20<small>tools</small></div>
+      <h3>Tools the model can call</h3>
+      <p>Each is a Python class with typed arguments, the stages it is allowed in, and a description loaded from a prompt file.</p>
+      <div class="chips"><span class="chip">catalogue 2</span><span class="chip">orders 6</span><span class="chip">owner 2</span><span class="chip">memory 4</span><span class="chip">media 5</span><span class="chip c">send_reply</span></div>
+      <a class="more" href="#tools">All 20 tools</a>
+    </div>
+    <div class="inv-card">
+      <div class="count">11<small>playbooks</small></div>
+      <h3>Playbooks (the "skills")</h3>
+      <p>One markdown prompt per situation. Code picks one per turn; the model may load one more with <code>load_playbook</code>.</p>
+      <div class="chips"><span class="chip">new_order</span><span class="chip">menu</span><span class="chip">owner_answer</span><span class="chip">payment_problem</span><span class="chip">+7</span></div>
+      <a class="more" href="#playbooks">How one is chosen</a>
+    </div>
+    <div class="inv-card">
+      <div class="count">54<small>prompt files</small></div>
+      <h3>Prompts with versions</h3>
+      <p><code>base@4</code>, <code>context@5</code>, 11 playbooks, 20 tool descriptions, 9 helper prompts (nudge, JSON tool mode, history wrappers, summariser, classifier, vision) and 12 legacy v1 prompts. Each turn records the <code>id@version</code> of every prompt it used.</p>
+    </div>
+    <div class="inv-card">
+      <div class="count">22<small>fixed messages</small></div>
+      <h3>Templates sent by code</h3>
+      <p>Quote card, payment link, holding message, hand-off, payment retries, order status updates. YAML, up to five languages each: <code>en</code>, <code>ta</code>, <code>ta-en</code>, <code>hi</code>, <code>hi-en</code>. The model never writes these.</p>
+    </div>
+    <div class="inv-card">
+      <div class="count">2<small>gates</small></div>
+      <h3>Guardrails</h3>
+      <p>An inbound gate before any model call (too long, rate limit, daily budget) and output checks on every reply: 11 that reject, 3 about tone that code can tidy.</p>
+      <a class="more" href="#guardrails">Every check</a>
+    </div>
+    <div class="inv-card">
+      <div class="count">4<small>stores</small></div>
+      <h3>Long-term memory</h3>
+      <p>Customer facts, summaries of long chats, the owner's saved answers, and a glossary of code-mixed words. Plus the turn's own working memory.</p>
+      <a class="more" href="#memory">Who reads and writes</a>
+    </div>
+    <div class="inv-card">
+      <div class="count">5<small>stages</small></div>
+      <h3>State machines</h3>
+      <p>Conversation stage (5), turn status (5), quote status (4), outbox row status, engine mode per shop (v1, v2, shadow, draft).</p>
+      <div class="chips"><span class="chip">browsing</span><span class="chip">collecting_details</span><span class="chip">awaiting_confirmation</span><span class="chip">payment_pending</span><span class="chip">handed_off</span></div>
+    </div>
+    <div class="inv-card">
+      <div class="count">14<small>jobs</small></div>
+      <h3>Background jobs</h3>
+      <p>procrastinate, stored in Postgres. 6 are triggered (webhook events, turns, sends), 8 run on a schedule (outbox sweep, reconciler, window warnings, summaries, order expiry, payment settling, refunds, token refresh).</p>
+    </div>
+    <div class="inv-card">
+      <div class="count">1<small>model gateway</small></div>
+      <h3>One way to call a model</h3>
+      <p><code>llm.py</code>: OpenAI-compatible chat completions, native or JSON-mode tool calls, retries with backoff, fallback models, a circuit breaker, cost per call.</p>
+    </div>
+    <div class="inv-card">
+      <div class="count">48<small>scenarios</small></div>
+      <h3>Live evals</h3>
+      <p>Multi-turn conversations in 5 datasets, run against the real model through the simulator API. A prompt or tool change needs two runs and a CHANGELOG row.</p>
+    </div>
+  </div>
+
+  <h3>The budgets that bound one turn</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Setting</th><th class="num">Default</th><th>What it bounds</th></tr></thead>
+    <tbody>
+      <tr><td><code>turn_batch_seconds</code></td><td class="num">3 s</td><td>Wait before a turn starts, so a burst of messages gets one reply</td></tr>
+      <tr><td><code>history_messages</code></td><td class="num">20</td><td>Messages of the chat the model sees</td></tr>
+      <tr><td><code>agent_max_model_calls</code></td><td class="num">6</td><td>Model calls per turn</td></tr>
+      <tr><td><code>agent_max_tool_calls</code></td><td class="num">10</td><td>Tool calls per turn</td></tr>
+      <tr><td><code>agent_turn_deadline_seconds</code></td><td class="num">60 s</td><td>Wall-clock time per turn, model retries included</td></tr>
+      <tr><td><code>agent_repair_attempts</code></td><td class="num">1</td><td>Second tries after a reply fails the output checks</td></tr>
+      <tr><td><code>agent_self_answer_confidence</code></td><td class="num">75</td><td>An owner question with this confidence or more is sent back once</td></tr>
+      <tr><td><code>agent_order_days_ahead</code></td><td class="num">14</td><td>How far ahead a pre-order may be dated</td></tr>
+      <tr><td><code>agent_max_images_per_turn</code></td><td class="num">3</td><td>Photos sent to the vision model per turn</td></tr>
+      <tr><td><code>agent_turns_per_hour</code> / <code>_per_day</code></td><td class="num">30 / 150</td><td>Turns per chat before the rate-limit template</td></tr>
+      <tr><td><code>agent_daily_budget_usd</code></td><td class="num">$1.00</td><td>Model spend per shop per day (overridden by the shop's own budget)</td></tr>
+      <tr><td><code>llm_timeout_seconds</code></td><td class="num">20 s</td><td>Read timeout of one model request (connect timeout is 5 s)</td></tr>
+    </tbody>
+  </table></div>
+  <p class="small muted">Source: <code>backend/app/core/config.py</code>. Each can be overridden by an environment variable of the same name in upper case.</p>
+</section>
+
+<!-- 3 -->
+<section id="architecture">
+  <div class="sec-head"><span class="sec-num">§3</span><h2>Architecture</h2></div>
+  <figure class="diagram">
+    <div class="scroll-x">
+    <svg viewBox="0 0 1160 600" role="img" aria-label="Every path into and out of the agent goes through a Postgres table: the webhook inbox, the messages table, the job queue, the trace tables and the outbox. Only the engine calls the model, through one gateway.">
+      <defs>
+        <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ar1m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <!-- top row: inbound -->
+      <rect class="n" x="20" y="130" width="180" height="70" rx="9"/>
+      <text class="t" x="110" y="160" text-anchor="middle">Customer</text>
+      <text class="s" x="110" y="180" text-anchor="middle">Instagram DM or simulator</text>
+
+      <rect class="n" x="250" y="130" width="180" height="70" rx="9"/>
+      <text class="t" x="340" y="160" text-anchor="middle">Webhook route</text>
+      <text class="s" x="340" y="180" text-anchor="middle">verify HMAC · answer 200</text>
+
+      <rect class="n-db" x="480" y="130" width="180" height="70" rx="9"/>
+      <text class="t mono" x="570" y="160" text-anchor="middle">webhook_events</text>
+      <text class="s" x="570" y="180" text-anchor="middle">stored once (sha256)</text>
+
+      <rect class="n" x="710" y="130" width="180" height="70" rx="9"/>
+      <text class="t mono" x="800" y="160" text-anchor="middle">process_meta_event</text>
+      <text class="s" x="800" y="180" text-anchor="middle">parse · upsert chat · store</text>
+
+      <rect class="n-db" x="940" y="130" width="200" height="70" rx="9"/>
+      <text class="t mono" x="1040" y="160" text-anchor="middle">messages</text>
+      <text class="s" x="1040" y="180" text-anchor="middle">one chat per customer</text>
+
+      <rect class="n" x="940" y="40" width="95" height="46" rx="8"/>
+      <text class="s" x="987" y="67" text-anchor="middle">Owner answer</text>
+      <rect class="n" x="1045" y="40" width="95" height="46" rx="8"/>
+      <text class="s" x="1092" y="67" text-anchor="middle">Payment event</text>
+      <line class="a" x1="987" y1="86" x2="987" y2="128" marker-end="url(#ar1)"/>
+      <line class="a" x1="1092" y1="86" x2="1092" y2="128" marker-end="url(#ar1)"/>
+      <text class="lb" x="1040" y="112" text-anchor="middle">system notes</text>
+
+      <line class="a" x1="200" y1="165" x2="248" y2="165" marker-end="url(#ar1)"/>
+      <text class="lb" x="225" y="157" text-anchor="middle">POST</text>
+      <line class="a" x1="430" y1="165" x2="478" y2="165" marker-end="url(#ar1)"/>
+      <text class="lb" x="455" y="157" text-anchor="middle">insert</text>
+      <line class="a" x1="660" y1="165" x2="708" y2="165" marker-end="url(#ar1)"/>
+      <text class="lb" x="685" y="157" text-anchor="middle">job</text>
+      <line class="a" x1="890" y1="165" x2="938" y2="165" marker-end="url(#ar1)"/>
+      <text class="lb" x="915" y="157" text-anchor="middle">insert</text>
+
+      <!-- right column: turn -->
+      <rect class="n-db" x="940" y="250" width="200" height="60" rx="9"/>
+      <text class="t" x="1040" y="275" text-anchor="middle">Turn job</text>
+      <text class="s mono" x="1040" y="294" text-anchor="middle">run_agent_turn_v2</text>
+      <line class="a" x1="1040" y1="200" x2="1040" y2="248" marker-end="url(#ar1)"/>
+      <text class="lb" x="1032" y="229" text-anchor="end">request_turn, 3 s later</text>
+
+      <rect class="n-code" x="940" y="360" width="200" height="70" rx="9"/>
+      <text class="t" x="1040" y="390" text-anchor="middle">Agent engine</text>
+      <text class="s" x="1040" y="410" text-anchor="middle">lock · gather · prompt · loop</text>
+      <line class="a" x1="1040" y1="310" x2="1040" y2="358" marker-end="url(#ar1)"/>
+      <text class="lb" x="1032" y="339" text-anchor="end">worker runs it</text>
+
+      <rect class="n-model" x="940" y="500" width="200" height="70" rx="9"/>
+      <text class="t" x="1040" y="530" text-anchor="middle">Model gateway</text>
+      <text class="s" x="1040" y="550" text-anchor="middle">OpenAI-compatible LLM</text>
+      <line class="a-m" x1="1040" y1="432" x2="1040" y2="498" marker-start="url(#ar1m)" marker-end="url(#ar1m)"/>
+      <text class="lb" x="1030" y="470" text-anchor="end">generate(messages, tools)</text>
+
+      <!-- middle: traces -->
+      <rect class="n-db" x="710" y="250" width="180" height="60" rx="9"/>
+      <text class="t mono" x="800" y="275" text-anchor="middle">agent_turns</text>
+      <text class="s mono" x="800" y="294" text-anchor="middle">turn_steps</text>
+      <line class="a" x1="940" y1="372" x2="892" y2="311" marker-end="url(#ar1)"/>
+      <text class="lb" x="896" y="334" text-anchor="end">traces</text>
+
+      <!-- bottom row: outbound, right to left -->
+      <rect class="n" x="710" y="360" width="180" height="70" rx="9"/>
+      <text class="t" x="800" y="390" text-anchor="middle">20 tools</text>
+      <text class="s" x="800" y="410" text-anchor="middle">orders · stock · payments · memory</text>
+      <line class="a" x1="940" y1="405" x2="892" y2="405" marker-end="url(#ar1)"/>
+      <text class="lb" x="915" y="397" text-anchor="middle">run</text>
+
+      <rect class="n-db" x="480" y="360" width="180" height="70" rx="9"/>
+      <text class="t mono" x="570" y="390" text-anchor="middle">outbound_messages</text>
+      <text class="s" x="570" y="410" text-anchor="middle">the outbox</text>
+      <line class="a" x1="710" y1="395" x2="662" y2="395" marker-end="url(#ar1)"/>
+      <text class="lb" x="685" y="387" text-anchor="middle">queue</text>
+
+      <rect class="n" x="250" y="360" width="180" height="70" rx="9"/>
+      <text class="t mono" x="340" y="390" text-anchor="middle">send_outbound</text>
+      <text class="s" x="340" y="410" text-anchor="middle">in order · 1 s apart · retries</text>
+      <line class="a" x1="480" y1="395" x2="432" y2="395" marker-end="url(#ar1)"/>
+      <text class="lb" x="455" y="387" text-anchor="middle">deliver</text>
+
+      <rect class="n" x="20" y="360" width="180" height="70" rx="9"/>
+      <text class="t" x="110" y="390" text-anchor="middle">Instagram Send API</text>
+      <text class="s" x="110" y="410" text-anchor="middle">only inside the 24 h window</text>
+      <line class="a" x1="250" y1="395" x2="202" y2="395" marker-end="url(#ar1)"/>
+      <text class="lb" x="225" y="387" text-anchor="middle">POST</text>
+      <line class="a" x1="110" y1="360" x2="110" y2="202" marker-end="url(#ar1)"/>
+      <text class="lb" x="118" y="285">reply arrives</text>
+
+      <!-- legend -->
+      <rect class="n" x="20" y="520" width="28" height="18" rx="4"/>
+      <text class="lb" x="56" y="533">code (API or worker)</text>
+      <rect class="n-db" x="200" y="520" width="28" height="18" rx="4"/>
+      <text class="lb" x="236" y="533">Postgres table</text>
+      <rect class="n-model" x="340" y="520" width="28" height="18" rx="4"/>
+      <text class="lb" x="376" y="533">the model</text>
+      <rect class="n-code" x="460" y="520" width="28" height="18" rx="4"/>
+      <text class="lb" x="496" y="533">the harness core</text>
+    </svg>
+    </div>
+    <figcaption>Every hop into and out of the agent goes through a Postgres table. The webhook route only verifies, stores and queues. The engine reads the chat, stock, quote and memory from Postgres at the start of each turn, records every step in <code>agent_turns</code> and <code>turn_steps</code>, and never sends anything itself: tools queue messages in the outbox and a separate job delivers them.</figcaption>
+  </figure>
+  <div class="split">
+    <div class="panel c">
+      <h3>Two processes, one database</h3>
+      <ul>
+        <li><b>API</b> (FastAPI, <code>app/main.py</code>): webhooks, the merchant app's <code>/v1</code> API, the simulator. It loads and checks every prompt file at start-up, so a broken prompt stops the app instead of a customer's turn.</li>
+        <li><b>Worker</b> (procrastinate, <code>python -m app.worker</code>): runs every job. In development it runs inside the API process (<code>RUN_WORKER_IN_PROCESS=true</code>); deployed, it is its own service.</li>
+        <li><b>Postgres</b> is the database, the job queue, the lock server (advisory locks) and the trace store. No Redis, no workflow engine.</li>
+      </ul>
+    </div>
+    <div class="panel c">
+      <h3>Module boundaries</h3>
+      <ul>
+        <li>Each module under <code>app/modules/</code> exposes <code>service.py</code> and <code>schemas.py</code>; other modules import only those. A unit test enforces the rule.</li>
+        <li>The agent reaches orders, stock, the catalogue, payments, escalations and conversations through their services. It never writes another module's tables directly.</li>
+        <li>Jobs are queued only after the transaction that created their data has committed, because the queue uses its own connections. A reconciler catches the rare lost enqueue.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 4 -->
+<section id="first-message">
+  <div class="sec-head"><span class="sec-num">§4</span><h2>The first message, step by step</h2></div>
+  <p class="prose">A new customer writes to the shop: <b>"Hi! Can I get 2 chocolate cookies for pickup this evening?"</b> These are the steps the code takes, in order. Teal steps are code; the amber step is where the model works.</p>
+  <ol class="steps">
+    <li>
+      <h4>Instagram delivers the webhook</h4>
+      <p>The route checks <code>X-Hub-Signature-256</code> (HMAC-SHA256 of the raw body with the app secret), stores the raw event in <code>webhook_events</code> with <code>dedupe_key = sha256(body)</code> and <code>ON CONFLICT DO NOTHING</code>, commits, queues <code>process_meta_event</code>, and answers 200 at once. If storing fails it answers an error, so Meta delivers again.</p>
+      <span class="where">app/webhooks/meta.py · receive_event · service.record_event</span>
+    </li>
+    <li>
+      <h4>A worker claims the event and stores the message</h4>
+      <p>The job locks the event row (<code>FOR UPDATE SKIP LOCKED</code>, status pending), parses Meta's payload into channel-neutral messages and calls <code>handle_incoming</code> for each. It retries up to 5 times with exponential waits.</p>
+      <span class="where">app/webhooks/tasks.py · process_meta_event</span>
+    </li>
+    <li>
+      <h4><code>handle_incoming</code> files the message under one chat</h4>
+      <ul>
+        <li>Finds the shop by its Instagram account id, upserts the customer, and gets or creates the one conversation for that customer (locked for the rest of the transaction).</li>
+        <li>An echo of the shop's own message is matched against the outbox. If the owner typed it in the Instagram app, the agent steps back from this chat (<code>agent_paused_reason = merchant_replied</code>).</li>
+        <li>Inserts the message (unique on shop and Instagram message id, so a redelivered webhook stores nothing), sets <code>last_customer_message_at</code> (this opens Instagram's 24-hour reply window), and releases outbox rows and owner answers that were waiting for the window.</li>
+        <li>More than 20 customer messages in 5 minutes counts as a burst: the message is stored but starts no turn.</li>
+      </ul>
+      <span class="where">app/modules/conversations/service.py · handle_incoming</span>
+    </li>
+    <li>
+      <h4>A turn is requested, 3 seconds later, one per chat</h4>
+      <p>After the commit, <code>request_turn</code> reads the shop's <code>agent_engine</code> and queues <code>run_agent_turn_v2</code> with three settings: <code>schedule_in</code> 3 s, <code>queueing_lock = turn:&lt;chat&gt;</code> (a second message inside those 3 s queues nothing; the waiting turn will see it) and <code>lock = conversation:&lt;chat&gt;</code> (turns of one chat never run side by side). The job gets up to 3 attempts, 5 s apart.</p>
+      <span class="where">app/modules/conversations/tasks.py · request_turn</span>
+    </li>
+    <li>
+      <h4>The engine takes the chat's lock</h4>
+      <p>A Postgres advisory lock on <code>("agent_turn", chat id)</code>, waiting up to 90 s for a running copy to finish. This guards against a redelivered job, the reconciler or the simulator starting a second copy. Busy after 90 s: return, and the reconciler tries again.</p>
+      <span class="where">agent/engine.py · run_turn · core/locks.py</span>
+    </li>
+    <li>
+      <h4>Everything the turn reads, in one transaction</h4>
+      <p>Stage and draft, the shop, the last 20 messages (in causal order), the trigger, the business date, the 24-hour window, today's stock, the next 14 days' stock, the shop profile, the open quote, this chat's unpaid order numbers, open owner questions, the customer's remembered facts, the owner's saved answers, the glossary, and the latest summary.</p>
+      <span class="where">agent/engine.py · _gather</span>
+    </li>
+    <li>
+      <h4>Start the trace, or find this turn already done</h4>
+      <p><code>agent_turns</code> is unique on <code>(conversation_id, trigger_message_id)</code>. A new row means a new turn. A finished row means the message was already answered: stop. A <code>running</code> row means an earlier attempt crashed: load its stored steps and resume.</p>
+      <span class="where">agent/tracing.py · start</span>
+    </li>
+    <li>
+      <h4>Pick the playbook and build the prompt</h4>
+      <p><code>choose_playbook("browsing", "Hi! Can I get 2 chocolate cookies…")</code> matches no special rule and falls through to <code>new_order</code>. The system prompt is <code>base.md</code> + <code>playbook.new_order</code> + <code>context.md</code> filled with the gathered data; the chat follows as user and assistant messages (§6).</p>
+      <span class="where">agent/context.py · choose_playbook · build</span>
+    </li>
+    <li>
+      <h4>The inbound gate</h4>
+      <p>No model call if the message is over 4,000 characters, the chat has used its turns for the hour or day, or the shop's daily AI budget is spent. Each sends a fixed template instead (§10).</p>
+      <span class="where">agent/guardrails/inbound.py · check</span>
+    </li>
+    <li class="m">
+      <h4>The loop: the model calls tools until a reply is accepted</h4>
+      <p>First, a tapped button is handled by code (none here). Then the model gets the messages and the 16 tools allowed in <code>browsing</code>. Each response's tool calls run in order; each result goes back as a <code>tool</code> message. The tool list is recomputed before every model call, so after <code>create_quote</code> moves the chat to <code>awaiting_confirmation</code> the model sees <code>confirm_order</code> and no longer sees <code>create_quote</code>. The trace below shows a typical run.</p>
+      <span class="where">agent/engine.py · _loop · _model_step · _tool_step</span>
+    </li>
+    <li>
+      <h4>Finish the trace</h4>
+      <p>The turn row gets its status (<code>replied</code>), the stage after, the playbook, every prompt version used, the models, token counts, cost and latency.</p>
+      <span class="where">agent/tracing.py · finish</span>
+    </li>
+    <li>
+      <h4>Deliver the outbox</h4>
+      <p>The quote card and the reply go out in queue order, at least 1 s apart. When the card is delivered, the outbox marks the quote as shown; only then can it be confirmed.</p>
+      <span class="where">conversations/outbox.py · deliver · _after_delivery</span>
+    </li>
+  </ol>
+
+  <h3>What the model did in that turn</h3>
+  <p class="prose small muted">Illustrative: ids, stock and wording are examples. The shape of each step, its idempotency key and the stage changes are what the code produces. The eval scenario <code>en-standard-order</code> expects this turn to call <code>create_quote</code> and end in <code>awaiting_confirmation</code>. The model may skip <code>search_catalog</code> when the id is already in today's menu, and may return several tool calls in one response.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Step key in <code>turn_steps</code></th><th>Who</th><th>What happened</th><th>Stage after</th></tr></thead>
+    <tbody>
+      <tr><td><code>&lt;turn&gt;:0:model</code></td><td><span class="pill style">model</span></td><td>Calls <code>search_catalog {"query": "chocolate cookie"}</code></td><td>browsing</td></tr>
+      <tr><td><code>&lt;turn&gt;:0:0:search_catalog</code></td><td><span class="pill w">code</span></td><td><code>{"ok": true, "data": {"items": [{"id": "i3f9a2c", "name": "Chocolate cookie", "available_today": 12, "price": "[[price:i3f9a2c]]"}]}}</code></td><td>browsing</td></tr>
+      <tr><td><code>&lt;turn&gt;:1:model</code></td><td><span class="pill style">model</span></td><td>Calls <code>update_order_draft {"items": [{"item_id": "i3f9a2c", "quantity": 2}], "fulfilment": "pickup", "needed_by": "this evening"}</code></td><td>browsing</td></tr>
+      <tr><td><code>&lt;turn&gt;:1:0:update_order_draft</code></td><td><span class="pill w">code</span></td><td>Saves the draft on the conversation row; returns <code>"missing": [], "stock_problems": [], "next": "create_quote"</code></td><td>collecting_details</td></tr>
+      <tr><td><code>&lt;turn&gt;:2:model</code></td><td><span class="pill style">model</span></td><td>Calls <code>create_quote {}</code></td><td>collecting_details</td></tr>
+      <tr><td><code>&lt;turn&gt;:2:0:create_quote</code></td><td><span class="pill w">code</span></td><td>Prices the draft, saves a quote (expires in 2 h or at the end of the business day), queues the quote card with Confirm and Change buttons; returns <code>"total": "[[quote_total]]"</code> and "don't repeat the items"</td><td>awaiting_confirmation</td></tr>
+      <tr><td><code>&lt;turn&gt;:3:model</code></td><td><span class="pill style">model</span></td><td>Calls <code>send_reply {"text": "Here you go! Tap Confirm on the card to place it.", "language": "en"}</code></td><td>awaiting_confirmation</td></tr>
+      <tr><td><code>&lt;turn&gt;:3:0:send_reply</code></td><td><span class="pill w">code</span></td><td>Output checks pass, tokens filled, reply queued with key <code>turn:&lt;turn&gt;:reply</code>; the loop ends with <code>replied</code></td><td>awaiting_confirmation</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="split">
+    <div class="panel">
+      <h3>What the customer receives</h3>
+      <div class="dm" aria-label="Example Instagram chat">
+        <div class="bubble in">Hi! Can I get 2 chocolate cookies for pickup this evening?</div>
+        <div class="bubble out">Your order:
+• 2 × Chocolate cookie: ₹120
+Total: ₹120
+Pickup at the shop, this evening
+Tap Confirm to place the order, or Change to edit it.</div>
+        <div class="btns"><span>Confirm</span><span>Change</span></div>
+        <div class="bubble out">Here you go! Tap Confirm on the card to place it.</div>
+      </div>
+      <p class="small muted">The card is the real <code>quote_card@2</code> template rendered by <code>prompt_store.text</code>; the price is an example. The card is written by code, so the model never types the total.</p>
+    </div>
+    <div class="panel">
+      <h3>When the customer taps Confirm</h3>
+      <p class="small">The tap arrives as a message whose payload is <code>CONFIRM:&lt;quote id&gt;</code>. Before any model call, <code>_apply_tap</code> ("layer 0") runs <code>confirm()</code> in code: the card must have been delivered before this message, the quote must be open and unexpired, the customer may not already have 2 unpaid orders, and the price must not have changed. The order is placed, stock is held for 15 minutes, the stage becomes <code>payment_pending</code>, and code queues the payment message.</p>
+      <p class="small">The engine then appends the tap as a synthetic <code>confirm_order</code> call and its result, so the model only has to write a one-line thank-you.</p>
+      <span class="where">agent/engine.py · _apply_tap · tools/orders.py · confirm · orders/service.py · confirm_quote</span>
+    </div>
+  </div>
+</section>
+
+<!-- 5 -->
+<section id="playbooks">
+  <div class="sec-head"><span class="sec-num">§5</span><h2>Choosing a playbook</h2></div>
+  <div class="prose">
+    <p>A playbook is a short markdown prompt for one situation (taking an order, a payment question, the owner's answer). It sits between <code>base.md</code> and the context block in the system prompt. Exactly one is chosen per turn, by code, before the model is called.</p>
+    <p><code>choose_playbook(stage, text, details)</code> reads three inputs: the chat's stage, the text of the latest customer message, and the trigger's details (an event, a story reply, attachments). The rules run in this order and the first match wins.</p>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th class="num">#</th><th>If</th><th>Playbook</th><th>Why this order</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>The trigger is the owner's answer (<code>event = owner_answered</code>)</td><td><code>owner_answer</code></td><td>The answer comes first, whatever the stage</td></tr>
+      <tr><td class="num">2</td><td>Stage is <code>collecting_details</code> or <code>awaiting_confirmation</code></td><td><code>new_order</code></td><td>Mid-order, stay on the order (off-topic mid-order is handled by <code>base</code> rule 7)</td></tr>
+      <tr><td class="num">3</td><td>A story reply or an attachment</td><td><code>story_or_photo</code></td><td>The text alone can't say what they mean</td></tr>
+      <tr><td class="num">4</td><td>Complaint words: refund, stale, damaged, wrong size, not received, <i>kharab</i>…</td><td><code>complaint</code></td><td>An unhappy customer outranks everything below</td></tr>
+      <tr><td class="num">5</td><td>Menu words (menu, what do you have, anything else, show me…) and no product-detail word</td><td><code>menu</code></td><td>Also while payment is pending: it isn't a payment question</td></tr>
+      <tr><td class="num">6</td><td>Stage is <code>payment_pending</code></td><td><code>order_status</code> if status words, else <code>payment_problem</code></td><td>An unpaid order is the likely subject</td></tr>
+      <tr><td class="num">7</td><td>Status words: where is, status, when will, <i>eppo varum</i>, <i>kab aayega</i>…</td><td><code>order_status</code></td><td></td></tr>
+      <tr><td class="num">8</td><td>Product-detail words: ingredient, allergen, eggless, size, fabric, colour, return, warranty…</td><td><code>product_question</code></td><td>Facts must come from <code>get_product_details</code></td></tr>
+      <tr><td class="num">9</td><td>Custom or dated: custom, birthday, bulk, tomorrow, a weekday, <i>naalaikku</i>…</td><td><code>custom_or_future_order</code></td><td>Pre-order or owner decision</td></tr>
+      <tr><td class="num">10</td><td>The whole message is a greeting (hi, hello, vanakkam, good morning)</td><td><code>small_talk</code></td><td>A greeting must not list products</td></tr>
+      <tr><td class="num">11</td><td>Off-topic (code, homework, maths, trivia, jokes, politics, weather) or an insult</td><td><code>abuse_or_off_topic</code></td><td>Placed late, with narrow phrases, so shop questions win</td></tr>
+      <tr><td class="num">12</td><td>Nothing matched</td><td><code>new_order</code></td><td>A shop chat is most often an order</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="tool-ui" id="router">
+    <h3>Try the router</h3>
+    <div class="row">
+      <label for="rt-text">Latest customer message
+        <input type="text" id="rt-text" value="what do you have today?" autocomplete="off">
+      </label>
+      <label for="rt-stage">Stage
+        <select id="rt-stage">
+          <option value="browsing" selected>browsing</option>
+          <option value="collecting_details">collecting_details</option>
+          <option value="awaiting_confirmation">awaiting_confirmation</option>
+          <option value="payment_pending">payment_pending</option>
+        </select>
+      </label>
+    </div>
+    <div class="checks">
+      <label for="rt-media"><input type="checkbox" id="rt-media"> Story reply or photo attached</label>
+      <label for="rt-owner"><input type="checkbox" id="rt-owner"> The trigger is the owner's answer</label>
+    </div>
+    <div class="examples" aria-label="Example messages">
+      <button type="button" data-ex="hi">hi</button>
+      <button type="button" data-ex="is the brownie eggless?">is the brownie eggless?</button>
+      <button type="button" data-ex="can I get a birthday cake for saturday">birthday cake for saturday</button>
+      <button type="button" data-ex="where is my order">where is my order</button>
+      <button type="button" data-ex="the cake was stale, not happy">the cake was stale</button>
+      <button type="button" data-ex="write a python program for fibonacci">python fibonacci</button>
+      <button type="button" data-ex="2 chocolate cookies for pickup">2 cookies for pickup</button>
+      <button type="button" data-ex="what else do you have" data-stage="payment_pending">"what else do you have" while paying</button>
+    </div>
+    <div class="result" id="rt-out" aria-live="polite">
+      <span class="big" id="rt-pb">menu</span>
+      <span class="why" id="rt-why">Rule 5: menu words and no product-detail word.</span>
+    </div>
+    <p class="small muted">A JavaScript copy of the regexes in <code>context.py</code>, checked against the Python on 58 test messages. It matches the Python for English text; for Tamil or Devanagari script the Python code is the reference.</p>
+  </div>
+
+  <h3>The 11 playbooks</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Playbook</th><th>Version</th><th>What it tells the model</th></tr></thead>
+    <tbody>
+      <tr><td><code>new_order</code></td><td>5</td><td>Find items, save them with <code>update_order_draft</code>, ask for what is missing one question at a time, <code>create_quote</code>, and call <code>confirm_order</code> only on a clear "confirm". Pre-orders take a <code>date</code>.</td></tr>
+      <tr><td><code>menu</code></td><td>2</td><td>At most six of today's items with price tokens, then a narrowing question or the menu photo; then every open pre-order. Don't repeat items or greet again.</td></tr>
+      <tr><td><code>owner_answer</code></td><td>2</td><td>Pass the owner's answer on and say which question it settles. Don't re-answer older messages, add promises, or ask the owner again.</td></tr>
+      <tr><td><code>payment_problem</code></td><td>2</td><td>"I paid": thank them, the provider confirms. Cancel: <code>cancel_order</code>. Link again: <code>resend_payment_link</code>. Anything else: ask the owner.</td></tr>
+      <tr><td><code>custom_or_future_order</code></td><td>5</td><td>Listed pre-orders are on sale: take them. Personalised, bulk, unlisted days: <code>ask_shop_owner</code> in the same turn as saying you'll check.</td></tr>
+      <tr><td><code>product_question</code></td><td>2</td><td>Answer only from <code>get_product_details</code> and the profile; empty means ask the owner.</td></tr>
+      <tr><td><code>order_status</code></td><td>1</td><td>Say what the chat and shop events show; otherwise ask the owner.</td></tr>
+      <tr><td><code>complaint</code></td><td>1</td><td>Apologise briefly, promise nothing, ask the owner or hand the chat off.</td></tr>
+      <tr><td><code>story_or_photo</code></td><td>1</td><td>Identify the item or ask which one; never guess from a picture you can't see.</td></tr>
+      <tr><td><code>small_talk</code></td><td>3</td><td>One warm line and a question; no product list in a greeting.</td></tr>
+      <tr><td><code>abuse_or_off_topic</code></td><td>2</td><td>Decline in one friendly line and offer the shop; answer "are you a bot?" honestly; hand abuse to the owner.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="split">
+    <div class="panel">
+      <h3>Switching mid-turn</h3>
+      <p class="small">The model can call <code>load_playbook(name)</code> once per turn when the conversation clearly moved to another situation. The playbook's text comes back as the tool result. Nine playbooks can be loaded this way; <code>menu</code> and <code>owner_answer</code> are left out of the tool's list, so they can only be chosen by the router.</p>
+    </div>
+    <div class="panel">
+      <h3>Why regex, not a classifier</h3>
+      <p class="small">A recorded team decision (HANDOFF §5): cheap, fast, deterministic and unit-tested. The planned next step, if traces show misrouting, is a small classifier model. One routing gap found while writing this page: <i>"what else do you have"</i> never reaches <code>menu</code>. The menu rule matches "anything else" and "what do you have" but not "what else", so in <code>browsing</code> it falls through to <code>new_order</code>, and while paying it goes to <code>payment_problem</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section id="context">
+  <div class="sec-head"><span class="sec-num">§6</span><h2>The next message: keeping the conversation's context</h2></div>
+  <div class="prose">
+    <p>Nothing is kept in the worker's memory between turns. Every turn rebuilds the whole prompt from Postgres, so any worker can run any turn, and a restart loses nothing. The conversation's context is the stored chat plus the stored state, rendered fresh each time.</p>
+  </div>
+  <h3>What the model receives in one call</h3>
+  <div class="stack" aria-label="The messages sent to the model, top to bottom">
+    <div class="layer sys"><span class="role">system · base@4</span><p>Who the agent is, how it works (tools only, every turn ends with <code>send_reply</code>), 7 hard rules, voice and style. Kept short and first, so the provider can cache the stable start of the prompt.</p></div>
+    <div class="layer sys"><span class="role">system · playbook</span><p>The one playbook the router chose.</p></div>
+    <div class="layer sys"><span class="role">system · context@5</span><p>The shop's profile, the owner's saved answers, the glossary, the shop's local time, today's menu (name, item id, price token, count left), facts about this customer, pre-orders coming up, the stage, the draft, the open quote and whether its card was delivered, unpaid order numbers, questions waiting on the owner, a closing-window warning, and the summary of older messages.</p></div>
+    <div class="layer hist"><span class="role">user</span><p>Each customer message: normalised (NFKC, invisible characters removed), at most 1,000 characters, and the latest burst at most 2,000 characters in all, oldest cut first. A story reply or attachment gets a short marker.</p></div>
+    <div class="layer hist"><span class="role">assistant</span><p>Our earlier replies, and messages the owner typed in Instagram as <code>(Shop owner wrote) …</code>.</p></div>
+    <div class="layer hist"><span class="role">assistant + tool</span><p>Each shop event as a synthetic <code>shop_event</code> tool call and its result, for example <code>{"event": "payment_received", "order": "#1003"}</code>.</p></div>
+    <div class="layer turn"><span class="role">assistant + tool</span><p>This turn's own tool calls and results, appended as the loop runs.</p></div>
+    <div class="layer tools"><span class="role">tools</span><p>JSON schemas of the tools the current stage allows: 16 in browsing, 17 collecting details, 15 awaiting confirmation, 15 with payment pending.</p></div>
+  </div>
+
+  <div class="codehead">context.md@5, rendered (example values)</div>
+  <pre class="code"><span class="k"># The shop: Sweet Crumbs</span>
+Home bakery in Chennai. Pickup from the shop, delivery inside the city…
+
+<span class="k"># The shop owner's saved answers (use them as written)</span>
+- Q: Do you deliver on Sundays? A: No, Sundays are pickup only.
+
+<span class="k"># Now</span>
+Mon 09 Nov 2026, 06:40 PM (the shop's local time)
+
+<span class="k"># Today's menu</span>
+- Chocolate cookie | id i3f9a2c | price [[price:i3f9a2c]] | 12 left
+- Brownie | id i4d09c3 | price [[price:i4d09c3]] | sold out
+
+<span class="k"># About this customer</span>
+- name: Priya
+
+<span class="k"># Coming up</span> (open for pre-order on the days shown: take these orders, pass the day as `date` to update_order_draft)
+- Diwali cake | id ie19dca | price [[price:ie19dca]] | Sat 14 Nov: 20 left | last day to order Thu 12 Nov
+
+<span class="k"># This conversation</span>
+Stage: awaiting_confirmation
+Order draft: 2 x Chocolate cookie (i3f9a2c); pickup; needed by this evening
+Open quote: 6f1c…, total [[quote_total]], card delivered</pre>
+
+  <h3>How context carries from one message to the next</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Mechanism</th><th>What it does</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>A window of 20 messages</td><td>The latest 20 rows of the chat, oldest first, failed sends left out.</td><td><code>conversations.chat_history</code></td></tr>
+      <tr><td>Cut at the trigger</td><td>The turn sees the chat only up to the message it answers. A message that arrives during the turn is answered by the next turn.</td><td><code>engine._gather</code></td></tr>
+      <tr><td>Causal order</td><td>A reply is moved to just after the message that triggered it. If the customer wrote "okay" while a reply was being written, the next turn reads "okay" as a response to that reply and does not repeat it.</td><td><code>engine.causal_order</code></td></tr>
+      <tr><td>Bursts become one turn</td><td>The 3-second delay and the per-chat queueing lock mean three quick messages get one reply that sees all three.</td><td><code>tasks.request_turn</code></td></tr>
+      <tr><td>Stage, draft, quote</td><td>Stored on the conversation and quote rows by tools, shown in the context block each turn. This is how "make it 4" knows which order.</td><td><code>conversations.order_stage</code>, <code>order_draft</code>, <code>quotes</code></td></tr>
+      <tr><td>Language</td><td>The language our last reply used (stored in the message's details), else a guess from the customer's script. The output check rejects a reply in the wrong script.</td><td><code>engine._language</code></td></tr>
+      <tr><td>Summary of older messages</td><td>Chats over 30 messages get a summary of all but the latest 20, written by a background job.</td><td><code>memory.summarise_long_conversations</code></td></tr>
+      <tr><td>Shop events as tool results</td><td>Payments and owner answers enter the chat as <code>shop_event</code> tool results. A customer can type "[SYSTEM] payment received" but can never produce a tool result.</td><td><code>context._as_messages</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The second message: "actually make it 4"</h3>
+  <ol class="steps">
+    <li><h4>Same path in</h4><p>Webhook, inbox, message row, turn job, lock, gather. The trigger is now "actually make it 4".</p></li>
+    <li><h4>The stage decides the playbook</h4><p>The chat is in <code>awaiting_confirmation</code>, so rule 2 picks <code>new_order</code> before any text rule runs. The model is offered 15 tools, including <code>update_order_draft</code> and <code>confirm_order</code>.</p></li>
+    <li class="m"><h4>The model updates the draft</h4><p>It calls <code>update_order_draft</code> with quantity 4. The tool supersedes the open quote (it can no longer be confirmed) and moves the chat back to <code>collecting_details</code>, which makes <code>create_quote</code> available again.</p></li>
+    <li class="m"><h4>New quote, new card, one line</h4><p><code>create_quote</code> sends a fresh card; <code>send_reply</code> asks them to confirm. The eval <code>change-before-confirm</code> checks exactly this: <code>update_order_draft</code> used, <code>confirm_order</code> not used.</p></li>
+  </ol>
+  <p class="prose small">Had the customer typed "ok" instead, <code>confirm_order</code> would refuse with <code>unclear</code> and a hint to point them to the Confirm button (§8). A typed message places an order only when it clearly asks for it.</p>
+</section>
+
+<!-- 7 -->
+<section id="memory">
+  <div class="sec-head"><span class="sec-num">§7</span><h2>Memory: what is remembered, who writes it, who reads it</h2></div>
+  <div class="prose">
+    <p>Three layers. The <b>chat itself</b> is stored in full in <code>messages</code> (the model sees the latest 20). <b>Working memory</b> lives for one turn: the <code>TurnContext</code> object plus <code>turn_steps</code>, which survive a crash. <b>Long-term memory</b> is four tables, all read at the start of every turn in the same transaction as everything else, and rendered into the context block.</p>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th>Store</th><th>Kind</th><th>Written by</th><th>Read by</th><th>Rules</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>customer_memories</code><br><span class="small muted">per customer, per shop</span></td>
+        <td>Episodic facts</td>
+        <td><span class="pill style">model</span> the <code>remember_customer_fact</code> tool</td>
+        <td>Context "About this customer"; <code>get_customer_profile</code>; the merchant app can view and delete facts</td>
+        <td>Only six keys: <code>name</code>, <code>preferred_language</code>, <code>address</code>, <code>usual_order</code>, <code>dietary_note</code>, <code>occasion</code>. At most 300 characters. A newer value replaces the old one (upsert on shop, customer, key). Addresses expire after 365 days. Never payment details or other people's information.</td>
+      </tr>
+      <tr>
+        <td><code>conversation_summaries</code><br><span class="small muted">per chat</span></td>
+        <td>Episodic summary</td>
+        <td><span class="pill w">job</span> <code>summarise_long_conversations</code>, every 15 minutes, never inside a turn</td>
+        <td>Context "Earlier in this conversation" (latest summary)</td>
+        <td>Chats with more than 30 messages; covers everything but the latest 20; at most 120 words; rejected if it contains an amount, because amounts come only from orders.</td>
+      </tr>
+      <tr>
+        <td><code>merchant_rules</code><br><span class="small muted">per shop</span></td>
+        <td>Procedural</td>
+        <td><span class="pill w">owner</span> answering a question with "Always answer this way"</td>
+        <td>Context "The shop owner's saved answers (use them as written)"</td>
+        <td>The 20 newest active rules.</td>
+      </tr>
+      <tr>
+        <td><code>glossary_terms</code><br><span class="small muted">global and per shop</span></td>
+        <td>Semantic</td>
+        <td><span class="pill w">migration</span> seeds global terms; per-shop rows</td>
+        <td>Context "Words customers use"</td>
+        <td>Up to 40 terms, shop terms first.</td>
+      </tr>
+      <tr>
+        <td><code>missed_demands</code> (insights)</td>
+        <td>For the owner</td>
+        <td><span class="pill style">model</span> <code>log_missed_demand</code></td>
+        <td>The owner's Insights screen, not the model</td>
+        <td>What a customer wanted that was sold out, not stocked, or the shop was closed.</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <div class="split">
+    <div class="panel c">
+      <h3>The read path</h3>
+      <p class="small"><code>engine._gather</code> reads facts, rules, glossary and the latest summary along with stock, quote and chat in one transaction. <code>context.build</code> renders them into <code>context.md</code>. Nothing is retrieved by similarity search: the stores are small and keyed, so all of a customer's facts fit in every prompt.</p>
+      <p class="small">On demand, <code>get_customer_profile</code> returns the facts plus past and unpaid order counts and the last order's items, fulfilment and address, for "same as last time".</p>
+    </div>
+    <div class="panel m">
+      <h3>The write path</h3>
+      <p class="small">The model can write only through <code>remember_customer_fact</code>, whose <code>key</code> is a closed list in the schema, so it can't invent a new kind of memory. Every fact keeps the message it came from (<code>source_message_id</code>). Summaries are written by a background job with its own prompt and checked for amounts. The owner's rules come from the owner, not the model.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 8 -->
+<section id="tools">
+  <div class="sec-head"><span class="sec-num">§8</span><h2>Tool calling: who decides what</h2></div>
+  <div class="split">
+    <div class="panel m">
+      <h3>The model decides</h3>
+      <ul>
+        <li>Which of the offered tools to call, and in what order</li>
+        <li>The arguments (item ids, quantities, the question for the owner)</li>
+        <li>When to ask the owner or hand the chat off</li>
+        <li>The words of the reply and the language label</li>
+      </ul>
+    </div>
+    <div class="panel c">
+      <h3>Code decides</h3>
+      <ul>
+        <li>Which tools exist this stage, and that one is missing on owner-answer turns</li>
+        <li>Whether the arguments are valid (pydantic) and the call is allowed</li>
+        <li>Every price, total, order number and link</li>
+        <li>Every stage change, and whether a typed "yes" counts</li>
+        <li>Whether the reply passes, and when the turn must stop</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>The loop, as written</h3>
+  <div class="codehead">agent/engine.py · _loop (shortened, logic unchanged)</div>
+  <pre class="code"><span class="k">await</span> _apply_tap(ctx, trace, messages)          <span class="c"># layer 0: Confirm / Change / Retry taps run in code</span>
+corrected = <span class="k">False</span>
+<span class="k">for</span> step <span class="k">in</span> range(agent_max_model_calls):         <span class="c"># 6</span>
+    <span class="k">if</span> elapsed &gt; agent_turn_deadline_seconds:     <span class="c"># 60 s</span>
+        <span class="k">return</span> <span class="m">"fallback"</span>
+    completion = <span class="k">await</span> _model_step(...)        <span class="c"># llm.generate(messages, tools=registry.offered(ctx))</span>
+    <span class="k">if not</span> completion.tool_calls:
+        <span class="k">if</span> corrected: <span class="k">return</span> <span class="m">"fallback"</span>
+        corrected = <span class="k">True</span>                         <span class="c"># one nudge: "end with send_reply"</span>
+        messages.append(user(<span class="m">"engine.end_with_send_reply"</span>)); <span class="k">continue</span>
+    messages.append(assistant(completion.tool_calls))
+    <span class="k">for</span> call <span class="k">in</span> completion.tool_calls:
+        <span class="k">if</span> (tool_calls := tool_calls + 1) &gt; agent_max_tool_calls:   <span class="c"># 10</span>
+            <span class="k">return</span> <span class="m">"fallback"</span>
+        result = <span class="k">await</span> _tool_step(...)          <span class="c"># registry.execute(ctx, call), recorded in turn_steps</span>
+        messages.append(tool(result.for_model()))
+        <span class="k">if</span> ctx.handed_off: <span class="k">return</span> <span class="m">"handed_off"</span>
+        <span class="k">if</span> ctx.replied:    <span class="k">return</span> <span class="m">"replied"</span>     <span class="c"># send_reply passed the output checks</span>
+        <span class="k">if</span> ctx.reply_rejections &gt; agent_repair_attempts: <span class="k">return</span> <span class="m">"fallback"</span>
+<span class="k">return</span> <span class="m">"fallback"</span></pre>
+
+  <figure class="diagram">
+    <div class="scroll-x">
+    <svg viewBox="0 0 980 760" role="img" aria-label="One turn: six code steps lead into a loop where the model calls tools; the loop ends when send_reply passes the output checks, when the chat is handed off, or with a fallback when a budget runs out.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ar2m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ar2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-bad" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <!-- left column -->
+      <rect class="n-code" x="30" y="30" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="52">1  Take the chat's lock</text>
+      <text class="s" x="46" y="70">advisory lock, waits up to 90 s</text>
+      <rect class="n-code" x="30" y="106" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="128">2  Gather the turn's data</text>
+      <text class="s" x="46" y="146">one transaction: chat, stock, quote, memory</text>
+      <rect class="n-code" x="30" y="182" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="204">3  Start or resume the trace</text>
+      <text class="s" x="46" y="222">one agent_turns row per trigger message</text>
+      <rect class="n-code" x="30" y="258" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="280">4  Pick the playbook, build the prompt</text>
+      <text class="s" x="46" y="298">base + playbook + context + history</text>
+      <rect class="n-code" x="30" y="334" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="356">5  Inbound gate</text>
+      <text class="s" x="46" y="374">too long · rate limit · daily budget</text>
+      <rect class="n-code" x="30" y="410" width="330" height="52" rx="8"/>
+      <text class="t" x="46" y="432">6  Layer 0: button taps</text>
+      <text class="s" x="46" y="450">Confirm, Change, Retry handled by code</text>
+      <line class="a" x1="195" y1="82" x2="195" y2="104" marker-end="url(#ar2)"/>
+      <line class="a" x1="195" y1="158" x2="195" y2="180" marker-end="url(#ar2)"/>
+      <line class="a" x1="195" y1="234" x2="195" y2="256" marker-end="url(#ar2)"/>
+      <line class="a" x1="195" y1="310" x2="195" y2="332" marker-end="url(#ar2)"/>
+      <line class="a" x1="195" y1="386" x2="195" y2="408" marker-end="url(#ar2)"/>
+
+      <!-- exits -->
+      <rect class="n-bad" x="400" y="185" width="170" height="46" rx="8"/>
+      <text class="t" x="485" y="204" text-anchor="middle">Already answered</text>
+      <text class="s" x="485" y="221" text-anchor="middle">stop quietly</text>
+      <line class="a-bad" x1="360" y1="208" x2="398" y2="208" marker-end="url(#ar2b)"/>
+      <text class="lb" x="380" y="200" text-anchor="middle">done</text>
+      <rect class="n-bad" x="400" y="337" width="170" height="46" rx="8"/>
+      <text class="t" x="485" y="356" text-anchor="middle">Gated</text>
+      <text class="s" x="485" y="373" text-anchor="middle">template, owner asked</text>
+      <line class="a-bad" x1="360" y1="360" x2="398" y2="360" marker-end="url(#ar2b)"/>
+      <text class="lb" x="380" y="352" text-anchor="middle">stop</text>
+
+      <!-- loop region -->
+      <rect class="region" x="610" y="30" width="340" height="520" rx="12"/>
+      <text class="t" x="628" y="56">The loop</text>
+      <text class="s" x="628" y="74">≤ 6 model calls · ≤ 10 tool calls · ≤ 60 s</text>
+      <line class="a" x1="360" y1="436" x2="608" y2="436" marker-end="url(#ar2)"/>
+      <text class="lb" x="485" y="428" text-anchor="middle">enter the loop</text>
+
+      <rect class="n-model" x="640" y="96" width="280" height="56" rx="8"/>
+      <text class="t" x="780" y="119" text-anchor="middle">Model step</text>
+      <text class="s" x="780" y="138" text-anchor="middle">generate(messages, tools for this stage)</text>
+      <rect class="n" x="640" y="212" width="280" height="56" rx="8"/>
+      <text class="t" x="780" y="235" text-anchor="middle">Tool step</text>
+      <text class="s" x="780" y="254" text-anchor="middle">check name, stage, arguments · run · record</text>
+      <line class="a-m" x1="730" y1="152" x2="730" y2="210" marker-end="url(#ar2m)"/>
+      <text class="lb" x="738" y="186">tool calls</text>
+      <line class="a" x1="850" y1="212" x2="850" y2="154" marker-end="url(#ar2)"/>
+      <text class="lb" x="842" y="186" text-anchor="end">results</text>
+
+      <rect class="n" x="640" y="328" width="280" height="56" rx="8"/>
+      <text class="t" x="780" y="351" text-anchor="middle">send_reply: output checks</text>
+      <text class="s" x="780" y="370" text-anchor="middle">amounts, links, promises, script, tone</text>
+      <line class="a" x1="730" y1="268" x2="730" y2="326" marker-end="url(#ar2)"/>
+      <text class="lb" x="738" y="302">send_reply</text>
+      <polyline class="a-bad" points="920,356 936,356 936,124 922,124" marker-end="url(#ar2b)"/>
+      <text class="lb" x="928" y="302" text-anchor="end">rejected: fix once</text>
+
+      <rect class="n-code" x="640" y="444" width="280" height="56" rx="8"/>
+      <text class="t" x="780" y="467" text-anchor="middle">Queue the reply</text>
+      <text class="s" x="780" y="486" text-anchor="middle">tokens filled from the database</text>
+      <line class="a" x1="780" y1="384" x2="780" y2="442" marker-end="url(#ar2)"/>
+      <text class="lb" x="788" y="418">passes</text>
+      <text class="s" x="780" y="532" text-anchor="middle">No tool call: one nudge, then fallback</text>
+
+      <!-- outcomes -->
+      <rect class="n-bad" x="400" y="610" width="200" height="52" rx="8"/>
+      <text class="t" x="500" y="632" text-anchor="middle">fallback</text>
+      <text class="s" x="500" y="650" text-anchor="middle">holding · event text · owner's words</text>
+      <polyline class="a-bad" points="610,520 500,520 500,608" marker-end="url(#ar2b)"/>
+      <text class="lb" x="600" y="512" text-anchor="end">budget · deadline · model down</text>
+
+      <rect class="n-good" x="640" y="610" width="130" height="52" rx="8"/>
+      <text class="t" x="705" y="632" text-anchor="middle">replied</text>
+      <text class="s" x="705" y="650" text-anchor="middle">the normal end</text>
+      <line class="a" x1="705" y1="500" x2="705" y2="608" marker-end="url(#ar2)"/>
+
+      <rect class="n" x="790" y="610" width="160" height="52" rx="8"/>
+      <text class="t" x="870" y="632" text-anchor="middle">handed_off</text>
+      <text class="s" x="870" y="650" text-anchor="middle">the owner takes over</text>
+      <line class="a" x1="870" y1="550" x2="870" y2="608" marker-end="url(#ar2)"/>
+      <text class="lb" x="862" y="584" text-anchor="end">hand_off_to_owner</text>
+
+      <rect class="n-code" x="30" y="700" width="920" height="44" rx="8"/>
+      <text class="t" x="490" y="719" text-anchor="middle">7  Finish the trace, then deliver the outbox</text>
+      <text class="s" x="490" y="736" text-anchor="middle">status · stage after · playbook · prompt versions · tokens · cost · latency (gated turns too)</text>
+      <line class="a" x1="500" y1="662" x2="500" y2="698" marker-end="url(#ar2)"/>
+      <line class="a" x1="705" y1="662" x2="705" y2="698" marker-end="url(#ar2)"/>
+      <line class="a" x1="870" y1="662" x2="870" y2="698" marker-end="url(#ar2)"/>
+    </svg>
+    </div>
+    <figcaption>One turn. Code runs steps 1 to 6 and the finish; the model works only inside the loop. The loop has three exits: a reply that passed the checks, a hand-off, or a fallback when any budget runs out or the model is unavailable. A fallback still sends the customer something.</figcaption>
+  </figure>
+
+  <h3>The tool contract</h3>
+  <div class="split">
+    <div class="panel">
+      <h3>A tool is a class</h3>
+      <ul class="small">
+        <li><code>name</code>, and <code>Args</code>: a pydantic model whose JSON schema is what the model sees as parameters</li>
+        <li><code>stages</code>: where it is allowed (default: the four active stages)</li>
+        <li><code>writes</code>: whether it changes data (shadow mode stubs these)</li>
+        <li><code>run(ctx, args)</code> and <code>replay(ctx, result)</code>, which re-applies a stored result's effect when a crashed turn resumes</li>
+        <li>Its description is a versioned prompt file, <code>prompts/tools/&lt;name&gt;.md</code></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Every call goes through <code>registry.execute</code></h3>
+      <ol class="small">
+        <li>Unknown name: error <code>unknown_tool</code></li>
+        <li>Not allowed now: error <code>not_allowed</code> with the tools you can use</li>
+        <li>Arguments not JSON, or invalid: error <code>invalid_arguments</code> listing each problem</li>
+        <li>Shadow mode and a writing tool: a stub result, nothing written</li>
+        <li>Run it. An exception becomes error <code>internal_error</code> with "don't retry"</li>
+      </ol>
+      <p class="small">Errors are results the model can react to, never exceptions that end the turn.</p>
+    </div>
+    <div class="panel">
+      <h3>Results are JSON</h3>
+      <pre class="code">{"ok": true,  "data": {...}}
+{"ok": false, "error": {"code": "unclear",
+  "message": "...", "hint": "..."}}</pre>
+      <p class="small">A result can also carry <code>private</code> values (a payment link, an order id) that are stored in the trace for a resumed turn but never shown to the model.</p>
+    </div>
+  </div>
+
+  <h3>All 20 tools</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Tool</th><th>Stages</th><th>Changes data</th><th>What code enforces</th></tr></thead>
+    <tbody>
+      <tr class="group-row"><td colspan="4">Catalogue</td></tr>
+      <tr><td><code>search_catalog</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Fuzzy search by name, nickname or typo; returns item ids, today's count, coming days, and a price token, never a price.</td></tr>
+      <tr><td><code>get_product_details</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Every saved attribute (ingredients, allergens, fabric, size notes, care). Unlocks health words in the reply; empty fields come with "don't guess, ask the owner".</td></tr>
+      <tr class="group-row"><td colspan="4">Orders</td></tr>
+      <tr><td><code>update_order_draft</code></td><td>browsing, collecting, awaiting</td><td><span class="pill w">yes</span></td><td>Item ids must exist; a date must be today to 14 days ahead. Supersedes an open quote. Returns what is missing and stock problems. Moves to <code>collecting_details</code>.</td></tr>
+      <tr><td><code>create_quote</code></td><td>collecting</td><td><span class="pill w">yes</span></td><td>Refuses an incomplete draft. Code prices it, saves it with an expiry, and sends the card with Confirm and Change. Moves to <code>awaiting_confirmation</code>.</td></tr>
+      <tr><td><code>confirm_order</code></td><td>awaiting</td><td><span class="pill w">yes</span></td><td>The card must have reached the customer before their message, and the typed text must clearly confirm. Holds stock 15 min, code sends the payment message. Moves to <code>payment_pending</code>.</td></tr>
+      <tr><td><code>get_order_status</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Only this customer's orders.</td></tr>
+      <tr><td><code>cancel_order</code></td><td>payment_pending</td><td><span class="pill w">yes</span></td><td>By order number from the context; only an unpaid order of this chat. Releases stock. Moves to <code>browsing</code>.</td></tr>
+      <tr><td><code>resend_payment_link</code></td><td>payment_pending</td><td><span class="pill w">yes</span></td><td>The same open link, or after a failed payment a new one once the cooldown has passed and attempts remain; otherwise code says how long to wait or cancels.</td></tr>
+      <tr class="group-row"><td colspan="4">The shop owner</td></tr>
+      <tr><td><code>ask_shop_owner</code></td><td>all 4</td><td><span class="pill w">yes</span></td><td>Opens an "Ask me" question with up to 3 suggested answers. Sent back to the model (at most twice a turn) if it asks whether a listed pre-order is available, or says it is 75% or more sure. Removed on owner-answer turns.</td></tr>
+      <tr><td><code>hand_off_to_owner</code></td><td>all 4</td><td><span class="pill w">yes</span></td><td>Reason from a fixed list. Stops the agent in this chat, tells the customer with a template, asks the owner. Moves to <code>handed_off</code>.</td></tr>
+      <tr class="group-row"><td colspan="4">Memory and housekeeping</td></tr>
+      <tr><td><code>remember_customer_fact</code></td><td>all 4</td><td><span class="pill w">yes</span></td><td>Six allowed keys, 300 characters (§7).</td></tr>
+      <tr><td><code>get_customer_profile</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Facts, order counts, the last order for "same as last time".</td></tr>
+      <tr><td><code>log_missed_demand</code></td><td>all 4</td><td><span class="pill w">yes</span></td><td>Writes to the owner's Insights.</td></tr>
+      <tr><td><code>load_playbook</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Once per turn; 9 names allowed.</td></tr>
+      <tr class="group-row"><td colspan="4">Stories, photos, posts</td></tr>
+      <tr><td><code>lookup_story</code></td><td>all 4</td><td><span class="pill r">no*</span></td><td>Which products a replied-to story shows: from the story registry, else one vision call whose result is saved.</td></tr>
+      <tr><td><code>describe_image</code></td><td>all 4</td><td><span class="pill r">no*</span></td><td>Vision model on a customer's photo by attachment id; cached per image; at most 3 per turn. Media is passed as a link, never stored.</td></tr>
+      <tr><td><code>transcribe_voice</code></td><td>all 4</td><td><span class="pill r">no</span></td><td>Not built: always answers "ask them to type".</td></tr>
+      <tr><td><code>send_menu_image</code></td><td>browsing, collecting</td><td><span class="pill w">yes</span></td><td>Queues the shop's menu photo, if uploaded.</td></tr>
+      <tr><td><code>share_post</code></td><td>browsing, collecting</td><td><span class="pill w">yes</span></td><td>Queues the shop's own Instagram post linked to an item.</td></tr>
+      <tr class="group-row"><td colspan="4">The reply</td></tr>
+      <tr><td><code>send_reply</code></td><td>all 4</td><td><span class="pill w">yes</span></td><td>The only way a turn ends well. Runs the output checks, fills tokens from the database, queues the reply; <code>choices</code> become up to 13 tap buttons.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="small muted">"All 4" means <code>browsing</code>, <code>collecting_details</code>, <code>awaiting_confirmation</code> and <code>payment_pending</code>; no tool exists in <code>handed_off</code>. * <code>lookup_story</code> and <code>describe_image</code> are flagged as not writing (so shadow mode runs them), but they save their vision results to a cache.</p>
+
+  <div class="split">
+    <div class="panel">
+      <h3>Item ids instead of names</h3>
+      <p class="small">An item's id is <code>i</code> plus the first six hex digits of its variant UUID (<code>i3f9a2c</code>). It never changes while the item exists, and code maps it back exactly. A misspelt id is an <code>unknown_item</code> error the model has to fix, never a silent match to another item. Ids are for tool calls only: the output check rejects one in a reply.</p>
+    </div>
+    <div class="panel">
+      <h3>When the provider has no tool calling</h3>
+      <p class="small">With <code>LLM_TOOL_MODE=json</code>, the gateway appends the tool list to the system prompt, asks for <code>{"tool_calls": [...]}</code> as JSON, sends tool results as user messages, and parses the answer back into the same <code>ToolCall</code> objects. The engine can't tell the difference.</p>
+    </div>
+  </div>
+
+  <h3>Does a typed message place the order?</h3>
+  <div class="tool-ui" id="confirm">
+    <div class="row">
+      <label for="cf-text">Customer's reply to the quote card
+        <input type="text" id="cf-text" value="ok" autocomplete="off">
+      </label>
+      <div></div>
+    </div>
+    <div class="examples" aria-label="Example replies">
+      <button type="button" data-cf="ok">ok</button>
+      <button type="button" data-cf="seri">seri</button>
+      <button type="button" data-cf="confirm">confirm</button>
+      <button type="button" data-cf="confirm pannunga">confirm pannunga</button>
+      <button type="button" data-cf="order kar do">order kar do</button>
+      <button type="button" data-cf="how do I confirm?">how do I confirm?</button>
+      <button type="button" data-cf="make it 4, change">make it 4, change</button>
+      <button type="button" data-cf="no thanks">no thanks</button>
+    </div>
+    <div class="result" id="cf-out" aria-live="polite">
+      <span class="big" id="cf-res">unclear</span>
+      <span class="why" id="cf-why">An acknowledgement, decided in code without a model call. Nothing is placed; the model tells them to tap Confirm.</span>
+    </div>
+    <p class="small muted">Order of checks in <code>affirmation.classify</code>: a "no" word, then a "change" word, then a strong word (confirm, place the order, book it, <i>confirm pannunga</i>, <i>order kar do</i>…) not next to a question or "wait / not yet", then an acknowledgement (ok, sure, seri, haan, 👍). Anything else goes to a small model classifier whose prompt also treats acknowledgements as unclear. A Confirm tap skips all of this.</p>
+  </div>
+</section>
+
+<!-- 9 -->
+<section id="state">
+  <div class="sec-head"><span class="sec-num">§9</span><h2>State: where the conversation is</h2></div>
+  <p class="prose">The conversation's stage is a column with a check constraint, changed only by code (<code>conversations.set_stage</code>, "Only code calls this"). Tools move it; payment and expiry events move it back. The model reads the stage in its context but can't set it.</p>
+  <figure class="diagram">
+    <div class="scroll-x">
+    <svg viewBox="0 0 1000 370" role="img" aria-label="The five conversation stages and the tool or event that moves a chat between them.">
+      <defs>
+        <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ar3c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-c" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <rect class="n-code" x="20" y="150" width="160" height="56" rx="10"/>
+      <text class="t mono" x="100" y="174" text-anchor="middle">browsing</text>
+      <text class="s" x="100" y="193" text-anchor="middle">every chat starts here</text>
+      <rect class="n-code" x="260" y="150" width="190" height="56" rx="10"/>
+      <text class="t mono" x="355" y="174" text-anchor="middle">collecting_details</text>
+      <text class="s" x="355" y="193" text-anchor="middle">draft being filled</text>
+      <rect class="n-code" x="530" y="150" width="210" height="56" rx="10"/>
+      <text class="t mono" x="635" y="174" text-anchor="middle">awaiting_confirmation</text>
+      <text class="s" x="635" y="193" text-anchor="middle">quote card sent</text>
+      <rect class="n-code" x="820" y="150" width="160" height="56" rx="10"/>
+      <text class="t mono" x="900" y="174" text-anchor="middle">payment_pending</text>
+      <text class="s" x="900" y="193" text-anchor="middle">stock held 15 min</text>
+      <rect class="n" x="400" y="290" width="200" height="50" rx="10"/>
+      <text class="t mono" x="500" y="312" text-anchor="middle">handed_off</text>
+      <text class="s" x="500" y="330" text-anchor="middle">the agent stops</text>
+
+      <line class="a-c" x1="180" y1="170" x2="258" y2="170" marker-end="url(#ar3c)"/>
+      <text class="lb" x="220" y="140" text-anchor="middle">update_order_draft</text>
+      <line class="a-c" x1="450" y1="170" x2="528" y2="170" marker-end="url(#ar3c)"/>
+      <text class="lb" x="490" y="140" text-anchor="middle">create_quote</text>
+      <line class="a-c" x1="740" y1="170" x2="818" y2="170" marker-end="url(#ar3c)"/>
+      <text class="lb" x="780" y="140" text-anchor="middle">confirm_order · Confirm tap</text>
+      <line class="a-c" x1="530" y1="192" x2="452" y2="192" marker-end="url(#ar3c)"/>
+      <text class="lb" x="490" y="230" text-anchor="middle">Change tap · update_order_draft</text>
+      <path class="a" d="M900,150 V80 H100 V148" marker-end="url(#ar3)"/>
+      <text class="lb" x="500" y="70" text-anchor="middle">payment received · hold expired · cancel_order · payment gave up</text>
+
+      <line class="a-dash" x1="100" y1="206" x2="428" y2="288" marker-end="url(#ar3)"/>
+      <line class="a-dash" x1="355" y1="206" x2="462" y2="288" marker-end="url(#ar3)"/>
+      <line class="a-dash" x1="635" y1="206" x2="538" y2="288" marker-end="url(#ar3)"/>
+      <line class="a-dash" x1="900" y1="206" x2="572" y2="288" marker-end="url(#ar3)"/>
+      <text class="lb" x="620" y="322">hand_off_to_owner, from any stage</text>
+    </svg>
+    </div>
+    <figcaption>The order flow is a line from left to right, with one way back for changes and one loop home when the order settles. A chat in <code>handed_off</code> gets no turns at all: <code>_gather</code> returns nothing for it, so no tools are offered.</figcaption>
+  </figure>
+
+  <h3>Tools offered per stage</h3>
+  <div class="tbl"><table class="matrix">
+    <thead><tr><th>Tool</th><th class="stage">browsing</th><th class="stage">collecting_details</th><th class="stage">awaiting_confirmation</th><th class="stage">payment_pending</th></tr></thead>
+    <tbody>
+      <tr><td>13 shared tools: search, details, story, image, voice, remember, profile, missed demand, load_playbook, order status, ask owner, hand off, <code>send_reply</code></td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td></tr>
+      <tr><td><code>update_order_draft</code></td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n">·</td></tr>
+      <tr><td><code>send_menu_image</code>, <code>share_post</code></td><td class="y">✓</td><td class="y">✓</td><td class="n">·</td><td class="n">·</td></tr>
+      <tr><td><code>create_quote</code></td><td class="n">·</td><td class="y">✓</td><td class="n">·</td><td class="n">·</td></tr>
+      <tr><td><code>confirm_order</code></td><td class="n">·</td><td class="n">·</td><td class="y">✓</td><td class="n">·</td></tr>
+      <tr><td><code>cancel_order</code>, <code>resend_payment_link</code></td><td class="n">·</td><td class="n">·</td><td class="n">·</td><td class="y">✓</td></tr>
+      <tr><td><b>Total offered</b></td><td class="num">16</td><td class="num">17</td><td class="num">15</td><td class="num">15</td></tr>
+    </tbody>
+  </table></div>
+  <p class="small muted">Printed from <code>registry.TOOLS</code> on 9 Nov 2026. On a turn triggered by the owner's answer, <code>ask_shop_owner</code> is also removed.</p>
+
+  <h3>The other state machines</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>What</th><th>Where</th><th>States</th></tr></thead>
+    <tbody>
+      <tr><td>Turn</td><td><code>agent_turns.status</code></td><td><code>running</code> → <code>replied</code> · <code>fallback</code> · <code>gated</code> · <code>handed_off</code>. A turn left <code>running</code> for 2 minutes is resumed by the reconciler.</td></tr>
+      <tr><td>Quote</td><td><code>quotes.status</code></td><td><code>open</code> → <code>confirmed</code> · <code>superseded</code> (the draft changed) · <code>expired</code> (2 h or end of business day). <code>shown_message_id</code> is set when the card is delivered.</td></tr>
+      <tr><td>Outbox row</td><td><code>outbound_messages.status</code></td><td><code>queued</code> → <code>sending</code> → <code>sent</code>; also <code>pending_window</code> (waiting for the customer to write), <code>expired</code> (7 days passed), <code>draft</code> (draft mode), and <code>failed</code> after the last retry or a permanent error.</td></tr>
+      <tr><td>Webhook event</td><td><code>webhook_events.status</code></td><td><code>pending</code> → <code>processed</code>, with attempts and the last error.</td></tr>
+      <tr><td>Chat switch</td><td><code>conversations.agent_active</code></td><td>Off with a reason: <code>merchant_replied</code>, <code>merchant_switched_off</code>, <code>handed_off</code>.</td></tr>
+      <tr><td>Engine per shop</td><td><code>merchants.agent_engine</code></td><td><code>v1</code> · <code>v2</code> · <code>shadow</code> · <code>draft</code> (§14).</td></tr>
+      <tr><td>One turn's working state</td><td><code>TurnContext</code> (in memory)</td><td>Stage, language, <code>replied</code>, <code>handed_off</code>, reply rejections, payment link, owner asked, ask refusals, vision calls, prompt versions used. Rebuilt on resume by replaying stored steps.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 10 -->
+<section id="guardrails">
+  <div class="sec-head"><span class="sec-num">§10</span><h2>Guardrails</h2></div>
+  <h3>Before the model: the inbound gate</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Situation</th><th>Limit</th><th>What happens instead of a model call</th></tr></thead>
+    <tbody>
+      <tr><td>A message far too long</td><td>over 4,000 characters</td><td>The <code>too_long</code> template</td></tr>
+      <tr><td>Too many turns in one chat</td><td>30 an hour or 150 a day</td><td>The <code>rate_limited</code> template and one owner question; then silence for the rest of the hour</td></tr>
+      <tr><td>The shop's AI budget is spent</td><td>the shop's daily budget, else $1.00</td><td>The holding template and an owner question until the next local day; a warning is logged at 80%</td></tr>
+      <tr><td>A burst</td><td>over 20 customer messages in 5 minutes</td><td>Messages are stored but start no turn; the reconciler answers the latest afterwards</td></tr>
+    </tbody>
+  </table></div>
+  <p class="small muted">Counts come from Postgres (<code>agent_turns</code>, <code>messages</code>), so they hold across restarts and workers. The budget sums <code>agent_turns.cost_usd</code>, which is only known when <code>LLM_PRICES</code> is configured; without prices the budget can't trip.</p>
+
+  <h3>After the model: output checks on every reply</h3>
+  <p class="prose">Because code fills every amount, link and order number, the checks on what the model typed can be strict. Tokens are removed before checking, so <code>[[quote_total]]</code> is fine and "₹450" is not.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Check</th><th>Rejects</th><th>Kind</th></tr></thead>
+    <tbody>
+      <tr><td>Amounts</td><td>A currency next to a number (₹, $, rs, rupees, ரூ, रु…), or "total / price / cost" followed by a number</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Item ids</td><td><code>i3f9a2c</code> or any menu id in the text</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Links</td><td><code>http</code>, <code>www.</code>, <code>name.com</code> and similar</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Promises</td><td>free, discount, offer, % off, cashback, guarantee, "in 30 minutes", their Tamil and Hindi forms, plus the shop's own never-promise list</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>"I'll check with the shop"</td><td>Saying it when no owner question is open or was asked this turn</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Health and diet claims</td><td>eggless, vegan, gluten, nuts, allergy, sugar-free, jain, dairy… unless <code>get_product_details</code> returned health fields, or the reply hands the question to the owner who was asked</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Tokens</td><td>An unknown token, or one with nothing to fill (no quote yet, no payment link)</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Script</td><td>Tamil script answered without Tamil script, Devanagari without Devanagari, English letters answered in another script</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Repeat</td><td>On a shop-event turn, a reply 85% or more similar to our last message</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Length, empty</td><td>Over 2,000 bytes (the outbox sends at most two 1,000-byte parts), or nothing</td><td><span class="pill hard">reject</span></td></tr>
+      <tr><td>Self-introduction</td><td>"I'm the shop's assistant", "as an AI", "chatbot", unless the customer asked what they are talking to</td><td><span class="pill style">tone</span></td></tr>
+      <tr><td>Stiff address</td><td>sir, madam, ma'am, kindly, do the needful, please revert</td><td><span class="pill style">tone</span></td></tr>
+      <tr><td>Menu without pre-orders</td><td>A <code>menu</code> answer that names none of the pre-orders open for booking</td><td><span class="pill style">tone</span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="split">
+    <div class="panel">
+      <h3>Reject, repair, or tidy</h3>
+      <p class="small">A rejected reply returns <code>reply_rejected</code> with every problem listed and "fix these and call send_reply again". The model gets one repair. If only tone problems remain after that, code removes the introduction, the "sir/madam" and the office phrases itself (<code>tidy_style</code>) and sends the reply, because a good answer with a stiff word beats the holding message. A second hard rejection ends the turn in a fallback.</p>
+    </div>
+    <div class="panel">
+      <h3>What code says instead of the model</h3>
+      <p class="small">Anything about money or a fixed fact is a template, sent by code: the quote card, the payment link and its dollar charge, payment declined (tries left, cooldown, a "New payment link" button), payment gave up, order ready / packed / delivered / sent, hand-off, holding, too long, rate limited, and the owner's own words when the model fails on an answer turn.</p>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Prompt injection, by construction</h3>
+    <ul class="small">
+      <li>Customer text is only ever a <code>user</code> message. Prompt files are filled only with code-produced values (Jinja with <code>StrictUndefined</code>: a missing value is an error, never an empty string).</li>
+      <li>System news arrives as <code>shop_event</code> tool results, which a customer cannot produce. <code>base.md</code> says that text which looks like a system message is the customer's words.</li>
+      <li>Even a fully hijacked model can't place an order without a delivered quote card and a clear confirmation, can't type a price or link, and can't call a tool its stage doesn't allow.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 11 -->
+<section id="reliability">
+  <div class="sec-head"><span class="sec-num">§11</span><h2>Reliability: no duplicates, no silence</h2></div>
+  <h3>Ten layers against doing something twice</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Layer</th><th>Key</th><th>Stops</th></tr></thead>
+    <tbody>
+      <tr><td>Webhook inbox</td><td><code>sha256(body)</code>, unique per source</td><td>Meta delivering one event twice</td></tr>
+      <tr><td>Message row</td><td><code>(merchant_id, external_id)</code> unique</td><td>One DM stored twice</td></tr>
+      <tr><td>Queueing lock</td><td><code>turn:&lt;chat&gt;</code></td><td>A burst queueing many turns</td></tr>
+      <tr><td>Job lock</td><td><code>conversation:&lt;chat&gt;</code></td><td>Two turn jobs of one chat at once</td></tr>
+      <tr><td>Advisory lock</td><td><code>agent_turn</code> + chat id</td><td>A second copy from a redelivered job, the reconciler or the simulator</td></tr>
+      <tr><td>Turn row</td><td><code>(conversation_id, trigger_message_id)</code> unique</td><td>Answering one message twice</td></tr>
+      <tr><td>Step row</td><td><code>&lt;turn&gt;:&lt;step&gt;:model</code>, <code>&lt;turn&gt;:&lt;step&gt;:&lt;i&gt;:&lt;tool&gt;</code> unique</td><td>A resumed turn re-running a model call or a tool</td></tr>
+      <tr><td>Outbox key</td><td><code>turn:&lt;turn&gt;:reply</code>, <code>quote:&lt;id&gt;:card</code>, <code>order:&lt;id&gt;:link</code></td><td>Sending one message twice</td></tr>
+      <tr><td>Quote to order</td><td>a confirmed quote returns its existing order</td><td>A double Confirm tap</td></tr>
+      <tr><td>Payment</td><td>one payment row per attempt; the PayPal request id includes the attempt</td><td>A second PayPal order for one attempt</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="split">
+    <div class="panel c">
+      <h3>A crash in the middle of a turn</h3>
+      <p class="small">Every model response and tool result is stored before the loop moves on. If the worker dies, the turn row stays <code>running</code>. Every minute <code>reconcile_unanswered</code> re-queues chats with a turn running for over 2 minutes, and chats whose latest message has waited 30 seconds unanswered. The new attempt finds the same turn row, and for each step whose key is stored it reuses the stored result and calls <code>tool.replay()</code> to restore the turn's state (stage, payment link, "replied"). Nothing already done runs again.</p>
+    </div>
+    <div class="panel m">
+      <h3>The model gateway</h3>
+      <ul class="small">
+        <li>Up to 2 retries per model (0.5 s, 1.5 s, ±20% jitter, or Retry-After up to 10 s) on network errors, 408, 409, 429 and 5xx. Other 4xx fail at once.</li>
+        <li>Then the next model in <code>LLM_MODELS</code>.</li>
+        <li>Circuit breaker per model: 3 failed calls within 60 s skips it for 30 s. A content-filter 400 doesn't count. The breaker is per process.</li>
+        <li>Connect timeout 5 s; every call is also cut off by the turn's remaining time.</li>
+        <li>Cost per call from <code>LLM_PRICES</code>, summed per turn.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>The customer is never left without an answer</h3>
+  <ol class="steps">
+    <li><h4>The model fails while passing on the owner's answer</h4><p>The customer gets the owner's own words: "Update from the shop: Yes, we can write a name on it." (<code>owner_answer_relay</code>).</p></li>
+    <li><h4>The model fails on a payment or expiry event</h4><p>A fixed message says what happened (<code>event_payment_received</code>, <code>event_hold_expired</code>), not "I'll check with the shop".</p></li>
+    <li><h4>Any other failure</h4><p>"Thanks for your message! Let me check with the shop and get back to you shortly." plus one "couldn't finish" question for the owner per chat, skipped if the owner was already asked in this turn.</p></li>
+    <li><h4>Sending fails</h4><p>The outbox retries up to 6 times over about 10 minutes (10 s to 240 s), keeps later messages behind it so the order never changes, then asks the owner to reply in Instagram. A send stuck in <code>sending</code> for 2 minutes is sent again unless Instagram echoed it: a possible duplicate is better than silence.</p></li>
+    <li><h4>Instagram's window has closed</h4><p>Rows wait as <code>pending_window</code> and the owner is told. They go out first when the customer writes again, and expire after 7 days.</p></li>
+  </ol>
+</section>
+
+<!-- 12 -->
+<section id="owner">
+  <div class="sec-head"><span class="sec-num">§12</span><h2>The shop owner in the loop</h2></div>
+  <figure class="diagram">
+    <div class="scroll-x">
+    <svg viewBox="0 0 1000 520" role="img" aria-label="Sequence: the customer asks something only the owner can answer; the agent asks the owner and tells the customer it will check; the owner answers in the app; the answer comes back as a shop event that starts a new turn, which passes it on.">
+      <defs>
+        <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ar4m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <rect class="n" x="25" y="20" width="170" height="44" rx="8"/>
+      <text class="t" x="110" y="47" text-anchor="middle">Customer</text>
+      <rect class="n-model" x="285" y="20" width="170" height="44" rx="8"/>
+      <text class="t" x="370" y="47" text-anchor="middle">Agent turn</text>
+      <rect class="n-db" x="545" y="20" width="170" height="44" rx="8"/>
+      <text class="t mono" x="630" y="47" text-anchor="middle">escalations</text>
+      <rect class="n" x="805" y="20" width="170" height="44" rx="8"/>
+      <text class="t" x="890" y="47" text-anchor="middle">Owner app</text>
+      <line class="life" x1="110" y1="64" x2="110" y2="500"/>
+      <line class="life" x1="370" y1="64" x2="370" y2="500"/>
+      <line class="life" x1="630" y1="64" x2="630" y2="500"/>
+      <line class="life" x1="890" y1="64" x2="890" y2="500"/>
+
+      <line class="a" x1="110" y1="104" x2="366" y2="104" marker-end="url(#ar4)"/>
+      <text class="lb" x="240" y="96" text-anchor="middle">“Can you write a name on the cake?”</text>
+      <line class="a-m" x1="370" y1="154" x2="626" y2="154" marker-end="url(#ar4m)"/>
+      <text class="lb mono" x="500" y="146" text-anchor="middle">ask_shop_owner</text>
+      <line class="a-m" x1="370" y1="204" x2="114" y2="204" marker-end="url(#ar4m)"/>
+      <text class="lb" x="240" y="196" text-anchor="middle">“We'll check and get back to you”</text>
+      <line class="a" x1="630" y1="254" x2="886" y2="254" marker-end="url(#ar4)"/>
+      <text class="lb" x="760" y="246" text-anchor="middle">Needs-you card, suggested answers</text>
+      <line class="a" x1="890" y1="304" x2="634" y2="304" marker-end="url(#ar4)"/>
+      <text class="lb" x="760" y="296" text-anchor="middle">answer · “Always” saves a rule</text>
+      <line class="a" x1="630" y1="354" x2="374" y2="354" marker-end="url(#ar4)"/>
+      <text class="lb" x="500" y="346" text-anchor="middle">note owner_answered → new turn</text>
+      <rect class="n-model" x="290" y="376" width="160" height="50" rx="8"/>
+      <text class="t mono" x="370" y="397" text-anchor="middle">owner_answer</text>
+      <text class="s" x="370" y="415" text-anchor="middle">ask_shop_owner removed</text>
+      <line class="a-m" x1="370" y1="456" x2="114" y2="456" marker-end="url(#ar4m)"/>
+      <text class="lb" x="240" y="448" text-anchor="middle">the answer, in their language</text>
+    </svg>
+    </div>
+    <figcaption>The owner's answer re-enters the chat as a shop event and starts its own turn, with its own playbook. Code removes <code>ask_shop_owner</code> for that turn, and the output check rejects a reply that repeats the last one. If Instagram's 24-hour window has closed, the answer waits for the customer's next message, or, if the Human Agent tag is enabled, goes out in the owner's own words.</figcaption>
+  </figure>
+  <div class="split">
+    <div class="panel">
+      <h3>How the agent brings the owner in</h3>
+      <ul class="small">
+        <li><code>ask_shop_owner</code>: a question with up to 3 suggested answers (shown as chips in the app) and a <code>confidence</code>. Code sends it back when the shop's own data already answers it.</li>
+        <li><code>hand_off_to_owner</code>: the whole chat becomes the owner's; the agent stops answering it.</li>
+        <li>Fallbacks, rate limits, budget, failed sends and payment mismatches also open questions, written by code.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>How the owner stays in control</h3>
+      <ul class="small">
+        <li>Replying from the Instagram app pauses the agent in that chat (the echo isn't one of ours).</li>
+        <li>A per-chat switch, and the shop-wide <code>agent_enabled</code>.</li>
+        <li>"Always answer this way" turns one answer into a saved rule for every future turn.</li>
+        <li>Draft mode: the agent's replies wait for approval (§14).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 13 -->
+<section id="events">
+  <div class="sec-head"><span class="sec-num">§13</span><h2>Payments and other shop events</h2></div>
+  <ol class="steps">
+    <li><h4>Confirm places the order and code sends the payment message</h4><p>UPI if the shop is in rupees and has a UPI id; else PayPal (a rupee order is charged in dollars at a live exchange rate, rounded up, and the message says so); else "the shop will share payment details" and an owner question.</p></li>
+    <li><h4>PayPal tells the backend</h4><p>The PayPal webhook goes into the same inbox and job pattern (<code>process_paypal_event</code>). A job that runs every minute (<code>settle_open_payments</code>) captures approved payments whose return page or webhook never arrived.</p></li>
+    <li><h4>Paid: a system note starts a turn</h4><p><code>after_payment</code> moves the chat back to <code>browsing</code> and adds a note with <code>{"event": "payment_received", "order": "#1003"}</code>. The model writes the thank-you; if it can't, the fixed event template goes out.</p></li>
+    <li><h4>Declined: code answers, not the model</h4><p>The customer gets the tries left and a "New payment link" button (<code>RETRY:&lt;order&gt;</code>, handled in layer 0). Too early: a wait message. No tries or time left: the order is cancelled, stock released, and the customer told.</p></li>
+    <li><h4>Hold expired, or the owner marks the order ready</h4><p>An expired hold is a shop event like payment. An order marked ready, packed, delivered or sent queues a fixed template directly, once per order and status, with no turn.</p></li>
+  </ol>
+</section>
+
+<!-- 14 -->
+<section id="ops">
+  <div class="sec-head"><span class="sec-num">§14</span><h2>Engine modes, traces and evals</h2></div>
+  <div class="tbl"><table>
+    <thead><tr><th><code>agent_engine</code></th><th>Who answers</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td><code>v1</code></td><td>The first engine: one JSON answer per step, up to 3 steps, actions <code>quote_order</code> / <code>place_order</code>, no tools</td><td>Still the column's default for a new shop</td></tr>
+      <tr><td><code>v2</code></td><td>The harness on this page</td><td>The dev shop "Sweet Crumbs"</td></tr>
+      <tr><td><code>shadow</code></td><td>v1 answers; v2 runs on the same messages with every writing tool stubbed, and stores what it would have sent</td><td>Compare side by side with <code>shadow-report</code></td></tr>
+      <tr><td><code>draft</code></td><td>v2, but the model's reply waits for the owner to approve, edit or discard</td><td>The planned first mode for real shops. Messages code writes (quote card, payment link, templates) are not held</td></tr>
+    </tbody>
+  </table></div>
+  <div class="split">
+    <div class="panel">
+      <h3>Traces</h3>
+      <p class="small">One <code>agent_turns</code> row per turn: mode, status, stage before and after, playbook, every <code>prompt@version</code> used, models, model and tool call counts, tokens, cost, latency, error, and in shadow mode the reply it would have sent. One <code>turn_steps</code> row per model call and tool call with its request and result.</p>
+    </div>
+    <div class="panel">
+      <h3>Operator commands</h3>
+      <ul class="small">
+        <li><code>agent-health --days N</code>: turns by status, fallback rate, p50 and p95 latency, cost, top errors</li>
+        <li><code>replay-turn &lt;id&gt;</code>: rebuild a past turn's first model call with today's prompts and model, compare tool calls, write nothing</li>
+        <li><code>shadow-report</code>: v1's reply next to v2's</li>
+        <li><code>/simulator</code>: a web chat that runs real turns without Instagram</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Evals</h3>
+      <p class="small"><code>evals/run.py</code> plays multi-turn scenarios through the simulator API against the real model, on a throwaway database. Each turn can expect tools used or not used, the status, the stage after, and reply patterns. Every turn is also checked for item ids, unfilled tokens and stiff phrases. Datasets: <code>scenarios</code> 14, <code>adversarial</code> 14, <code>any_shop</code> 9, <code>owner_answers</code> 5, <code>preorders_and_menu</code> 6.</p>
+    </div>
+  </div>
+  <p class="prose small">Process rule (<code>CLAUDE.md</code>): a change to a prompt, playbook, tool, context or output check needs the live evals run twice and a row in <code>prompts/CHANGELOG.md</code> with the result. The changelog reads as a history of real failures and fixes, for example "a typed okay placed and charged an order" (8 Nov) leading to <code>affirmation.py</code>.</p>
+</section>
+
+<!-- 15 -->
+<section id="status">
+  <div class="sec-head"><span class="sec-num">§15</span><h2>Status on 9 Nov 2026</h2></div>
+  <p class="prose">From <code>docs/HANDOFF.md</code> and <code>docs/NEXT-PHASE.md</code>, checked against git. The test and eval numbers are the team's own, not re-run for this page.</p>
+  <div class="status-grid">
+    <div class="flag" style="border-left-color: var(--good)"><b>Built and committed</b><span class="small">All of the above, including the 8 and 9 Nov work (typed "ok" no longer orders, off-topic routing, payment retries, order status messages), is in <code>c3b2994</code> on the work branch, which matches origin.</span></div>
+    <div class="flag" style="border-left-color: var(--good)"><b>Tests</b><span class="small">Backend 521 passed, Flutter 402 passed (20 live tests skipped); ruff and basedpyright clean (HANDOFF §4.10).</span></div>
+    <div class="flag" style="border-left-color: var(--good)"><b>Live evals, 9 Nov</b><span class="small">Main set (37 scenarios) 36/37, 37/37, 37/37; the miss was the scenario's own check. Owner answers and pre-orders 11/11 twice.</span></div>
+    <div class="flag"><b>Not reachable from the laptop</b><span class="small">Instagram's APIs are blocked by the company network, so real DMs need a hosted backend; testing uses the simulator. PayPal webhooks need a public https address.</span></div>
+    <div class="flag"><b>Known agent gaps</b><span class="small">Customers who got the holding message during an outage aren't retried automatically. Voice notes aren't supported. The 2-unpaid-orders check can be passed by two simultaneous confirms. Tamil and Hindi templates need a native speaker's review.</span></div>
+    <div class="flag"><b>Per-process limits</b><span class="small">The circuit breaker and the API rate limits live in each process's memory; Redis is the noted next step for hard limits.</span></div>
+    <div class="flag found"><b>Found while writing this page</b><span class="small">"What else do you have" never routes to <code>menu</code>: it gets <code>new_order</code>, or <code>payment_problem</code> while paying. Draft mode holds only the model's reply; the quote card and payment link it triggers go out at once. Two vision tools are flagged read-only but write a cache.</span></div>
+    <div class="flag found"><b>Default engine</b><span class="small">A new shop's <code>agent_engine</code> defaults to <code>v1</code> in the migration. Switching a shop needs <code>set-agent-engine</code>.</span></div>
+  </div>
+</section>
+
+<!-- 16 -->
+<section id="interview">
+  <div class="sec-head"><span class="sec-num">§16</span><h2>Interview questions</h2></div>
+  <div class="qa-bar">
+    <button type="button" class="btn" id="qa-toggle" aria-pressed="false">Hide answers to practise</button>
+    <span class="small muted">Answers are short on purpose: say them in your own words, then go to the section for detail.</span>
+  </div>
+  <div class="qa" id="qa">
+    <details open><summary><span class="qn">1</span>Walk me through what happens when a customer sends a DM.</summary><div class="ans">
+      <p>Meta posts a webhook. We verify the HMAC, store the raw event once in an inbox table and queue a job, then answer 200. The job stores the message under the customer's one conversation and requests a turn, delayed 3 seconds with a per-chat queueing lock so a burst gets one reply. The turn takes a per-chat advisory lock, reads everything it needs in one transaction, starts a trace row unique per trigger message, picks a playbook with regex rules, builds the prompt, checks rate and budget limits, then loops: the model calls tools allowed in the current stage until <code>send_reply</code> passes the output checks. The reply goes to an outbox and a sender job delivers it in order. (§4)</p></div></details>
+    <details open><summary><span class="qn">2</span>Why build your own harness instead of using an agent framework?</summary><div class="ans">
+      <p>The hard parts are domain invariants: money, stock holds, idempotency, Instagram's 24-hour window, never leaving a customer silent. One engine file of under 700 lines, with explicit budgets, a stage gate and stored steps, is easy to test and to reason about, and the whole loop is visible in one place. The gateway is a thin OpenAI-compatible client, so switching provider is configuration. The cost is building tracing and evals ourselves, which the project did.</p></div></details>
+    <details open><summary><span class="qn">3</span>How do you stop the model from inventing prices, totals or links?</summary><div class="ans">
+      <p>The model never sees a price or a link as something to copy. It writes tokens like <code>[[price:i3f9a2c]]</code> and <code>[[payment_link]]</code>; code fills them from the database at send time. The output check removes tokens and then rejects any amount, link or item id left in the model's own words. Quote cards and payment messages are templates written by code.</p></div></details>
+    <details open><summary><span class="qn">4</span>How does the agent decide which playbook to use?</summary><div class="ans">
+      <p>Code decides before the model runs: ordered regex rules over the stage, the latest customer message and the trigger's details. The owner's answer wins first; mid-order stages stay on <code>new_order</code>; then complaint, menu, payment, status, product, custom, greeting, off-topic, and a <code>new_order</code> default. The model can load one other playbook per turn with a tool. Regex was chosen for cost and testability; the next step would be a small classifier if traces show misrouting. (§5)</p></div></details>
+    <details open><summary><span class="qn">5</span>How is conversation state managed?</summary><div class="ans">
+      <p>An explicit stage column (browsing, collecting_details, awaiting_confirmation, payment_pending, handed_off) plus a draft JSON and a quotes table. Only tools and payment events change the stage. The tool list is filtered by stage and recomputed before every model call, so the model physically can't confirm before a quote exists or cancel an order that isn't pending. (§9)</p></div></details>
+    <details open><summary><span class="qn">6</span>How does it keep context across messages without a growing prompt?</summary><div class="ans">
+      <p>Turns are stateless: each one rebuilds the prompt from Postgres. The model sees the last 20 messages, each capped, plus a context block with stage, draft, quote, facts and pre-orders, and a summary of older messages that a background job writes. Item ids are short, tools are filtered by stage, and only one playbook is loaded, so the prompt stays small. (§6)</p></div></details>
+    <details open><summary><span class="qn">7</span>How does memory work?</summary><div class="ans">
+      <p>Four keyed stores read at the start of every turn: customer facts (written by the model through one tool with an allow-listed set of six keys), chat summaries (a background job, rejected if they contain an amount), the owner's saved answers (from "Always answer this way"), and a glossary of code-mixed words. No vector search: the data is small and exact. The owner can view and delete facts. (§7)</p></div></details>
+    <details open><summary><span class="qn">8</span>What happens if the worker crashes in the middle of a turn?</summary><div class="ans">
+      <p>Every model response and tool result is stored with an idempotency key before moving on. The turn row stays <code>running</code>; a reconciler re-queues it after 2 minutes. The retry finds the same turn row, reuses stored steps instead of re-running them, and calls each tool's <code>replay</code> to restore state, so an order or a payment link is never created twice. (§11)</p></div></details>
+    <details open><summary><span class="qn">9</span>How do you prevent double orders and double messages?</summary><div class="ans">
+      <p>Layers of keys: webhook dedupe by body hash, unique message ids, per-chat queueing lock and job lock, an advisory lock per chat, a turn row unique per trigger, unique step keys, outbox idempotency keys per message, and confirm returning the existing order for an already-confirmed quote. (§11)</p></div></details>
+    <details open><summary><span class="qn">10</span>How do you handle prompt injection?</summary><div class="ans">
+      <p>Customer text is only ever a user message and is never rendered into a prompt template. System news arrives as tool results, which a customer can't forge, and the base prompt says so. And the blast radius is small: tools validate everything, the stage gate limits what exists, orders need a delivered card plus a clear confirmation, and the output checks block amounts, links and promises. (§10)</p></div></details>
+    <details open><summary><span class="qn">11</span>How is a typed "yes" handled when it could mean anything?</summary><div class="ans">
+      <p>A Confirm tap is proof by itself and is handled in code before the model. A typed reply goes through <code>affirmation.classify</code>: no-words, change-words, strong confirm words not next to a question, then acknowledgements like "ok" or "seri", which are <code>unclear</code> without a model call. Only leftovers go to a small classifier. This came from a real incident where "okay" placed and charged an order. (§8)</p></div></details>
+    <details open><summary><span class="qn">12</span>What happens when the model provider is down?</summary><div class="ans">
+      <p>The gateway retries with backoff, falls back to the next configured model, and a circuit breaker skips a failing model for 30 seconds. Each call is bounded by the turn's 60-second deadline. If the turn still can't finish, code sends a holding message, a fixed event message or the owner's own words, and opens one owner question per chat. (§11)</p></div></details>
+    <details open><summary><span class="qn">13</span>How do you control cost?</summary><div class="ans">
+      <p>Per turn: at most 6 model calls, 10 tool calls, 60 seconds. Per chat: 30 turns an hour, 150 a day. Per shop: a daily budget summed from traced cost. Cheap code paths before the model: regex routing, regex confirmation, taps handled in code, too-long messages answered by template. Every model step records tokens and cost.</p></div></details>
+    <details open><summary><span class="qn">14</span>How do you test an LLM agent?</summary><div class="ans">
+      <p>Unit tests for routing, the confirmation table and every output check; integration tests on a database built from the real migrations; live multi-turn evals against the real model, run twice for any prompt or tool change and recorded in a changelog; <code>replay-turn</code> to turn a bad production reply into a test case; shadow mode to compare engines on real traffic.</p></div></details>
+    <details open><summary><span class="qn">15</span>What would you improve next?</summary><div class="ans">
+      <ul>
+        <li>Replace regex routing with a small classifier, measured against traces (one gap is already known: "what else do you have" never reaches the menu playbook).</li>
+        <li>Move the circuit breaker and rate limits to shared storage so several processes agree.</li>
+        <li>Retry customers who got the holding message once the model is back.</li>
+        <li>Make the unpaid-order limit safe under concurrent confirms.</li>
+        <li>Retire v1 and make the safer mode the default for new shops.</li>
+      </ul></div></details>
+    <details open><summary><span class="qn">16</span>Why use Postgres for the queue and locks?</summary><div class="ans">
+      <p>One dependency to run and back up. Jobs, locks, traces and data live in the same database, advisory locks die with their connection if a process crashes, and procrastinate gives queueing locks and per-key job locks. The trade-off is that jobs are queued after commit rather than in the same transaction, so a reconciler covers a lost enqueue.</p></div></details>
+  </div>
+</section>
+
+<!-- 17 -->
+<section id="files">
+  <div class="sec-head"><span class="sec-num">§17</span><h2>Where things are</h2></div>
+  <div class="tbl"><table>
+    <thead><tr><th>What</th><th>File (under <code>backend/app/</code>)</th></tr></thead>
+    <tbody>
+      <tr><td>Webhook in, inbox, event jobs</td><td><code>webhooks/meta.py</code>, <code>webhooks/service.py</code>, <code>webhooks/tasks.py</code></td></tr>
+      <tr><td>Message intake, turn request, owner-answer relay</td><td><code>modules/conversations/service.py</code>, <code>modules/conversations/tasks.py</code></td></tr>
+      <tr><td>The turn engine</td><td><code>modules/agent/engine.py</code></td></tr>
+      <tr><td>Playbook routing and prompt building</td><td><code>modules/agent/context.py</code></td></tr>
+      <tr><td>Tool contract and registry</td><td><code>modules/agent/tools/registry.py</code></td></tr>
+      <tr><td>Tools</td><td><code>tools/catalog.py</code>, <code>orders.py</code>, <code>people.py</code>, <code>memory.py</code>, <code>media.py</code>, <code>reply.py</code></td></tr>
+      <tr><td>Model gateway</td><td><code>modules/agent/llm.py</code></td></tr>
+      <tr><td>Guardrails</td><td><code>modules/agent/guardrails/inbound.py</code>, <code>guardrails/output.py</code></td></tr>
+      <tr><td>Typed confirmation</td><td><code>modules/agent/affirmation.py</code></td></tr>
+      <tr><td>Memory</td><td><code>modules/agent/memory.py</code></td></tr>
+      <tr><td>Traces, health, resume</td><td><code>modules/agent/tracing.py</code></td></tr>
+      <tr><td>Prompts, templates, changelog</td><td><code>modules/agent/prompts/</code>, loaded by <code>prompt_store.py</code></td></tr>
+      <tr><td>Outbox and Instagram's window</td><td><code>modules/conversations/outbox.py</code>, <code>window.py</code></td></tr>
+      <tr><td>Locks, jobs, settings</td><td><code>core/locks.py</code>, <code>core/jobs.py</code>, <code>core/config.py</code></td></tr>
+      <tr><td>The v1 engine</td><td><code>modules/agent/service.py</code> (<code>reply_to_customer</code>), <code>customer_agent.py</code>, <code>conversations/actions.py</code></td></tr>
+      <tr><td>Simulator</td><td><code>api/v1/simulator.py</code></td></tr>
+      <tr><td>Evals (repo root)</td><td><code>evals/run.py</code>, <code>evals/scoring.py</code>, <code>evals/datasets/</code></td></tr>
+      <tr><td>Schema</td><td><code>supabase/migrations/20261029030000_agent_v2_core.sql</code> (stages, quotes, turns, steps) and the migrations after it</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>
+  <p>Written on 9 Nov 2026 from the code at <code>c3b2994</code>. Counts and per-stage tool lists were printed by importing the registry and prompt store; routing and confirmation examples were run through the real functions. Dates, test results and open items come from <code>docs/HANDOFF.md</code> and <code>docs/NEXT-PHASE.md</code>.</p>
+  <p>If the code changes, the code wins.</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  // A copy of context.choose_playbook (backend/app/modules/agent/context.py).
+  var COMPLAINT = /\b(?:complain|complaint|refund|bad|stale|worst|disappointed|wrong order|not happy|damaged|defective|faulty|broken|torn|wrong (?:size|item|colou?r)|not received|never arrived|mosam|kevalam|bekar|kharab)\b/i;
+  var STATUS = /\b(?:where is|status|when will|enga irukku|eppo varum|kab aayega|kahan hai)\b/i;
+  var PRODUCT = /\b(?:ingredient|allerg|egg|eggless|vegan|gluten|nut|sugar|jain|dairy|contain|size|flavou?r|colou?r|fabric|material|wash|measur|weigh|dimension|length|warrant|return|exchange|waterproof|made of|fit|skin|hair|suitable|paraben|organic|shade|scent|fragrance)\w*/i;
+  var CUSTOM = /\b(?:custom|photo cake|birthday|anniversary|bulk|tomorrow|naalaikku|kal|saturday|sunday|monday|tuesday|wednesday|thursday|friday)\b/i;
+  var GREETING = /^\W*(?:hi|hello|hey|hii+|vanakkam|namaste|good (?:morning|evening))\W*$/i;
+  var MENU = /\b(?:menu|catalogue|catalog|price\s?list|(?:all|your)\s+(?:products?|items?)|what(?:'s|\s+is|\s+are)?\s+(?:all\s+)?(?:the\s+)?(?:you\s+)?(?:have|sell|available|there|in\s+stock|products?|items?)|what\s+do\s+you\s+(?:have|sell|offer)|what\s+all|(?:any|anything)\s+(?:else|other)|(?:more|other)\s+(?:products?|items?|options?)|show\s+me|available\s+today)\b/i;
+  var OFF_TOPIC = /\b(?:print\s*\(|console\.log|def\s+\w+\s*\(|system\.out|(?:in|using)\s+(?:python|java|javascript|c\+\+|sql|html)\b|(?:python|java|javascript|sql|html)\s+(?:code|program|script|query)|write\s+(?:me\s+)?(?:a|an|the|some)?\s*(?:code|program|script|essay|poem|story|song|letter|email|joke)|(?:program|code|algorithm)\s+(?:for|to)\s+(?:print|find|check|calculate|reverse|sort|add|count|generate)|armstrong|fibonacci|palindrome|prime\s+numbers?|factorial|homework|assignment|equation|integral|derivative|square\s+root|solve\s+(?:this|for)|tell\s+(?:me\s+)?a\s+(?:joke|story)|jokes?\b|poem|riddle|lyrics|capital\s+of|who\s+(?:is|was)\s+the\s+(?:president|prime\s+minister|pm|ceo|king)|who\s+(?:invented|discovered)|politics|election|weather|forecast|cricket\s+score|ipl\s+score|stock\s+market|translate\s+(?:this|to|into))|#include|^\s*(?:what\s+is\s+|what's\s+|calculate\s+)?[\d.()\s]+(?:[-+*\/^×÷][\d.()\s]+)+=?\s*\??\s*$/i;
+  var ABUSE = /\b(?:idiot|moron|shut\s+up|fuck\w*|f\*+k|bitch|bastard|loosu|naaye|chutiya|kamina)\b/i;
+
+  function choosePlaybook(stage, text, details) {
+    details = details || {};
+    if (details.ownerAnswer) return ["owner_answer", "Rule 1: the trigger is the owner's answer, whatever the stage."];
+    if (stage === "collecting_details" || stage === "awaiting_confirmation") return ["new_order", "Rule 2: mid-order stages stay on the order."];
+    if (details.media) return ["story_or_photo", "Rule 3: a story reply or an attachment."];
+    if (COMPLAINT.test(text)) return ["complaint", "Rule 4: a complaint word."];
+    if (MENU.test(text) && !PRODUCT.test(text)) return ["menu", "Rule 5: menu words and no product-detail word."];
+    if (stage === "payment_pending") return STATUS.test(text)
+      ? ["order_status", "Rule 6: payment pending and a status word."]
+      : ["payment_problem", "Rule 6: payment pending and no status word."];
+    if (STATUS.test(text)) return ["order_status", "Rule 7: a status word."];
+    if (PRODUCT.test(text)) return ["product_question", "Rule 8: a product-detail word."];
+    if (CUSTOM.test(text)) return ["custom_or_future_order", "Rule 9: a custom, occasion or day word."];
+    if (GREETING.test(text)) return ["small_talk", "Rule 10: the whole message is a greeting."];
+    if (OFF_TOPIC.test(text) || ABUSE.test(text)) return ["abuse_or_off_topic", "Rule 11: off-topic or abusive."];
+    return ["new_order", "Rule 12: nothing else matched."];
+  }
+
+  // A copy of affirmation.classify (backend/app/modules/agent/affirmation.py), without the model call.
+  var NO = /\b(?:no|nope|nah|venam|vendam|venaam|vendaam|nahi|nahin|cancel|don'?t)\b|வேண்டாம்|नहीं/i;
+  var CHANGE = /\b(?:change|maathu|maathanum|maatha|badal|badlo|badlna|instead|add|remove)\b|மாற்ற|बदल/i;
+  var STRONG = /\b(?:confirm|confirmed|go ahead|place (?:the |my |this |that )?order|book (?:it|that|this|them|pannunga|pannu|pannidunga|karo|kar do|kardo|kar dijiye)|order (?:pannunga|pannu|pannidunga|pannirunga|podunga|podu|karo|kar do|kardo|kar dijiye|kardijiye)|uruthi)\b|உறுதி|கன்பார்ம்|கன்ஃபர்ம்|ஆர்டர் பண்ணுங்க|ஆர்டர் போடுங்க|कन्फर्म|ऑर्डर कर|बुक कर/i;
+  var HOLD = /\b(?:not|yet|wait|later|illa|ila|mat|how|why|what|when|should|shall|can i|do i|kaise|kya|eppadi|epdi|enna)\b|\?/i;
+  var WEAK = /\b(?:ok|okay|okk|k|kk|yes|yeah|yep|yup|ya|sure|fine|done|alright|cool|great|perfect|sounds good|looks good|seri|sari|sariya|haan|han|ha|theek|thik|chalega|podunga|pannunga)\b|👍|👌|சரி|ஆமா|हाँ|हां|ठीक/i;
+
+  function classifyConfirm(text) {
+    if (NO.test(text)) return ["no", "A \"no\" word. Nothing is placed; the model asks what they'd like instead.", false];
+    if (CHANGE.test(text)) return ["change", "A \"change\" word. The model updates the draft and makes a new quote.", false];
+    if (STRONG.test(text) && !HOLD.test(text)) return ["yes", "A clear request to place the order. confirm_order places it.", false];
+    if (WEAK.test(text)) return ["unclear", "An acknowledgement, decided in code without a model call. Nothing is placed; the model tells them to tap Confirm.", false];
+    return ["small model decides", "No rule decided it. A small classifier gets the text; if it fails, the answer is unclear.", true];
+  }
+
+  window.sxRoute = choosePlaybook;
+  window.sxConfirm = classifyConfirm;
+
+  function $(id) { return document.getElementById(id); }
+
+  var rtText = $("rt-text"), rtStage = $("rt-stage"), rtMedia = $("rt-media"), rtOwner = $("rt-owner");
+  function renderRoute() {
+    var r = choosePlaybook(rtStage.value, rtText.value, { media: rtMedia.checked, ownerAnswer: rtOwner.checked });
+    $("rt-pb").textContent = r[0];
+    $("rt-why").textContent = r[1];
+  }
+  if (rtText) {
+    [rtText, rtStage, rtMedia, rtOwner].forEach(function (el) {
+      el.addEventListener("input", renderRoute);
+      el.addEventListener("change", renderRoute);
+    });
+    document.querySelectorAll("#router [data-ex]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        rtText.value = b.getAttribute("data-ex");
+        rtStage.value = b.getAttribute("data-stage") || "browsing";
+        rtMedia.checked = false; rtOwner.checked = false;
+        renderRoute();
+      });
+    });
+    renderRoute();
+  }
+
+  var cfText = $("cf-text");
+  function renderConfirm() {
+    var r = classifyConfirm(cfText.value);
+    $("cf-res").textContent = r[0];
+    $("cf-why").textContent = r[1];
+    $("cf-out").classList.toggle("model", r[2]);
+  }
+  if (cfText) {
+    cfText.addEventListener("input", renderConfirm);
+    document.querySelectorAll("#confirm [data-cf]").forEach(function (b) {
+      b.addEventListener("click", function () { cfText.value = b.getAttribute("data-cf"); renderConfirm(); });
+    });
+    renderConfirm();
+  }
+
+  var toggle = $("qa-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", function () {
+      var hide = toggle.getAttribute("aria-pressed") !== "true";
+      document.querySelectorAll("#qa details").forEach(function (d) { d.open = !hide; });
+      toggle.setAttribute("aria-pressed", hide ? "true" : "false");
+      toggle.textContent = hide ? "Show all answers" : "Hide answers to practise";
+    });
+  }
+
+  // Highlight the section in view in the contents rail.
+  try {
+    var links = {};
+    document.querySelectorAll("nav.toc a").forEach(function (a) { links[a.getAttribute("href").slice(1)] = a; });
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting && links[e.target.id]) {
+          Object.keys(links).forEach(function (k) { links[k].classList.remove("active"); });
+          links[e.target.id].classList.add("active");
+        }
+      });
+    }, { rootMargin: "-20% 0px -70% 0px" });
+    document.querySelectorAll("main section[id]").forEach(function (s) { obs.observe(s); });
+  } catch (err) { /* the page works without it */ }
+})();
+</script>

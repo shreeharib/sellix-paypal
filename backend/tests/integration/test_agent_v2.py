@@ -9,8 +9,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select, update
 
+from app.core.config import get_settings
 from app.core.db import session_scope
-from app.modules.agent import items, llm
+from app.modules.agent import items, llm, prompt_store
 from app.modules.agent import service as agent
 from app.modules.agent.models import AgentTurn, TurnStep
 from app.modules.channels import service as channels
@@ -938,3 +939,99 @@ async def test_a_menu_answer_without_the_preorders_is_still_sent_after_one_chanc
     assert instagram.texts() == ["We have cookies ₹60 today."]  # not the holding message
     health = await agent.health_report(v2_shop.merchant_id, days=1)
     assert health["by_status"] == {"replied": 1}
+
+
+class Router:
+    """Stands in for the playbook router's model call: answers each call with the next name."""
+
+    def __init__(self, *names: str) -> None:
+        self.names = list(names)
+        self.calls = 0
+
+    async def __call__(self, *_: object, **__: object) -> llm.Completion:
+        self.calls += 1
+        return llm.Completion(
+            content=f'{{"playbook": "{self.names.pop(0)}"}}',
+            model="router-model",
+            input_tokens=40,
+            output_tokens=4,
+            latency_ms=2,
+        )
+
+
+@pytest.fixture
+def router_model(monkeypatch: pytest.MonkeyPatch) -> Router:
+    fake = Router()
+    monkeypatch.setattr(llm, "complete", fake)
+    monkeypatch.setattr(get_settings(), "agent_playbook_router", "model")
+    return fake
+
+
+async def only_turn(conversation_id: uuid.UUID) -> tuple[AgentTurn, list[TurnStep]]:
+    async with session_scope() as session:
+        turn = await session.scalar(
+            select(AgentTurn).where(AgentTurn.conversation_id == conversation_id)
+        )
+        assert turn is not None
+        steps = list(await session.scalars(select(TurnStep).where(TurnStep.turn_id == turn.id)))
+    return turn, steps
+
+
+async def test_the_router_model_chooses_the_playbook_and_the_turn_records_it(
+    v2_shop: ChannelConnection, model: ScriptedModel, instagram: Instagram, router_model: Router
+) -> None:
+    router_model.names = ["menu"]
+    model.then([("send_reply", {"text": "We have cookies today.", "language": "en"})])
+
+    conversation_id = await customer_says("what else do you have", "m-1")
+
+    turn, steps = await only_turn(conversation_id)
+    assert turn.playbook == "menu"
+    assert turn.model_calls == 2  # the router and the reply
+    assert prompt_store.ref("router.playbook") in turn.prompt_refs
+    assert prompt_store.ref("playbook.menu") in turn.prompt_refs
+    system = model.calls[0][0][0].content
+    assert prompt_store.render("playbook.menu") in system
+    assert [s.idempotency_key for s in steps if s.idempotency_key.endswith(":router")]
+    assert instagram.texts() == ["We have cookies today."]
+
+
+async def test_a_resumed_turn_keeps_the_playbook_it_started_with(
+    v2_shop: ChannelConnection, model: ScriptedModel, instagram: Instagram, router_model: Router
+) -> None:
+    router_model.names = ["menu", "complaint"]
+    model.then(RuntimeError("the worker died"))
+    async with session_scope() as session:
+        turn = await conversations.handle_incoming(
+            session,
+            IncomingMessage(
+                channel="instagram",
+                shop_account_id=SHOP_ACCOUNT_ID,
+                customer_id=CUSTOMER_ID,
+                message_id="m-1",
+                text="what else do you have",
+            ),
+        )
+    assert turn is not None
+    with pytest.raises(RuntimeError):
+        await agent.run_turn(turn.conversation_id)
+
+    model.then([("send_reply", {"text": "We have cookies today.", "language": "en"})])
+    await agent.run_turn(turn.conversation_id)
+
+    resumed, _ = await only_turn(turn.conversation_id)
+    assert resumed.status == "replied"
+    assert resumed.playbook == "menu"
+    assert router_model.calls == 1
+    assert prompt_store.render("playbook.menu") in model.calls[-1][0][0].content
+
+
+async def test_a_gated_turn_never_calls_the_router(
+    v2_shop: ChannelConnection, model: ScriptedModel, instagram: Instagram, router_model: Router
+) -> None:
+    conversation_id = await customer_says("a" * 4001, "m-1")
+
+    turn, _ = await only_turn(conversation_id)
+    assert (turn.status, turn.playbook) == ("gated", None)
+    assert router_model.calls == 0
+    assert model.calls == []

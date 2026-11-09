@@ -116,7 +116,11 @@ def owner_answer(line: ChatLine) -> str | None:
 
 
 def choose_playbook(stage: str, text: str, details: dict[str, object]) -> str:
-    """One playbook per turn, from the stage and cheap checks on the latest message."""
+    """The fallback rules: a playbook from the stage and cheap checks on the latest message.
+
+    The model in `router.py` picks each turn's playbook; these rules decide only when it can't
+    (it failed, timed out or named no known playbook) or when AGENT_PLAYBOOK_ROUTER=rules.
+    """
     event = details.get("event")
     if isinstance(event, dict) and event.get("event") == "owner_answered":
         return "owner_answer"  # the owner's answer comes first, whatever the stage
@@ -146,20 +150,20 @@ def choose_playbook(stage: str, text: str, details: dict[str, object]) -> str:
 def build(
     ctx: TurnContext,
     *,
+    playbook: str,
     history: list[ChatLine],
     profile: str | None,
     draft: dict[str, object],
     quote: SavedQuote | None,
     open_questions: list[str],
     window_closing: bool,
-    trigger: ChatLine,
     open_orders: list[int] = (),  # pyright: ignore[reportArgumentType]
     facts: list[tuple[str, object]] = (),  # pyright: ignore[reportArgumentType]
     rules: list[tuple[str, str]] = (),  # pyright: ignore[reportArgumentType]
     glossary: list[tuple[str, str]] = (),  # pyright: ignore[reportArgumentType]
     summary: str | None = None,
 ) -> Context:
-    playbook = choose_playbook(ctx.stage, ctx.customer_text, trigger.details)
+    """The messages for the model: system prompt (base, `playbook`, context), then the chat."""
     system = "\n\n".join(
         [
             _use(ctx, "base"),

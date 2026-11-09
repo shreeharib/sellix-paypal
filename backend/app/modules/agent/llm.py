@@ -156,8 +156,16 @@ async def generate(messages: Sequence[Message], *, tools: Sequence[ToolSpec] = (
     return completion
 
 
-async def complete(messages: list[ChatMessage], *, json_output: bool = False) -> Completion:
-    """The v1 call: one answer as text (JSON when asked), no tools."""
+async def complete(
+    messages: list[ChatMessage],
+    *,
+    json_output: bool = False,
+    model_chain: Sequence[str] | None = None,
+) -> Completion:
+    """One answer as text (JSON when asked), no tools: v1 and the small helper calls.
+
+    `model_chain`: the models to try instead of LLM_MODELS (a cheaper model for routing, say).
+    """
 
     def body(model: str) -> dict[str, Any]:
         request: dict[str, Any] = {
@@ -168,7 +176,7 @@ async def complete(messages: list[ChatMessage], *, json_output: bool = False) ->
             request |= _json_format()
         return request
 
-    return await _with_fallbacks(body)
+    return await _with_fallbacks(body, model_chain)
 
 
 async def describe_image(image_url: str, *, catalog_names: list[str]) -> dict[str, Any]:
@@ -207,10 +215,12 @@ def models() -> list[str]:
     return configured or [settings.llm_model]
 
 
-async def _with_fallbacks(body: Callable[[str], dict[str, Any]]) -> Completion:
+async def _with_fallbacks(
+    body: Callable[[str], dict[str, Any]], chain: Sequence[str] | None = None
+) -> Completion:
     failed: list[str] = []
     errors: list[str] = []
-    for model in models():
+    for model in chain or models():
         if not breaker.available(model):
             errors.append(f"{model}: circuit open")
             continue

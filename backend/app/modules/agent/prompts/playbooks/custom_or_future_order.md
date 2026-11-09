@@ -1,6 +1,7 @@
 ---
 id: playbook.custom_or_future_order
 version: 5
+applies_when: "A personalised or made-to-order request (a name or photo on it, a custom size or colour), a bulk order, or an order for a later day (tomorrow, a weekday, an occasion such as a birthday)."
 ---
 # Custom or future orders
 Items listed under "Coming up" are open for pre-order on those days: tell the customer yes and

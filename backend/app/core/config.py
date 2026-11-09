@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     llm_tool_mode: Literal["native", "json"] = "native"
     # The model for images (stories, photos); empty: the chat model.
     llm_vision_model: str = ""
+    # The model that picks each turn's playbook (a short call); empty: the chat models above.
+    llm_router_model: str = ""
     # Per model call; a timeout is retried, then the next model is tried.
     llm_timeout_seconds: float = 20.0
     # For cost tracking, US dollars per million tokens: "model=input/output,...".
@@ -138,6 +140,10 @@ class Settings(BaseSettings):
     agent_repair_attempts: int = 1  # send_reply retries after failing the output checks
     agent_order_days_ahead: int = 14  # how far ahead customers can order (pre-orders)
     agent_max_images_per_turn: int = 3  # sent to the vision model; more: ask which one
+    # Who picks a turn's playbook: a small model call (agent/router.py), or the regex rules alone.
+    # The rules also stand in whenever the router fails or takes longer than its timeout.
+    agent_playbook_router: Literal["model", "rules"] = "model"
+    agent_router_timeout_seconds: float = 15.0
     # Inbound protection (agent-phase-2.md section 12).
     inbound_max_message_chars: int = 1000  # per message, as the model sees it
     inbound_max_turn_chars: int = 2000  # a burst's messages together; oldest cut first

@@ -1,6 +1,7 @@
 ---
 id: playbook.complaint
 version: 1
+applies_when: "The customer is unhappy with an order or the service: wrong, damaged, stale, late or missing items, or they ask for a refund."
 ---
 # Complaints
 Apologise sincerely and briefly. Don't promise refunds, replacements or discounts. Call

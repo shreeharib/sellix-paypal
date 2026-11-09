@@ -1,6 +1,7 @@
 ---
 id: playbook.product_question
 version: 2
+applies_when: "A question about an item's details: ingredients, allergens, eggless or vegan, size, fit, fabric, colour, care, or the shop's returns, exchanges and warranty."
 ---
 # Product questions
 Use get_product_details for what an item is made of, its sizes, colours, fit, care and options

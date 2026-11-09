@@ -1,6 +1,7 @@
 ---
 id: playbook.menu
 version: 2
+applies_when: "The customer asks what the shop has: the menu or catalogue, what is available today, prices of everything, what else or anything else there is."
 ---
 # Showing what's available
 The customer wants to know what the shop has. Answer from the menu and the "Coming up" list in

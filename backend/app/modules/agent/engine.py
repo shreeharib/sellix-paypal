@@ -23,7 +23,7 @@ import structlog
 from app.core import locks
 from app.core.config import get_settings
 from app.core.db import session_scope
-from app.modules.agent import context, llm, memory, prompt_store, tracing
+from app.modules.agent import context, llm, memory, prompt_store, router, tracing
 from app.modules.agent.guardrails import inbound
 from app.modules.agent.tools import orders as order_tools
 from app.modules.agent.tools import registry
@@ -76,7 +76,7 @@ async def _run_turn(conversation_id: uuid.UUID, *, shadow: bool) -> None:
     loaded = await _load(conversation_id, shadow=shadow)
     if loaded is None:
         return
-    ctx, built, trace = loaded
+    ctx, gathered, trace = loaded
     status, error = "fallback", None
     gate = await inbound.check(
         turn_id=trace.turn_id,
@@ -92,6 +92,8 @@ async def _run_turn(conversation_id: uuid.UUID, *, shadow: bool) -> None:
             await _gated(ctx, gate)
     else:
         try:
+            # Only now, past the gate: a gated turn (too long, rate limit, budget) costs no call.
+            built = await _prepare(ctx, gathered, trace)
             status = await _loop(ctx, built, trace, started)
         except llm.LLMError as exc:
             log.error(
@@ -104,7 +106,7 @@ async def _run_turn(conversation_id: uuid.UUID, *, shadow: bool) -> None:
         trace,
         status,
         stage_after=ctx.stage,
-        playbook=built.playbook,
+        playbook=ctx.playbook or None,
         prompt_refs=ctx.prompt_refs,
         latency_ms=round((time.monotonic() - started) * 1000),
         error=error,
@@ -401,7 +403,7 @@ async def _fall_back(ctx: TurnContext) -> None:
 
 async def _load(
     conversation_id: uuid.UUID, *, shadow: bool
-) -> tuple[TurnContext, context.Context, tracing.Trace] | None:
+) -> tuple[TurnContext, "_Gathered", tracing.Trace] | None:
     gathered = await _gather(conversation_id)
     if gathered is None:
         return None
@@ -417,9 +419,53 @@ async def _load(
     )
     if trace is None:
         return None  # this message was already answered
-    ctx, built = _build(gathered, trace.turn_id)
+    ctx = _turn_context(gathered, trace.turn_id)
     ctx.mode = mode
-    return ctx, built, trace
+    return ctx, gathered, trace
+
+
+ROUTER_STEP = -2  # the playbook router's step number in turn_steps (taps are -1, the loop 0+)
+
+
+async def _prepare(
+    ctx: TurnContext, gathered: "_Gathered", trace: tracing.Trace
+) -> context.Context:
+    """Pick the turn's playbook (a resumed turn keeps its own) and build what the model sees."""
+    key = f"{trace.turn_id}:router"
+    playbook = trace.playbook
+    if playbook is None:
+        choice = await router.choose(
+            stage=ctx.stage,
+            history=gathered.history,
+            trigger=gathered.trigger,
+            customer_text=ctx.customer_text,
+        )
+        playbook = choice.playbook
+        if choice.completion is not None:
+            completion = choice.completion
+            await tracing.record(
+                trace,
+                step=ROUTER_STEP,
+                kind="model",
+                name=completion.model,
+                key=key,
+                request={"purpose": "playbook_router", "stage": ctx.stage},
+                result={
+                    "content": completion.content,
+                    "model": completion.model,
+                    "cost_usd": completion.cost_usd,
+                    "playbook": playbook,
+                    "by": choice.by,
+                },
+                input_tokens=completion.input_tokens,
+                output_tokens=completion.output_tokens,
+                latency_ms=completion.latency_ms,
+            )
+        await tracing.set_playbook(trace, playbook)
+    if key in trace.steps:
+        ctx.prompt_refs.add(prompt_store.ref(router.PROMPT_ID))
+    ctx.playbook = playbook
+    return _context(ctx, gathered, playbook)
 
 
 async def replay_turn(turn_id: uuid.UUID) -> dict[str, Any]:
@@ -434,7 +480,15 @@ async def replay_turn(turn_id: uuid.UUID) -> dict[str, Any]:
     gathered = await _gather(conversation_id, trigger_id=trigger_id, for_replay=True)
     if gathered is None:
         raise LookupError(f"Turn {turn_id} can't be rebuilt (the chat or its message is gone)")
-    ctx, built = _build(gathered, turn_id)
+    ctx = _turn_context(gathered, turn_id)
+    choice = await router.choose(
+        stage=ctx.stage,
+        history=gathered.history,
+        trigger=gathered.trigger,
+        customer_text=ctx.customer_text,
+    )
+    ctx.playbook = choice.playbook
+    built = _context(ctx, gathered, choice.playbook)
     completion = await llm.generate(built.messages, tools=registry.offered(ctx))
     return {
         "turn_id": str(turn_id),
@@ -542,11 +596,12 @@ async def _gather(
         )
 
 
-def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, context.Context]:
+def _turn_context(gathered: _Gathered, turn_id: uuid.UUID) -> TurnContext:
+    """The turn's working state, before a playbook is chosen."""
     seen, trigger, state = gathered.history, gathered.trigger, gathered.state
     customer = next((line for line in reversed(seen) if line.sender == "customer"), None)
     by_customer = trigger.sender == "customer"
-    ctx = TurnContext(
+    return TurnContext(
         turn_id=turn_id,
         merchant=gathered.merchant,
         conversation_id=state.id,
@@ -572,23 +627,25 @@ def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, contex
             (line.body for line in reversed(seen) if line.sender == "agent"), None
         ),
     )
-    built = context.build(
+
+
+def _context(ctx: TurnContext, gathered: _Gathered, playbook: str) -> context.Context:
+    """What the model sees this turn, with the chosen playbook."""
+    return context.build(
         ctx,
-        history=seen,
+        playbook=playbook,
+        history=gathered.history,
         profile=gathered.profile,
-        draft=state.draft,
+        draft=gathered.state.draft,
         quote=gathered.quote,
         open_orders=gathered.open_orders,
         open_questions=gathered.open_questions,
         window_closing=gathered.window_closing,
-        trigger=trigger,
         facts=gathered.facts,
         rules=gathered.rules,
         glossary=gathered.glossary,
         summary=gathered.summary,
     )
-    ctx.playbook = built.playbook
-    return ctx, built
 
 
 def causal_order(history: list[ChatLine]) -> list[ChatLine]:

@@ -31,6 +31,9 @@ TEST_ENV = {
     "LLM_MODEL": "test-model",
     "LLM_REASONING_EFFORT": "",
     "TURN_BATCH_SECONDS": "3",
+    # Turns route by the rules, so scripted conversations never make a real router call; the
+    # router's own tests switch it to "model" with a fake model.
+    "AGENT_PLAYBOOK_ROUTER": "rules",
     # Only tests/sandbox talks to PayPal, with its own credentials (see that conftest).
     "PAYPAL_ENV": "sandbox",
     "PAYPAL_CLIENT_ID": "",

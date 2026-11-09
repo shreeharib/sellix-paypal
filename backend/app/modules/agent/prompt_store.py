@@ -36,6 +36,7 @@ class _Entry:
     path: Path
     # One template for a prompt; one per language for a customer-facing text.
     templates: Mapping[str, Template]
+    applies_when: str | None = None  # a playbook's one-line "use me when", read by the router
 
 
 class PromptStore:
@@ -69,6 +70,14 @@ class PromptStore:
     def languages(self, template_id: str) -> tuple[str, ...]:
         return tuple(self._entry(template_id).templates)
 
+    def applies_when(self, prompt_id: str) -> str | None:
+        """The prompt's `applies_when` header, if it has one."""
+        return self._entry(prompt_id).applies_when
+
+    def ids(self, prefix: str = "") -> list[str]:
+        """Prompt ids starting with `prefix`, sorted."""
+        return sorted(prompt_id for prompt_id in self._entries if prompt_id.startswith(prefix))
+
     def _entry(self, prompt_id: str) -> _Entry:
         entry = self._entries.get(prompt_id)
         if entry is None:
@@ -94,7 +103,18 @@ class PromptStore:
             raise PromptError(f"{path}: missing the front matter header (--- id, version ---)")
         header = self._header(path, parts[1], _PROMPT_KEYS)
         body = parts[2]
-        return _Entry(header["id"], header["version"], path, {"": self._compile(path, body)})
+        applies_when = header.get("applies_when")
+        if applies_when is not None and not (
+            isinstance(applies_when, str) and applies_when.strip()
+        ):
+            raise PromptError(f"{path}: `applies_when` must be a non-empty line of text")
+        return _Entry(
+            header["id"],
+            header["version"],
+            path,
+            {"": self._compile(path, body)},
+            applies_when.strip() if applies_when else None,
+        )
 
     def _load_template(self, path: Path) -> _Entry:
         header = self._header(path, path.read_text(encoding="utf-8"), _TEMPLATE_KEYS)
@@ -153,3 +173,11 @@ def text(template_id: str, language: str, **values: Any) -> str:
 
 def ref(prompt_id: str) -> str:
     return store().ref(prompt_id)
+
+
+def applies_when(prompt_id: str) -> str | None:
+    return store().applies_when(prompt_id)
+
+
+def ids(prefix: str = "") -> list[str]:
+    return store().ids(prefix)

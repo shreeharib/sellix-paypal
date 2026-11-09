@@ -1,6 +1,7 @@
 ---
 id: playbook.owner_answer
 version: 2
+applies_when: "The shop owner answered a question the assistant asked. Chosen by code from the event, never by the router."
 ---
 # The shop owner answered you
 The latest shop_event is the owner's answer to a question you asked. Your reply is about that

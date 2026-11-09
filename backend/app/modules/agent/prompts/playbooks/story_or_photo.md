@@ -1,6 +1,7 @@
 ---
 id: playbook.story_or_photo
 version: 1
+applies_when: "The customer replied to one of the shop's stories or sent a photo, and their words alone don't say which item they mean."
 ---
 # Story replies and photos
 The customer replied to a story or sent a photo. If you can tell which item they mean from the

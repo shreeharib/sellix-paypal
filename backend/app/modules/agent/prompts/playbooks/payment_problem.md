@@ -1,6 +1,7 @@
 ---
 id: playbook.payment_problem
 version: 2
+applies_when: "An order is waiting for payment and the message is about paying it: they say they paid, they want the link again, the payment failed, or they want to cancel that order."
 ---
 # Payment questions
 An order is waiting for payment; "Orders waiting for payment" in your context gives its number.

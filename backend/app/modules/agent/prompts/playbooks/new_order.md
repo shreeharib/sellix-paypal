@@ -1,6 +1,7 @@
 ---
 id: playbook.new_order
 version: 5
+applies_when: "The customer wants to buy or is putting an order together: items, quantities, pickup or delivery, the day, confirming or changing a quote. Also the choice when nothing else fits."
 ---
 # Taking an order
 1. Find the items with search_catalog (or use the ids from today's menu).

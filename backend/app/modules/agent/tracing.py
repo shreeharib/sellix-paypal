@@ -21,6 +21,7 @@ from app.modules.agent.models import AgentTurn, TurnStep
 class Trace:
     turn_id: uuid.UUID
     steps: dict[str, dict[str, Any]] = field(default_factory=dict)  # idempotency key -> result
+    playbook: str | None = None  # chosen at the start of the turn; a resumed turn keeps it
 
     @property
     def resumed(self) -> bool:
@@ -57,7 +58,16 @@ async def start(
         if turn is None or turn.status != "running":
             return None
         steps = await session.scalars(select(TurnStep).where(TurnStep.turn_id == turn.id))
-        return Trace(turn.id, {step.idempotency_key: step.result for step in steps})
+        return Trace(turn.id, {step.idempotency_key: step.result for step in steps}, turn.playbook)
+
+
+async def set_playbook(trace: Trace, playbook: str) -> None:
+    """Store the turn's playbook as soon as it is chosen, so a resumed turn uses the same one."""
+    trace.playbook = playbook
+    async with session_scope() as session:
+        await session.execute(
+            update(AgentTurn).where(AgentTurn.id == trace.turn_id).values(playbook=playbook)
+        )
 
 
 async def record(
@@ -98,7 +108,7 @@ async def finish(
     status: str,
     *,
     stage_after: str,
-    playbook: str,
+    playbook: str | None,
     prompt_refs: set[str],
     latency_ms: int,
     error: str | None = None,
@@ -181,7 +191,8 @@ async def first_step(
             return None
         step = await session.scalar(
             select(TurnStep.result)
-            .where(TurnStep.turn_id == turn_id, TurnStep.kind == "model")
+            # The loop's first call, not the playbook router (stored with a negative step).
+            .where(TurnStep.turn_id == turn_id, TurnStep.kind == "model", TurnStep.step >= 0)
             .order_by(TurnStep.step)
             .limit(1)
         )
