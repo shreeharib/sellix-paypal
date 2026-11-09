@@ -5,6 +5,7 @@ and never from the buyer merely returning to our page.
 """
 
 import dataclasses
+import math
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,10 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import session_scope
+from app.core.money import format_money
 from app.modules.merchants import service as merchants
 from app.modules.orders import service as orders
-from app.modules.orders.schemas import PaymentResult, PlacedOrder, RefundStatus, RefundTicket
-from app.modules.payments import paypal, upi
+from app.modules.orders.schemas import (
+    OrderSummary,
+    PaymentResult,
+    PlacedOrder,
+    RefundStatus,
+    RefundTicket,
+)
+from app.modules.payments import fx, paypal, simulator, upi
 from app.modules.payments.models import Payment
 from app.modules.shop_profile import service as shop_profile
 
@@ -29,9 +37,33 @@ log = structlog.get_logger()
 
 PayPalError = paypal.PayPalError
 
+_INVOICE_PREFIX = "INV2-"  # PayPal invoice ids; their payment rows share the table with orders
+
 
 class PaymentUnavailable(RuntimeError):
     """No online payment for this order; the message says why (for logs and the merchant)."""
+
+
+RetryReason = Literal["not_payable", "too_many_attempts", "window_over", "cooldown"]
+
+
+class RetryRefused(RuntimeError):
+    """A new payment link isn't allowed for this order: for now (cooldown) or at all."""
+
+    def __init__(self, reason: RetryReason, wait_seconds: int = 0) -> None:
+        super().__init__(f"No new payment link: {reason}")
+        self.reason: RetryReason = reason
+        self.wait_seconds = wait_seconds
+
+
+@dataclass(frozen=True)
+class RetryStatus:
+    """Whether the customer may have another payment link for an unpaid order."""
+
+    can_retry: bool  # a new link is allowed now, or will be once `wait_seconds` have passed
+    wait_seconds: int  # cooldown left after a failed payment; 0: ask now
+    attempts_left: int  # links still allowed for this order, counting from now
+    reason: RetryReason | None  # why not, when `can_retry` is False
 
 
 @dataclass(frozen=True)
@@ -63,14 +95,51 @@ class OrderPaymentLink:
     total_minor: int
 
 
+SIMULATOR_SOURCE = simulator.SOURCE  # the webhook inbox's name for the simulator
+SIMULATOR_SIGNATURE_HEADER = simulator.SIGNATURE_HEADER
+
+
+def simulator_enabled() -> bool:
+    """Whether the built-in payment simulator is on (never in production)."""
+    return simulator.enabled()
+
+
+def verify_simulator_webhook(body: bytes, signature: str) -> bool:
+    return simulator.verify(body, signature)
+
+
 def configured() -> bool:
-    """Whether customers can be sent a payment link at all (PayPal keys are set)."""
-    return paypal.configured()
+    """Whether customers can be sent a payment link at all (PayPal keys set or simulator on)."""
+    return simulator.enabled() or paypal.configured()
 
 
 def accepts(currency: str) -> bool:
-    """Whether an online payment link can be offered for an order in this currency via PayPal."""
-    return paypal.configured() and currency in paypal.SUPPORTED_CURRENCIES
+    """Whether a payment link can be offered for an order in this currency.
+
+    The simulator takes any currency. PayPal takes its own list directly; rupee orders are
+    charged in dollars (see fx.py).
+    """
+    if simulator.enabled():
+        return True
+    return paypal.configured() and (
+        currency in paypal.SUPPORTED_CURRENCIES or currency in fx.CONVERTIBLE
+    )
+
+
+@dataclass(frozen=True)
+class Checkout:
+    """A PayPal payment the customer pays at `url`. PayPal charges `charge_minor`, which differs
+    from the order's total when the order's currency is one PayPal can't take."""
+
+    url: str
+    charge_minor: int
+    charge_currency: str
+    converted: bool
+
+    @property
+    def charge_label(self) -> str:
+        """What PayPal charges, for the customer ("$10.22"); empty when it is the order total."""
+        return format_money(self.charge_minor, self.charge_currency) if self.converted else ""
 
 
 def create_upi_checkout(
@@ -91,21 +160,68 @@ def create_upi_checkout(
 
 async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
     """Create the PayPal payment for an order and return the link the customer pays at."""
-    if not paypal.configured():
-        raise PaymentUnavailable("PayPal isn't set up")
-    if placed.currency not in paypal.SUPPORTED_CURRENCIES:
-        raise PaymentUnavailable(f"PayPal can't take payments in {placed.currency}")
+    return (await start_checkout(placed, shop_name=shop_name)).url
 
+
+async def start_checkout(placed: PlacedOrder, *, shop_name: str) -> Checkout:
+    """The payment link for an order: the one already open, else a new attempt.
+
+    A new attempt is refused (RetryRefused) while the cooldown after a failed one runs, once the
+    order has used all its attempts, and after its hold has run out. Asking again while a link is
+    still open (the customer wants it resent) never makes a second payment. A rupee order is
+    charged in dollars at the live rate; the payment row keeps the dollar amount PayPal was asked
+    for, and the capture is checked against that.
+    """
+    simulated = simulator.enabled()
+    if not simulated and not paypal.configured():
+        raise PaymentUnavailable("PayPal isn't set up")
+    async with session_scope() as session:
+        order = await orders.get_order(session, placed.order_id)
+        attempts = await _attempts(session, placed.order_id)
+    open_attempt = next(
+        (a for a in reversed(attempts) if a.status in ("created", "approved") and a.approve_url),
+        None,
+    )
+    if open_attempt is not None and open_attempt.approve_url:
+        return Checkout(
+            open_attempt.approve_url,
+            open_attempt.amount_minor,
+            open_attempt.currency,
+            converted=open_attempt.currency != placed.currency,
+        )
+    if attempts:
+        status = _retry_policy(order, attempts, datetime.now(UTC))
+        if not status.can_retry or status.wait_seconds > 0:
+            raise RetryRefused(status.reason or "cooldown", status.wait_seconds)
+    if simulated:
+        return await _start_simulated_checkout(placed)
+    return await _start_paypal_checkout(placed, shop_name=shop_name, attempt=len(attempts) + 1)
+
+
+async def _start_paypal_checkout(placed: PlacedOrder, *, shop_name: str, attempt: int) -> Checkout:
+    if placed.currency in paypal.SUPPORTED_CURRENCIES:
+        charge_minor, charge_currency = placed.total_minor, placed.currency
+    elif placed.currency in fx.CONVERTIBLE:
+        charge_currency = fx.CHARGE_CURRENCY
+        charge_minor = fx.to_charge_minor(placed.total_minor, await fx.per_dollar(placed.currency))
+    else:
+        raise PaymentUnavailable(f"PayPal can't take payments in {placed.currency}")
+    converted = charge_currency != placed.currency
+
+    description = f"{shop_name} order #{placed.number}"
+    if converted:
+        description += f" ({format_money(placed.total_minor, placed.currency)})"
     base_url = get_settings().public_base_url.rstrip("/")
     try:
         created = await paypal.create_order(
             reference_id=str(placed.order_id),
-            description=f"{shop_name} order #{placed.number}",
-            amount_minor=placed.total_minor,
-            currency=placed.currency,
+            description=description,
+            amount_minor=charge_minor,
+            currency=charge_currency,
             brand_name=shop_name,
             return_url=f"{base_url}/payments/paypal/return",
             cancel_url=f"{base_url}/payments/paypal/cancel",
+            attempt=attempt,
         )
     except paypal.PayPalError as exc:
         raise PaymentUnavailable(str(exc)) from exc
@@ -123,13 +239,90 @@ async def create_checkout(placed: PlacedOrder, *, shop_name: str) -> str:
                 method="paypal_wallet",
                 provider_order_id=created.paypal_order_id,
                 status="created",
-                currency=placed.currency,
-                amount_minor=placed.total_minor,
+                currency=charge_currency,
+                amount_minor=charge_minor,
                 approve_url=created.approve_url,
             )
             .on_conflict_do_nothing(index_elements=[Payment.provider, Payment.provider_order_id])
         )
-    return created.approve_url
+    return Checkout(created.approve_url, charge_minor, charge_currency, converted)
+
+
+async def _start_simulated_checkout(placed: PlacedOrder) -> Checkout:
+    """A link to this server's own Accept / Reject page (no conversion: it takes any currency)."""
+    payment_id = uuid.uuid4()
+    url = f"{get_settings().public_base_url.rstrip('/')}/payments/simulator/{payment_id}"
+    async with session_scope() as session:
+        order = await orders.get_order(session, placed.order_id)
+        if order is None or order.merchant_id is None:
+            raise LookupError(f"No order {placed.order_id}")
+        session.add(
+            Payment(
+                id=payment_id,
+                merchant_id=order.merchant_id,
+                order_id=order.id,
+                provider=simulator.PROVIDER,
+                method="simulator",
+                provider_order_id=f"SIM-{payment_id.hex[:16]}",
+                status="created",
+                currency=placed.currency,
+                amount_minor=placed.total_minor,
+                approve_url=url,
+            )
+        )
+    return Checkout(url, placed.total_minor, placed.currency, converted=False)
+
+
+async def _attempts(session: AsyncSession, order_id: uuid.UUID) -> list[Payment]:
+    """Every payment link made for this order (not invoices), oldest first."""
+    return list(
+        await session.scalars(
+            select(Payment)
+            .where(
+                Payment.order_id == order_id,
+                Payment.provider.in_(("paypal", simulator.PROVIDER)),
+                Payment.provider_order_id.is_not(None),
+                ~Payment.provider_order_id.startswith(_INVOICE_PREFIX),
+            )
+            .order_by(Payment.created_at)
+        )
+    )
+
+
+def _retry_policy(
+    order: OrderSummary | None, attempts: list[Payment], now: datetime
+) -> RetryStatus:
+    """May the customer have another payment link, and if not yet, how long until they may?
+
+    The rules: the order must still be waiting for payment and held; at most
+    PAYMENT_MAX_ATTEMPTS links in all; and PAYMENT_RETRY_COOLDOWN_SECONDS after a failed payment
+    before the next one. The hold (PAYMENT_HOLD_MINUTES) is the retry window.
+    """
+    settings = get_settings()
+    left = max(settings.payment_max_attempts - len(attempts), 0)
+    if order is None or order.status != "awaiting_payment":
+        return RetryStatus(False, 0, left, "not_payable")
+    if left == 0:
+        return RetryStatus(False, 0, 0, "too_many_attempts")
+    window_ends = order.hold_expires_at
+    if window_ends is not None and window_ends <= now:
+        return RetryStatus(False, 0, left, "window_over")
+    wait = 0
+    last = attempts[-1] if attempts else None
+    if last is not None and last.status in ("denied", "failed"):
+        ready_at = last.updated_at + timedelta(seconds=settings.payment_retry_cooldown_seconds)
+        wait = max(math.ceil((ready_at - now).total_seconds()), 0)
+        if window_ends is not None and now + timedelta(seconds=wait) >= window_ends:
+            return RetryStatus(False, 0, left, "window_over")
+    return RetryStatus(True, wait, left, None)
+
+
+async def retry_status(order_id: uuid.UUID) -> RetryStatus:
+    """Where an order stands on getting another payment link (see `_retry_policy`)."""
+    async with session_scope() as session:
+        order = await orders.get_order(session, order_id)
+        attempts = await _attempts(session, order_id)
+    return _retry_policy(order, attempts, datetime.now(UTC))
 
 
 def record_manual_payment(
@@ -314,11 +507,9 @@ async def get_order_payment_link(
             hold_minutes=15,
         )
 
-        if order.currency == "INR":
-            onboarding = await shop_profile.get_onboarding(session, merchant_id)
-            vpa = (
-                onboarding.answers.get("upi_id") if onboarding and onboarding.answers else None
-            ) or f"{shop_name.lower().replace(' ', '')}@upi"
+        onboarding = await shop_profile.get_onboarding(session, merchant_id)
+        vpa = onboarding.answers.get("upi_id") if onboarding and onboarding.answers else None
+        if order.currency == "INR" and vpa:
             link = create_upi_checkout(placed, vpa=vpa, shop_name=shop_name)
             method: Literal["upi", "paypal"] = "upi"
         elif accepts(order.currency):
@@ -356,6 +547,40 @@ async def capture(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
     if result is None:
         return None  # not approved yet
     return await verify_and_record(paypal_order_id)
+
+
+async def settle_open_payments(
+    max_age: timedelta = timedelta(hours=3),
+) -> list[PaymentResult | PaymentFailed]:
+    """Capture PayPal payments the buyer approved but whose return page and webhook never reached
+    us (a closed tab, a phone that can't open this server's address, a tunnel that is down)."""
+    async with session_scope() as session:
+        open_ids = list(
+            await session.scalars(
+                select(Payment.provider_order_id).where(
+                    Payment.provider == "paypal",
+                    Payment.status.in_(("created", "approved")),
+                    Payment.created_at > datetime.now(UTC) - max_age,
+                    Payment.provider_order_id.is_not(None),
+                    ~Payment.provider_order_id.startswith(_INVOICE_PREFIX),
+                )
+            )
+        )
+    settled: list[PaymentResult | PaymentFailed] = []
+    for paypal_order_id in open_ids:
+        if paypal_order_id is None:
+            continue
+        try:
+            status = (await paypal.get_order(paypal_order_id)).get("status")
+            if status not in ("APPROVED", "COMPLETED"):
+                continue  # the buyer hasn't approved it yet
+            result = await capture(paypal_order_id)
+        except paypal.PayPalError as exc:
+            log.warning("payments.settle_failed", paypal_order_id=paypal_order_id, error=str(exc))
+            continue
+        if result is not None:
+            settled.append(result)
+    return settled
 
 
 async def verify_and_record(paypal_order_id: str) -> PaymentResult | PaymentFailed | None:
@@ -409,18 +634,29 @@ async def _record_verified(
             log.warning("payments.unknown_paypal_order", paypal_order_id=paypal_order_id)
             return None
         if result.status == "COMPLETED":
+            paid_minor, paid_currency = result.amount_minor, result.currency
+            order = await orders.get_order(session, payment.order_id)
+            asked = (payment.amount_minor, payment.currency)
+            if (
+                order is not None
+                and payment.currency != order.currency
+                and (paid_minor, paid_currency) == asked
+            ):
+                # PayPal charged the converted amount we asked for, which settles the whole order.
+                paid_minor, paid_currency = order.total_minor, order.currency
             payment.status = "completed"
             payment.provider_capture_id = result.capture_id or None
             payment.paid_at = datetime.now(UTC)
             return await orders.record_payment(
                 session,
                 payment.order_id,
-                amount_minor=result.amount_minor,
-                currency=result.currency,
+                amount_minor=paid_minor,
+                currency=paid_currency,
                 actor="paypal",
             )
         if result.status in ("DECLINED", "FAILED"):
             payment.status = "denied"
+            payment.updated_at = datetime.now(UTC)  # the retry cooldown counts from here
             order = await orders.get_order(session, payment.order_id)
             if order is None:
                 return None
@@ -617,6 +853,83 @@ async def _refund_reported(resource: Mapping[str, Any]) -> None:
         log.info("payments.refund_event_ignored", refund_id=refund_id)
         return
     await _record_refund(pending[0].id, capture_id, await paypal.get_refund(refund_id))
+
+
+@dataclass(frozen=True)
+class SimulatedCheckout:
+    """What the simulator's checkout page shows for one payment."""
+
+    payment_id: uuid.UUID
+    status: str
+    shop_name: str
+    order_number: int
+    amount_minor: int
+    currency: str
+
+
+async def simulated_checkout(payment_id: uuid.UUID) -> SimulatedCheckout | None:
+    async with session_scope() as session:
+        payment = await session.get(Payment, payment_id)
+        if payment is None or payment.provider != simulator.PROVIDER:
+            return None
+        order = await orders.get_order(session, payment.order_id)
+        if order is None or order.merchant_id is None:
+            return None
+        merchant = await merchants.find_merchant(session, order.merchant_id)
+        return SimulatedCheckout(
+            payment_id=payment.id,
+            status=payment.status,
+            shop_name=merchant.name if merchant else "Sellix Shop",
+            order_number=order.number,
+            amount_minor=payment.amount_minor,
+            currency=payment.currency,
+        )
+
+
+async def handle_simulator_event(event: Mapping[str, Any]) -> PaymentResult | PaymentFailed | None:
+    """Apply an Accept or Reject from the simulator's checkout page (its webhook, after the job).
+
+    Like PayPal's capture path, the payment row decides: only a payment still waiting can be
+    settled, so a replayed delivery or a second button press does nothing.
+    """
+    if not simulator.enabled():
+        log.error("payments.simulator_event_while_off")
+        return None
+    event_type = event.get("event_type")
+    resource: Mapping[str, Any] = event.get("resource") or {}
+    try:
+        payment_id = uuid.UUID(str(resource.get("payment_id", "")))
+    except ValueError:
+        log.warning("payments.simulator_event_without_payment")
+        return None
+    async with session_scope() as session:
+        payment = await session.scalar(
+            select(Payment)
+            .where(Payment.id == payment_id, Payment.provider == simulator.PROVIDER)
+            .with_for_update()
+        )
+        if payment is None or payment.status != "created":
+            return None  # unknown, or already settled: a repeat does nothing
+        if event_type == simulator.ACCEPTED:
+            payment.status = "completed"
+            payment.provider_capture_id = f"SIMCAP-{payment.id.hex[:12]}"
+            payment.paid_at = datetime.now(UTC)
+            return await orders.record_payment(
+                session,
+                payment.order_id,
+                amount_minor=payment.amount_minor,
+                currency=payment.currency,
+                actor="simulator",
+            )
+        if event_type == simulator.REJECTED:
+            payment.status = "denied"
+            payment.updated_at = datetime.now(UTC)  # the retry cooldown counts from here
+            order = await orders.get_order(session, payment.order_id)
+            if order is None:
+                return None
+            return PaymentFailed(order.id, order.number, order.conversation_id)
+    log.info("payments.simulator_event_ignored", event_type=event_type)
+    return None
 
 
 async def handle_webhook(event: Mapping[str, Any]) -> PaymentResult | PaymentFailed | None:

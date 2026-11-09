@@ -1,0 +1,14 @@
+id: order_sent
+version: 1
+description: "Sent by code when the merchant marks a digital order sent (Orders > Mark as sent)."
+texts:
+  en: |-
+    Order {{ number }} has been sent. Thank you for ordering with us!
+  ta-en: |-
+    Order {{ number }} anuppiyaachu. Order pannadhukku nandri!
+  ta: |-
+    ஆர்டர் {{ number }} அனுப்பப்பட்டது. ஆர்டர் செய்ததற்கு நன்றி!
+  hi-en: |-
+    Order {{ number }} bhej diya gaya hai. Order karne ke liye shukriya!
+  hi: |-
+    ऑर्डर {{ number }} भेज दिया गया है। ऑर्डर करने के लिए शुक्रिया!

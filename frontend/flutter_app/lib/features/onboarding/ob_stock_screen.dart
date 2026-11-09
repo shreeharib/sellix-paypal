@@ -10,13 +10,20 @@ import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
-import 'ob_categories.dart';
+import '../stock/stock_model.dart' show ShelfChoice, shelfLabel, startChoiceFor;
+import '../stock/stock_providers.dart';
+import '../stock/stock_widgets.dart' show StockTypeQuestion;
 import 'ob_common.dart';
 
 /// Stock already set today, so coming back keeps it. A new shop has none.
 final _obTodayProvider = FutureProvider.autoDispose<Today>((ref) => ref.watch(sellixApiProvider).today());
 
 /// One row on the list. Same product and variant is the same row.
+///
+/// [stockMode] and [shelfLifeDays] are what to send. Null means "leave the product as it is", which
+/// is what a row loaded from the server must send until the owner changes it: sending the row's own
+/// mode back (or a default) would silently rewrite the product. [knownMode] and [knownShelfDays] are
+/// what the server has, only for showing.
 class _Line {
   _Line({
     required this.product,
@@ -26,6 +33,8 @@ class _Line {
     required this.quantity,
     this.stockMode,
     this.shelfLifeDays,
+    this.knownMode,
+    this.knownShelfDays,
   });
 
   factory _Line.fromRow(StockRow r) => _Line(
@@ -34,18 +43,21 @@ class _Line {
     priceMinor: r.priceMinor,
     currency: r.currency,
     quantity: r.opening,
-    stockMode: r.stockMode,
-    shelfLifeDays: r.shelfLifeDays,
+    knownMode: r.stockMode,
+    knownShelfDays: r.shelfLifeDays,
   );
 
-  factory _Line.fromStock(StockLine l) => _Line(
+  /// A typed line. [old] is the row it replaces: it keeps that row's stock type, untouched.
+  factory _Line.fromStock(StockLine l, {_Line? old, ShelfChoice? start}) => _Line(
     product: l.product,
     variant: l.variant,
     priceMinor: l.priceMinor,
     currency: l.currency,
-    quantity: l.quantity,
-    stockMode: l.stockMode,
-    shelfLifeDays: l.shelfLifeDays,
+    quantity: start?.isNoCount ?? false ? 0 : l.quantity,
+    stockMode: old != null ? old.stockMode : start?.stockMode,
+    shelfLifeDays: old != null ? old.shelfLifeDays : start?.shelfLifeDays,
+    knownMode: old?.knownMode,
+    knownShelfDays: old?.knownShelfDays,
   );
 
   final String product;
@@ -54,18 +66,36 @@ class _Line {
   final String currency;
   final String? stockMode;
   final int? shelfLifeDays;
+  final String? knownMode;
+  final int? knownShelfDays;
   int quantity;
 
   String get label => variant == null || variant!.isEmpty ? product : '$product, $variant';
 
-  bool same(_Line o) => product.toLowerCase() == o.product.toLowerCase() && (variant ?? '').toLowerCase() == (o.variant ?? '').toLowerCase();
+  /// The stock type it has or will get, if known.
+  String? get mode => stockMode ?? knownMode;
+
+  /// Made to order and always available have no count to set.
+  bool get noCount => mode == StockMode.madeToOrder || mode == StockMode.unlimited;
+
+  /// Made to order may be left without a price: the owner quotes each order.
+  bool get needsPrice => mode != StockMode.madeToOrder;
+
+  /// Goes live with this step: it has a count, or it needs none.
+  bool get counts => quantity > 0 || noCount;
+
+  bool sameName(String otherProduct, String? otherVariant) =>
+      product.toLowerCase() == otherProduct.toLowerCase() &&
+      (variant ?? '').toLowerCase() == (otherVariant ?? '').toLowerCase();
+
+  bool same(_Line o) => sameName(o.product, o.variant);
 
   StockLine toStock() => StockLine(
     product: product,
     variant: variant,
     priceMinor: priceMinor,
     currency: currency,
-    quantity: quantity,
+    quantity: noCount ? 0 : quantity,
     stockMode: stockMode,
     shelfLifeDays: shelfLifeDays,
   );
@@ -95,22 +125,52 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
     setState(() => _lines = lines);
   }
 
-  Future<void> _typeIt(ObCategory category) async {
+  /// The shop type's questions and wording. The screen waits for it, so this is the real one.
+  ProductSchema get _schema => ref.read(shopSchemaProvider);
+
+  /// A typed line for a product that is neither on this list nor in the catalogue is a new product,
+  /// so it starts as the shop type's usual way of stocking (the backend's own default is daily).
+  /// A line for one that is already there leaves its stock type alone.
+  _Line _typed(StockLine line, Set<String> catalogue, ShelfChoice start) {
+    final old = (_lines ?? const <_Line>[]).where((l) => l.sameName(line.product, line.variant)).firstOrNull;
+    final known = old != null || catalogue.contains(_key(line.product, line.variant));
+    return _Line.fromStock(line, old: old, start: known ? null : start);
+  }
+
+  static String _key(String product, String? variant) => '${product.toLowerCase()}|${(variant ?? '').toLowerCase()}';
+
+  Future<Set<String>> _catalogueKeys() async {
+    try {
+      final all = await ref.read(catalogProvider.future);
+      return {
+        for (final p in all)
+          for (final v in p.variants) _key(p.name, v.name),
+      };
+    } on Object catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _typeIt() async {
     final parsed = await showSxSheet<List<StockLine>>(
       context,
       title: 'Type today’s stock',
       subtitle: 'Write the count, the name and the price. One line for each, or separate them with commas.',
-      builder: (_) => _TypeSheet(example: category.exampleProduct),
+      builder: (_) => _TypeSheet(example: _schema.vocabulary.exampleProduct),
     );
-    if (parsed != null && mounted) _merge(parsed.map(_Line.fromStock));
+    if (parsed == null || !mounted) return;
+    final catalogue = await _catalogueKeys();
+    final start = startChoiceFor(_schema);
+    final lines = [for (final l in parsed) _typed(l, catalogue, start)];
+    if (mounted) _merge(lines);
   }
 
   Future<void> _addOne({_Line? editing}) async {
     final line = await showSxSheet<_Line>(
       context,
       title: editing == null ? 'Add your products' : 'Edit product',
-      subtitle: editing == null ? 'A name, a price and how long you can sell it.' : null,
-      builder: (_) => _ProductSheet(editing: editing),
+      subtitle: editing == null ? 'A name, a price and how you stock it.' : null,
+      builder: (_) => _ProductSheet(editing: editing, schema: _schema),
     );
     if (line == null || !mounted) return;
     if (editing != null && !editing.same(line)) {
@@ -121,12 +181,12 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
 
   Future<void> _confirm() async {
     final lines = _lines ?? const <_Line>[];
-    if (!lines.any((l) => l.quantity > 0)) {
+    if (!lines.any((l) => l.counts)) {
       HapticFeedback.heavyImpact();
       showSxSnack(context, 'No counts yet. Add a product and set how many you have today.', icon: TablerIcons.package);
       return;
     }
-    final unpriced = lines.where((l) => l.quantity > 0 && l.priceMinor <= 0).firstOrNull;
+    final unpriced = lines.where((l) => l.counts && l.needsPrice && l.priceMinor <= 0).firstOrNull;
     if (unpriced != null) {
       HapticFeedback.heavyImpact();
       showSxSnack(context, 'Add a price for ${unpriced.label} first.');
@@ -147,15 +207,17 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
   @override
   Widget build(BuildContext context) {
     final today = ref.watch(_obTodayProvider);
-    final draft = ref.watch(onboardingDraftProvider);
+    // The questions come from the shop type's schema, so the screen waits for it (it never fails:
+    // the app has its own to fall back on).
+    final schemaReady = ref.watch(productSchemaProvider).hasValue;
+    final schema = ref.watch(shopSchemaProvider);
     if (_lines == null && today.hasValue) {
       _lines = [for (final row in today.requireValue.stock) _Line.fromRow(row)];
     }
-    final category = obCategoryOf(draft.value?.answers.category) ?? obOtherCategory;
     final lines = _lines;
     final empty = lines != null && lines.isEmpty;
     return SxScaffold(
-      floating: lines == null
+      floating: lines == null || !schemaReady
           ? null
           : SxBottomCta(
               label: empty ? 'Add product' : 'Confirm and go live',
@@ -173,25 +235,25 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
           ),
           Expanded(
             child: SxAsyncView<Today>(
-              value: today,
+              value: schemaReady ? today : const AsyncLoading<Today>(),
               onRetry: () => ref.invalidate(_obTodayProvider),
               loading: const SxSkeletonList(topHeight: 160),
               builder: (context, _) => SxScrollList(
                 padding: EdgeInsets.fromLTRB(SxSpace.screen, SxSpace.s20, SxSpace.screen, sxBottomInset(context) + SxSpace.s20),
                 children: [
-                  ..._intro(context, category),
+                  ..._intro(context, schema.vocabulary),
                   if (empty)
                     const SxEmptyState(
                       icon: TablerIcons.package,
                       title: 'Add your first product',
-                      body: 'A name, a price and how long you can sell it. You need one product to go live.',
+                      body: 'A name, a price and how you stock it. You need one product to go live.',
                     )
                   else ...[
                     ..._rows(context, lines ?? const []),
                     const SizedBox(height: SxSpace.s4),
                     SxRowCard(
                       title: 'Add your products',
-                      meta: 'A name, a price and how long you can sell it.',
+                      meta: 'A name, a price and how you stock it.',
                       icon: TablerIcons.plus,
                       outlined: true,
                       chevron: false,
@@ -207,10 +269,10 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
     );
   }
 
-  List<Widget> _intro(BuildContext context, ObCategory category) {
+  List<Widget> _intro(BuildContext context, Vocabulary vocabulary) {
     final p = context.sx;
     return [
-      SxFadeUp(child: Text(category.stockQuestion, style: SxText.titleL.copyWith(color: p.textPrimary))),
+      SxFadeUp(child: Text(vocabulary.stockQuestion, style: SxText.titleL.copyWith(color: p.textPrimary))),
       const SizedBox(height: SxSpace.s8),
       SxFadeUp(
         index: 1,
@@ -243,7 +305,7 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
               label: 'Type it',
               icon: TablerIcons.keyboard,
               selected: false,
-              onTap: () => _typeIt(category),
+              onTap: _typeIt,
             ),
             const SxFilterChip(label: 'Photo', icon: TablerIcons.camera, selected: false, onTap: null),
             Text('Photo is not available yet.', style: SxText.caption.copyWith(color: p.textSecondary)),
@@ -257,20 +319,33 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
     return [
       SxSectionHeader(title: 'Your list: ${lines.length} ${lines.length == 1 ? 'item' : 'items'}'),
       for (final line in lines) ...[
-        SxStockRow(
-          leading: const SxIconTile(icon: TablerIcons.package),
-          title: line.label,
-          price: line.priceMinor > 0 ? money(line.priceMinor, line.currency) : null,
-          chip: line.priceMinor <= 0
-              ? const SxChip(label: 'Add a price', tone: SxChipTone.attention)
-              : line.quantity == 0
-              ? const SxChip(label: 'Not today')
-              : null,
-          value: line.quantity,
-          max: 100000,
-          onTap: () => _addOne(editing: line),
-          onChanged: (v) => setState(() => line.quantity = v),
-        ),
+        if (line.noCount)
+          // No count to set: made to order, or always available.
+          SxRowCard(
+            title: line.label,
+            meta: [
+              shelfLabel(line.mode!, null),
+              if (line.priceMinor > 0) money(line.priceMinor, line.currency) else if (line.needsPrice) 'Add a price' else 'Quote per order',
+            ].join(' · '),
+            leading: const SxIconTile(icon: TablerIcons.package),
+            chevron: false,
+            onTap: () => _addOne(editing: line),
+          )
+        else
+          SxStockRow(
+            leading: const SxIconTile(icon: TablerIcons.package),
+            title: line.label,
+            price: line.priceMinor > 0 ? money(line.priceMinor, line.currency) : null,
+            chip: line.priceMinor <= 0
+                ? const SxChip(label: 'Add a price', tone: SxChipTone.attention)
+                : line.quantity == 0
+                ? const SxChip(label: 'Not today')
+                : null,
+            value: line.quantity,
+            max: 100000,
+            onTap: () => _addOne(editing: line),
+            onChanged: (v) => setState(() => line.quantity = v),
+          ),
         const SizedBox(height: SxSpace.s8),
       ],
     ];
@@ -298,7 +373,8 @@ class _TypeSheetState extends ConsumerState<_TypeSheet> {
   }
 
   Future<void> _make() async {
-    final hint = 'No products found in that. Write a count, a name and a price, like “5 ${widget.example} 120”.';
+    final hint =
+        'No products found in that. Write a count, a name and a price, like “5 ${widget.example.toLowerCase()} 120”.';
     final text = _text.text.trim();
     if (text.isEmpty) {
       setState(() => _error = hint);
@@ -326,7 +402,7 @@ class _TypeSheetState extends ConsumerState<_TypeSheet> {
       children: [
         SxField(
           controller: _text,
-          hint: '5 ${widget.example} 120',
+          hint: '5 ${widget.example.toLowerCase()} 120',
           maxLines: 4,
           autofocus: true,
           errorText: _error,
@@ -339,10 +415,12 @@ class _TypeSheetState extends ConsumerState<_TypeSheet> {
 }
 
 /// The router keeps a shop that has not finished onboarding on `ob-*`, so the full add-product
-/// screen can't open from here; this adds what opening stock needs.
+/// screen can't open from here; this adds what opening stock needs. It asks the same stock question
+/// as the add-product form, from the same schema.
 class _ProductSheet extends StatefulWidget {
-  const _ProductSheet({this.editing});
+  const _ProductSheet({required this.schema, this.editing});
 
+  final ProductSchema schema;
   final _Line? editing;
 
   @override
@@ -356,10 +434,20 @@ class _ProductSheetState extends State<_ProductSheet> {
     text: (widget.editing?.priceMinor ?? 0) > 0 ? minorToInput(widget.editing!.priceMinor) : '',
   );
   late int _count = widget.editing?.quantity ?? 1;
-  /// Null keeps what the product has; a new product starts as today only.
-  late String? _mode = widget.editing == null ? StockMode.daily : widget.editing!.stockMode;
+
+  /// What the product has now (a row from the server, or an earlier choice), else the shop type's start.
+  late final ShelfChoice _first = _startingChoice();
+  late ShelfChoice _choice = _first;
   String? _nameError;
   String? _priceError;
+  String? _stockError;
+
+  ShelfChoice _startingChoice() {
+    final line = widget.editing;
+    final mode = line?.mode;
+    if (line == null || mode == null) return startChoiceFor(widget.schema);
+    return ShelfChoice.of(mode, line.stockMode != null ? line.shelfLifeDays : line.knownShelfDays);
+  }
 
   @override
   void dispose() {
@@ -371,21 +459,30 @@ class _ProductSheetState extends State<_ProductSheet> {
 
   void _save() {
     final name = _name.text.trim();
-    final price = parseMoneyMinor(_price.text);
+    final priceText = _price.text.trim();
+    final price = parseMoneyMinor(priceText);
+    final priceless = _choice.c == 'mto' && priceText.isEmpty;
     setState(() {
       _nameError = name.isEmpty ? 'Enter the product’s name.' : null;
-      _priceError = price == null || price <= 0 ? 'Enter a price, like 450 or 99.50.' : null;
+      _priceError = !priceless && (price == null || price <= 0) ? 'Enter a price, like 450 or 99.50.' : null;
+      _stockError = _choice.isValid ? null : 'Enter 1 to 3650 days.';
     });
-    if (_nameError != null || _priceError != null) return;
+    if (_nameError != null || _priceError != null || _stockError != null) return;
+    final line = widget.editing;
+    // A product that already exists keeps its stock type unless the owner changed it here. A new
+    // name is a new product, so it gets the choice shown.
+    final keeps = line != null && line.sameName(name, obText(_variant.text)) && _choice.sameAs(_first);
     Navigator.of(context).pop(
       _Line(
         product: name,
         variant: obText(_variant.text),
-        priceMinor: price!,
-        currency: widget.editing?.currency ?? 'INR',
-        quantity: _count,
-        stockMode: _mode,
-        shelfLifeDays: widget.editing?.shelfLifeDays,
+        priceMinor: price ?? 0,
+        currency: line?.currency ?? 'INR',
+        quantity: _choice.isNoCount ? 0 : _count,
+        stockMode: keeps ? line.stockMode : _choice.stockMode,
+        shelfLifeDays: keeps ? line.shelfLifeDays : _choice.shelfLifeDays,
+        knownMode: line?.knownMode,
+        knownShelfDays: line?.knownShelfDays,
       ),
     );
   }
@@ -402,24 +499,31 @@ class _ProductSheetState extends State<_ProductSheet> {
         SxField(controller: _variant, label: 'Size or type (optional)', hint: 'Small', maxLength: 200),
         SxField(
           controller: _price,
-          label: 'Price',
+          label: _choice.c == 'mto' ? 'Price (optional)' : 'Price',
           prefix: currency == 'INR' ? '₹' : currency,
-          hint: '450',
+          hint: _choice.c == 'mto' ? 'Empty: you quote per order' : '450',
           errorText: _priceError,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
         ),
-        Row(
-          children: [
-            Expanded(child: Text('How many today?', style: SxText.bodyStrong.copyWith(color: p.textPrimary))),
-            SxStepper(value: _count, max: 100000, itemName: 'this product', onChanged: (v) => setState(() => _count = v)),
-          ],
-        ),
-        const ObLabel('How long can you sell it?'),
-        SxSegmented<String>(
-          segments: const [SxSegment(StockMode.daily, 'Today only'), SxSegment(StockMode.inventory, 'Until sold')],
-          value: _mode == null || _mode == StockMode.daily ? StockMode.daily : StockMode.inventory,
-          onChanged: (v) => setState(() => _mode = v),
-        ),
+        if (StockTypeQuestion.isNeeded(widget.schema, _choice, keepMode: widget.editing?.mode))
+          StockTypeQuestion(
+            schema: widget.schema,
+            value: _choice,
+            keepMode: widget.editing?.mode,
+            errorText: _stockError,
+            onChanged: (v) => setState(() {
+              _choice = v;
+              _stockError = null;
+              if (v.c == 'mto') _priceError = null;
+            }),
+          ),
+        if (!_choice.isNoCount)
+          Row(
+            children: [
+              Expanded(child: Text('How many today?', style: SxText.bodyStrong.copyWith(color: p.textPrimary))),
+              SxStepper(value: _count, max: 100000, itemName: 'this product', onChanged: (v) => setState(() => _count = v)),
+            ],
+          ),
         SxButton(label: 'Add to the list', icon: TablerIcons.check, fullWidth: true, onTap: _save),
       ],
     );

@@ -2,13 +2,16 @@
 
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.shop_profile import shop_types
 from app.modules.shop_profile.models import ShopOnboarding, ShopProfile
-from app.modules.shop_profile.schemas import OnboardingAnswers
+from app.modules.shop_profile.schemas import OnboardingAnswers, ProductSchema
 
 MAX_PROFILE_CHARS = 8000  # keeps the agent's cached instructions small and cheap
 SAVED_ANSWERS_HEADING = "## Saved answers"
@@ -55,6 +58,17 @@ async def get_onboarding(session: AsyncSession, merchant_id: uuid.UUID) -> ShopO
     return await session.get(ShopOnboarding, merchant_id)
 
 
+def product_schema(answers: Mapping[str, Any] | None) -> ProductSchema:
+    """What the add-product form asks this shop: its chosen shop type, else its category's."""
+    saved = answers or {}
+    return shop_types.schema_for(saved.get("shop_type"), saved.get("category"))
+
+
+def shop_type_choices() -> list[tuple[str, str]]:
+    """(id, label) of every shop type a shop can pick."""
+    return shop_types.all_types()
+
+
 async def save_onboarding(
     session: AsyncSession,
     merchant_id: uuid.UUID,
@@ -69,6 +83,11 @@ async def save_onboarding(
     onboarding = await session.get(ShopOnboarding, merchant_id) or ShopOnboarding(
         merchant_id=merchant_id
     )
+    # Saving replaces all answers. An app that doesn't send the shop type (an older build, or a
+    # screen that doesn't know it) must not erase the one the shop chose.
+    chosen = (onboarding.answers or {}).get("shop_type")
+    if answers.shop_type is None and chosen:
+        answers = answers.model_copy(update={"shop_type": chosen})
     onboarding.answers = answers.model_dump(exclude_none=True)
     onboarding.updated_at = now
     if complete and onboarding.completed_at is None:
@@ -91,15 +110,13 @@ def render_profile(
     place = ", ".join(part for part in (answers.category, answers.area, answers.city) if part)
     lines = [f"# {shop_name}" + (f" ({place})" if place else "")]
 
+    # `intro` and `address_customers` (saved by older app builds) are left out on purpose: the
+    # agent never introduces itself or calls customers "sir / madam" (base prompt, Voice).
     persona = []
-    if answers.intro:
-        persona.append(f'Introduce yourself as: "{answers.intro}".')
     if answers.tone:
         persona.append(f"{answers.tone.capitalize()} tone.")
     if answers.emoji is not None:
         persona.append("Light emoji." if answers.emoji else "No emoji.")
-    if answers.address_customers:
-        persona.append(f"Address customers as: {answers.address_customers}.")
     if persona:
         lines.append("- " + " ".join(persona))
     if answers.hours:

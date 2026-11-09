@@ -9,6 +9,7 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import httpx2
@@ -22,17 +23,22 @@ from app.core.db import session_scope
 from app.main import create_app
 from app.modules.accounts import service as accounts
 from app.modules.accounts.models import Session
+from app.modules.catalog.models import Product
 from app.modules.channels import instagram
 from app.modules.channels.models import ChannelConnection
-from app.modules.conversations.models import Conversation, Message
+from app.modules.conversations.models import Conversation, Message, OutboundMessage
 from app.modules.escalations import service as escalations
 from app.modules.merchants import service as merchants
 from app.modules.merchants.models import Merchant
 from app.modules.orders import service as orders
+from app.modules.orders.models import Order
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest
-from app.modules.payments import paypal
+from app.modules.payments import fx, paypal, simulator
 from app.modules.payments.models import Payment
 from app.modules.shop_profile import service as shop_profile
+from app.modules.shop_profile.schemas import OnboardingAnswers
+from app.webhooks.models import WebhookEvent
+from app.webhooks.tasks import process_simulator_event
 from tests.integration.factories import start_conversation
 
 pytestmark = pytest.mark.anyio
@@ -157,6 +163,42 @@ async def test_login_start_refuses_when_instagram_cant_complete_it(
 
     assert start.status_code == 400
     assert "Instagram sign-in" in start.json()["detail"]
+
+
+async def test_the_add_product_form_follows_the_shops_type(
+    api: httpx2.AsyncClient, shop: ChannelConnection
+) -> None:
+    headers = bearer(await sign_in_as(shop.merchant_id))
+
+    async def schema() -> dict[str, object]:
+        response = await api.get("/v1/product-schema", headers=headers)
+        assert response.status_code == 200
+        return response.json()
+
+    async def save(**answers: str) -> None:
+        saved = await api.put(
+            "/v1/onboarding", headers=headers, json={"shop_name": "Test shop", "answers": answers}
+        )
+        assert saved.status_code == 200
+
+    assert (await schema())["shop_type"] == "other"  # nothing known about the shop yet
+
+    await save(category="home bakery")
+    bakery = await schema()
+    assert bakery["shop_type"] == "bakery" and bakery["default_stock_mode"] == "daily"
+
+    await save(category="home bakery", shop_type="dress_shop")  # a chosen type wins
+    dress = await schema()
+    assert dress["shop_type"] == "dress_shop"
+    modes = [mode["id"] for mode in dress["stock_modes"]]  # type: ignore[index]
+    assert modes == ["inventory", "made_to_order"]
+
+    await save(category="home bakery")  # a save that doesn't send the type (an older app build)
+    assert (await schema())["shop_type"] == "dress_shop"  # ... does not erase the chosen one
+
+    types = await api.get("/v1/shop-types", headers=headers)
+    assert {choice["id"] for choice in types.json()} >= {"bakery", "dress_shop", "other"}
+    assert (await api.get("/v1/product-schema")).status_code == 401
 
 
 async def test_onboarding_saves_each_step_and_finishing_writes_the_shop_profile(
@@ -357,11 +399,13 @@ async def test_today_restock_counter_sale_and_sold_out_flow(
     assert croissant_stock["counter_sales"] == 5
 
 
-async def test_today_parse_stock_text_api(api: httpx2.AsyncClient) -> None:
-    res = await api.post(
-        "/v1/today/parse-stock-text",
-        json={"text": "10 choc cookies 60rs, 5 brownies 90"},
-    )
+async def test_today_parse_stock_text_api(api: httpx2.AsyncClient, shop: ChannelConnection) -> None:
+    body = {"text": "10 choc cookies 60rs, 5 brownies 90"}
+    anonymous = await api.post("/v1/today/parse-stock-text", json=body)
+    assert anonymous.status_code == 401  # like every other /v1 call, it needs a signed-in shop
+
+    token = await sign_in_as(shop.merchant_id)
+    res = await api.post("/v1/today/parse-stock-text", headers=bearer(token), json=body)
     assert res.status_code == 200
     lines = res.json()["lines"]
     assert len(lines) == 2
@@ -371,6 +415,8 @@ async def test_today_parse_stock_text_api(api: httpx2.AsyncClient) -> None:
         "price_minor": 6000,
         "currency": "INR",
         "quantity": 10,
+        "stock_mode": None,
+        "shelf_life_days": None,
     }
     assert lines[1] == {
         "product": "brownies",
@@ -378,11 +424,14 @@ async def test_today_parse_stock_text_api(api: httpx2.AsyncClient) -> None:
         "price_minor": 9000,
         "currency": "INR",
         "quantity": 5,
+        "stock_mode": None,
+        "shelf_life_days": None,
     }
 
     # Invalid text returns 422
     bad_res = await api.post(
         "/v1/today/parse-stock-text",
+        headers=bearer(token),
         json={"text": "# Only comments"},
     )
     assert bad_res.status_code == 422
@@ -624,10 +673,300 @@ async def test_one_shop_cannot_refund_another_shops_order(
     assert refunded == ["CAPTURE-1"]
 
 
+async def test_how_long_a_shop_can_sell_a_product_is_saved_with_it(
+    api: httpx2.AsyncClient, shop: ChannelConnection, deferred_jobs: InMemoryConnector
+) -> None:
+    """The app sends "1 week" or "until sold" with the stock line; it used to be dropped."""
+    token = await sign_in_as(shop.merchant_id)
+
+    async def put_stock(**extra: object) -> httpx2.Response:
+        line = {"product": "Hot chocolate", "price_minor": 25000, "quantity": 5, **extra}
+        return await api.put("/v1/today/stock", headers=bearer(token), json={"lines": [line]})
+
+    async def saved() -> tuple[str, int | None]:
+        async with session_scope() as session:
+            product = await session.scalar(select(Product).where(Product.name == "Hot chocolate"))
+        assert product is not None
+        return product.stock_mode, product.shelf_life_days
+
+    assert (await put_stock(stock_mode="daily", shelf_life_days=7)).is_success
+    assert await saved() == ("daily", 7)  # a new product keeps the week the shop chose
+
+    assert (await put_stock()).is_success
+    assert await saved() == ("daily", 7)  # a count that says nothing about it changes nothing
+
+    assert (await put_stock(stock_mode="inventory")).is_success
+    assert await saved() == ("inventory", 7)  # "until sold"
+
+    today = await api.get("/v1/today", headers=bearer(token))
+    [row] = [r for r in today.json()["stock"] if r["product"] == "Hot chocolate"]
+    assert (row["stock_mode"], row["shelf_life_days"]) == ("inventory", 7)  # the app must not guess
+
+    assert (await put_stock(stock_mode="weekly")).status_code == 422
+    assert (await put_stock(shelf_life_days=0)).status_code == 422
+
+
+async def place_sourdough_order(
+    api: httpx2.AsyncClient, shop: ChannelConnection, token: str
+) -> uuid.UUID:
+    """An unpaid ₹300 order (two loaves) for this shop."""
+    await api.put(
+        "/v1/today/stock",
+        headers=bearer(token),
+        json={"lines": [{"product": "Sourdough", "price_minor": 15000, "quantity": 10}]},
+    )
+    turn = await start_conversation()
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        conversation = await session.get(Conversation, turn.conversation_id)
+        assert conversation is not None
+        placed = await orders.place_order(
+            session,
+            merchant_id=shop.merchant_id,
+            customer_id=conversation.customer_id,
+            conversation_id=conversation.id,
+            business_date=merchants.business_date(merchant),
+            request=OrderRequest(
+                lines=(OrderLineRequest("Sourdough", None, 2),), fulfilment="pickup"
+            ),
+            hold_minutes=15,
+        )
+    return placed.order_id
+
+
+@pytest.fixture
+def simulator_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The built-in payment simulator, with no cooldown unless a test sets one."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "payment_provider", "simulator")
+    monkeypatch.setattr(settings, "payment_retry_cooldown_seconds", 0)
+    monkeypatch.setattr(settings, "payment_max_attempts", 3)
+
+
+async def simulator_link(api: httpx2.AsyncClient, token: str, order_id: uuid.UUID) -> str:
+    """The path of the simulator page the customer would open."""
+    response = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
+    assert response.status_code == 200, response.text
+    return urlparse(response.json()["payment_link"]).path
+
+
+async def run_simulator_jobs() -> int:
+    """Apply the simulator webhooks waiting in the inbox, as the worker would."""
+    async with session_scope() as session:
+        pending = list(
+            await session.scalars(
+                select(WebhookEvent.id).where(
+                    WebhookEvent.source == "simulator", WebhookEvent.status == "pending"
+                )
+            )
+        )
+    for event_id in pending:
+        await process_simulator_event(event_id=str(event_id))
+    return len(pending)
+
+
+async def order_state(order_id: uuid.UUID) -> str:
+    async with session_scope() as session:
+        order = await session.get(Order, order_id)
+    assert order is not None
+    return order.status
+
+
+async def chat_texts(kind: str) -> list[Message]:
+    async with session_scope() as session:
+        return list(
+            await session.scalars(
+                select(Message)
+                .where(Message.details["kind"].as_string() == kind)
+                .order_by(Message.created_at)
+            )
+        )
+
+
+async def test_accepting_on_the_simulator_page_pays_the_order_through_a_webhook(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    simulator_on: None,
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+    path = await simulator_link(api, token, order_id)
+
+    page = await api.get(path)
+    assert page.status_code == 200
+    assert "Accept payment" in page.text and "Reject payment" in page.text
+
+    assert (await api.post(f"{path}/accept")).status_code == 200
+    assert await order_state(order_id) == "awaiting_payment"  # the webhook is only queued so far
+    assert await run_simulator_jobs() == 1
+    assert await order_state(order_id) == "paid"
+
+    again = await api.post(f"{path}/accept")  # a second press changes nothing
+    assert again.status_code == 200 and await run_simulator_jobs() == 0
+    assert "already" in (await api.get(path)).text
+
+
+async def test_rejecting_offers_a_new_link_and_the_second_try_can_pay(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    simulator_on: None,
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+    first = await simulator_link(api, token, order_id)
+
+    assert (await api.post(f"{first}/reject")).status_code == 200
+    assert await run_simulator_jobs() == 1
+    assert await order_state(order_id) == "awaiting_payment"  # declined, not cancelled
+
+    [declined] = await chat_texts("payment_declined")
+    assert "2 more tries" in declined.body
+    async with session_scope() as session:
+        sent = await session.scalar(
+            select(OutboundMessage.payload).where(OutboundMessage.message_id == declined.id)
+        )
+    assert sent is not None
+    assert sent["quick_replies"][0][1] == f"RETRY:{order_id}"  # the "New payment link" button
+
+    second = await simulator_link(api, token, order_id)  # what the button does
+    assert second != first
+    await api.post(f"{second}/accept")
+    await run_simulator_jobs()
+    assert await order_state(order_id) == "paid"
+    assert "declined" in (await api.get(first)).text  # the old link can't be paid any more
+
+
+async def test_a_new_link_waits_for_the_cooldown_after_a_failed_payment(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    simulator_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "payment_retry_cooldown_seconds", 60)
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+    path = await simulator_link(api, token, order_id)
+    await api.post(f"{path}/reject")
+    await run_simulator_jobs()
+
+    [declined] = await chat_texts("payment_declined")
+    assert "seconds" in declined.body  # the customer is told how long to wait
+    early = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
+    assert early.status_code == 409 and "seconds" in early.json()["detail"]
+    assert await order_state(order_id) == "awaiting_payment"
+
+
+async def test_the_order_is_cancelled_when_the_last_try_fails(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    simulator_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "payment_max_attempts", 2)
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+
+    first = await simulator_link(api, token, order_id)
+    await api.post(f"{first}/reject")
+    await run_simulator_jobs()
+    assert await order_state(order_id) == "awaiting_payment"
+
+    second = await simulator_link(api, token, order_id)
+    await api.post(f"{second}/reject")
+    await run_simulator_jobs()
+
+    assert await order_state(order_id) == "cancelled"  # no tries left: items go back on sale
+    assert len(await chat_texts("payment_declined")) == 1
+    [gave_up] = await chat_texts("payment_gave_up")
+    assert "cancelled" in gave_up.body
+    refused = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
+    assert refused.status_code == 409
+
+
+async def test_simulator_webhooks_need_a_valid_signature_and_never_run_in_production(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    simulator_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = simulator.event_body(
+        "accepted", payment_id=uuid.uuid4(), amount_minor=100, currency="INR"
+    )
+    header = simulator.SIGNATURE_HEADER
+
+    forged = await api.post("/webhooks/simulator", content=body, headers={header: "forged"})
+    signed = await api.post(
+        "/webhooks/simulator", content=body, headers={header: simulator.sign(body)}
+    )
+    assert forged.status_code == 401 and signed.status_code == 200
+
+    monkeypatch.setattr(get_settings(), "app_env", "prod")  # the switch is refused in production
+    assert not simulator.enabled()
+    unsigned_ok = await api.post(
+        "/webhooks/simulator", content=body, headers={header: simulator.sign(body)}
+    )
+    assert unsigned_ok.status_code == 404
+    assert (await api.get(f"/payments/simulator/{uuid.uuid4()}")).status_code == 404
+
+
+async def test_payment_link_without_a_upi_id_is_a_paypal_link_charged_in_dollars(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+
+    async def create_order(**kwargs: object) -> paypal.CreatedOrder:
+        return paypal.CreatedOrder("PP-1", "https://paypal.test/approve")
+
+    async def per_dollar(currency: str) -> Decimal:
+        return Decimal("94")
+
+    monkeypatch.setattr(paypal, "configured", lambda: True)
+    monkeypatch.setattr(paypal, "create_order", create_order)
+    monkeypatch.setattr(fx, "per_dollar", per_dollar)
+
+    response = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
+
+    assert response.status_code == 200
+    assert response.json()["payment_method"] == "paypal"
+    assert response.json()["payment_link"] == "https://paypal.test/approve"
+
+
+async def test_payment_link_without_a_upi_id_or_paypal_is_an_error_not_an_invented_upi_id(
+    api: httpx2.AsyncClient,
+    shop: ChannelConnection,
+    deferred_jobs: InMemoryConnector,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await sign_in_as(shop.merchant_id)
+    order_id = await place_sourdough_order(api, shop, token)
+    monkeypatch.setattr(paypal, "configured", lambda: False)
+
+    response = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
+
+    assert response.status_code == 400
+
+
 async def test_order_lifecycle_and_upi_payment_link_endpoints(
     api: httpx2.AsyncClient, shop: ChannelConnection, deferred_jobs: InMemoryConnector
 ) -> None:
     token = await sign_in_as(shop.merchant_id)
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        await shop_profile.save_onboarding(
+            session,
+            shop.merchant_id,
+            shop_name=merchant.name,
+            answers=OnboardingAnswers(upi_id="sweetcrumbs@okhdfcbank"),
+        )
 
     # 1. Setup stock
     await api.put(

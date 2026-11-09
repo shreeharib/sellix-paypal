@@ -19,7 +19,9 @@ from app.core.ratelimit import RateLimitMiddleware
 from app.modules.agent import service as agent
 from app.modules.channels.router import router as channels_router
 from app.modules.payments.router import router as payments_router
+from app.modules.payments.router import simulator_router as payment_simulator_router
 from app.webhooks import meta, paypal
+from app.webhooks import simulator as simulator_webhook
 
 log = structlog.get_logger()
 
@@ -73,6 +75,8 @@ def create_app() -> FastAPI:
     app.include_router(paypal.router)
     app.include_router(channels_router)
     app.include_router(payments_router)
+    app.include_router(payment_simulator_router)
+    app.include_router(simulator_webhook.router)
     app.include_router(v1_router)
 
     @app.get("/simulator", include_in_schema=False)

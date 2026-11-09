@@ -46,6 +46,8 @@ Future<ProductDetail> product(String productId);
 Future<ProductDetail> updateProduct(String productId, ProductUpdate update);
 Future<ProductAliasDetail> addProductAlias(String productId, String aliasText);
 Future<void> deleteProductAlias(String productId, String aliasId);
+Future<List<ShopTypeChoice>> shopTypes();   // GET /v1/shop-types: [{id, label}], the ids for answers.shop_type
+Future<ProductSchema> productSchema();   // GET /v1/product-schema: stock modes, shelf-life answers, detail fields, wording
 
 // Orders
 Future<List<Order>> orders({List<String>? status, List<String>? paymentStatus, int? limit});

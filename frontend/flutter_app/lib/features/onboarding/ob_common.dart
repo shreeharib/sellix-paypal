@@ -6,6 +6,7 @@ import '../../core/api/models.dart';
 import '../../core/auth/auth_controller.dart';
 import '../../core/providers.dart';
 import '../../design/design.dart';
+import '../stock/stock_providers.dart';
 
 const obStepCount = 4;
 
@@ -31,6 +32,10 @@ class OnboardingDraft extends AsyncNotifier<Onboarding> {
       complete: complete,
     );
     state = AsyncData(saved);
+    // The category and shop type decide the stock step's questions.
+    ref
+      ..invalidate(productSchemaProvider)
+      ..invalidate(shopAnswersProvider);
   }
 }
 

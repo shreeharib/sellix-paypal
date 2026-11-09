@@ -58,6 +58,8 @@ async def day_ledger(
             sold=stocks[v.variant_id].sold,
             counter_sales=stocks[v.variant_id].counter_sales,
             available=stocks[v.variant_id].available,
+            stock_mode=v.effective_stock_mode,
+            shelf_life_days=v.effective_shelf_life_days,
         )
         for v in variants
     ]
@@ -157,6 +159,8 @@ async def set_opening_stock(
             variant_name=line.variant,
             price_minor=line.price_minor,
             currency=line.currency,
+            stock_mode=line.stock_mode,
+            shelf_life_days=line.shelf_life_days,
         )
         statement = pg_insert(DailyStock).values(
             merchant_id=merchant_id,

@@ -21,8 +21,7 @@ def test_profile_from_full_answers() -> None:
 
     assert render_profile("Sweet Crumbs", answers) == (
         "# Sweet Crumbs (home bakery, Anna Nagar, Chennai)\n"
-        '- Introduce yourself as: "Sweet Crumbs\' assistant". Friendly tone. Light emoji. '
-        "Address customers as: sir/madam until they use a name.\n"
+        "- Friendly tone. Light emoji.\n"
         "- Open Tue–Sun, 9 am – 8 pm.\n"
         "- Closed Mondays.\n"
         "- We sell: cookies, brownies, cupcakes\n"
@@ -36,3 +35,18 @@ def test_profile_from_full_answers() -> None:
 
 def test_skipped_steps_leave_just_the_shop_name() -> None:
     assert render_profile("Sweet Crumbs", OnboardingAnswers()) == "# Sweet Crumbs"
+
+
+def test_the_profile_never_asks_for_a_self_introduction_or_sir_madam() -> None:
+    """Older app builds saved both answers; the agent's voice rules forbid them."""
+    answers = OnboardingAnswers(
+        intro="Hi, I am Sweet Crumbs's assistant",
+        address_customers="Sir or madam",
+        tone="friendly",
+    )
+
+    profile = render_profile("Sweet Crumbs", answers)
+
+    assert profile == "# Sweet Crumbs\n- Friendly tone."
+    for phrase in ("Introduce", "assistant", "Sir", "madam", "Address customers"):
+        assert phrase not in profile

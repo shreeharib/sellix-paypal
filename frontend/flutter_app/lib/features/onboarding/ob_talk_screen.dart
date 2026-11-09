@@ -10,21 +10,15 @@ import '../../design/design.dart';
 import 'ob_answers_text.dart';
 import 'ob_common.dart';
 
-const _addressOptions = ['Sir or madam', 'By name', 'Akka / anna'];
 const _languageOptions = ['English', 'Tanglish', 'Tamil', 'Hinglish', 'Hindi'];
 
 /// What the chosen voice sounds like. A fixed example built on this phone, labelled as one.
-String talkPreview({required String tone, required bool emoji, required String address}) {
-  final friendly = tone == 'friendly';
-  final name = switch (address) {
-    'By name' => '[name]',
-    'Akka / anna' => 'akka',
-    _ => 'madam',
-  };
-  if (!friendly) {
-    return 'Good afternoon ${address == 'By name' ? '[name]' : 'madam'}. Yes, this is available today. Which one would you like?';
+/// No "sir" or "madam" and no self-introduction: the agent never uses them (backend voice rules).
+String talkPreview({required String tone, required bool emoji}) {
+  if (tone != 'friendly') {
+    return 'Good afternoon. Yes, this is available today. Which one would you like?';
   }
-  return 'Hi $name${emoji ? ' 👋' : ''}! Yes, this is available today${emoji ? ' ✨' : ''}. Which one do you want?';
+  return 'Hi${emoji ? ' 👋' : ''}! Yes, this is available today${emoji ? ' ✨' : ''}. Which one do you want?';
 }
 
 class ObTalkScreen extends ConsumerStatefulWidget {
@@ -35,18 +29,10 @@ class ObTalkScreen extends ConsumerStatefulWidget {
 }
 
 class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
-  final _intro = TextEditingController();
   bool _ready = false;
   String _tone = 'friendly';
   bool _emoji = true;
-  String _address = _addressOptions.first;
   Set<String> _languages = {'English', 'Tanglish', 'Tamil'};
-
-  @override
-  void dispose() {
-    _intro.dispose();
-    super.dispose();
-  }
 
   void _load() {
     final draft = ref.watch(onboardingDraftProvider).value;
@@ -55,10 +41,8 @@ class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
     final a = draft.answers;
     _tone = a.tone ?? _tone;
     _emoji = a.emoji ?? _emoji;
-    _address = _addressOptions.contains(a.addressCustomers) ? a.addressCustomers! : _address;
     final saved = obParseLanguages(a.faqs);
     if (saved != null) _languages = saved.toSet();
-    _intro.text = a.intro ?? 'Hi, I am ${draft.shopName}’s assistant';
   }
 
   void _continue() {
@@ -66,8 +50,9 @@ class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
       (a) => a.copyWith(
         tone: _tone,
         emoji: _emoji,
-        addressCustomers: _address,
-        intro: obText(_intro.text),
+        // Not asked any more, and cleared: the agent never introduces itself or says sir / madam.
+        addressCustomers: null,
+        intro: null,
         // BACKEND GAP: no field for customer languages; see obFaqsWith.
         faqs: obFaqsWith(a.faqs, languages: [
           for (final l in _languageOptions)
@@ -94,7 +79,7 @@ class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
         const SizedBox(height: SxSpace.s20),
         SxFadeUp(
           index: 2,
-          child: _PreviewCard(text: talkPreview(tone: _tone, emoji: _emoji, address: _address)),
+          child: _PreviewCard(text: talkPreview(tone: _tone, emoji: _emoji)),
         ),
         const SizedBox(height: SxSpace.s20),
         SxFadeUp(
@@ -126,25 +111,10 @@ class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
           ),
         ),
         const SizedBox(height: SxSpace.s20),
-        SxFadeUp(
+        const SxFadeUp(
           index: 5,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const ObLabel('Call customers'),
-              Wrap(
-                spacing: SxSpace.s8,
-                runSpacing: SxSpace.s8,
-                children: [
-                  for (final option in _addressOptions)
-                    SxPickChip(
-                      label: option,
-                      selected: _address == option,
-                      onTap: () => setState(() => _address = option),
-                    ),
-                ],
-              ),
-            ],
+          child: SxAiNote(
+            'I use a customer’s name only if they give it, never “sir” or “madam”, and I don’t introduce myself. If a customer asks, I say I’m your shop’s virtual assistant.',
           ),
         ),
         const SizedBox(height: SxSpace.s20),
@@ -172,16 +142,6 @@ class _ObTalkScreenState extends ConsumerState<ObTalkScreen> with ObSaving {
               const SizedBox(height: SxSpace.s8),
               const SxAiNote('I always reply in the language of the customer’s last message.'),
             ],
-          ),
-        ),
-        const SizedBox(height: SxSpace.s16),
-        SxFadeUp(
-          index: 7,
-          child: SxField(
-            controller: _intro,
-            label: 'How sellix introduces itself',
-            hint: 'Hi, I am your shop’s assistant',
-            maxLength: 200,
           ),
         ),
       ],

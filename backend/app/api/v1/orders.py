@@ -3,6 +3,7 @@
 import uuid
 from typing import Annotated, Literal
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from app.modules.orders.schemas import OrderSummary
 from app.modules.payments import service as payments
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+log = structlog.get_logger()
 
 OrderStatus = Literal[
     "awaiting_payment",
@@ -29,7 +31,7 @@ OrderStatus = Literal[
     "ready",
     "delivered",
 ]
-PaymentStatus = Literal["pending", "paid", "partially_refunded", "refunded", "failed"]
+PaymentStatus = Literal["unpaid", "pending", "paid", "partially_refunded", "refunded", "failed"]
 
 
 @router.get("")
@@ -209,6 +211,14 @@ async def get_payment_link(shop: Shop, order_id: uuid.UUID) -> schemas.PaymentLi
         outcome = await payments.get_order_payment_link(order_id, merchant_id=shop.merchant_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Order not found") from exc
+    except payments.RetryRefused as exc:
+        reasons = {
+            "cooldown": f"Wait {exc.wait_seconds} seconds before a new payment link.",
+            "too_many_attempts": "This order has used all its payment attempts.",
+            "window_over": "The time to pay this order is over.",
+            "not_payable": "This order isn't waiting for payment.",
+        }
+        raise HTTPException(status_code=409, detail=reasons[exc.reason]) from exc
     except (ValueError, payments.PaymentUnavailable) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -237,11 +247,18 @@ async def update_order_status(
                 actor="merchant",
                 comment=body.comment,
             )
-            return await _order_response(session, order_id, shop.merchant_id)
+            response = await _order_response(session, order_id, shop.merchant_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # After the commit: "ready for pickup" etc. goes to the customer's chat. The status change
+    # stands even if the message can't be queued.
+    try:
+        await conversations.after_status_change(order_id, shop.merchant_id)
+    except Exception:
+        log.exception("orders.status_message_failed", order_id=str(order_id))
+    return response
 
 
 @router.get("/{order_id}/timeline", response_model=list[schemas.OrderTimelineEvent])

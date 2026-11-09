@@ -53,6 +53,28 @@ class FakeSellixApi implements SellixApi {
   /// The last `setUpcomingStock` call, for tests.
   ({DateTime from, DateTime to, List<StockLine> lines, bool oneDayOnly, DateTime? lastOrderDate})? lastUpcoming;
   List<ProductDetail> catalog = [];
+
+  /// What `GET /v1/product-schema` answers: a bakery's. Set [FakeSchemas.dressShop] for a shop
+  /// that keeps stock until it sells. Set [failure] for the app's built-in schema.
+  ProductSchema schema = FakeSchemas.bakery;
+
+  /// The schema of a shop type, by id, for when `answers.shopType` is set (as the backend does);
+  /// otherwise [schema].
+  Map<String, ProductSchema> schemaByType = {
+    'bakery': FakeSchemas.bakery,
+    'dress_shop': FakeSchemas.dressShop,
+  };
+
+  /// What `GET /v1/shop-types` answers.
+  List<ShopTypeChoice> shopTypeList = const [
+    ShopTypeChoice(id: 'bakery', label: 'Bakery & sweets'),
+    ShopTypeChoice(id: 'jewellery', label: 'Jewellery & accessories'),
+    ShopTypeChoice(id: 'beauty', label: 'Beauty & makeup'),
+    ShopTypeChoice(id: 'plants', label: 'Plants & garden'),
+    ShopTypeChoice(id: 'handmade_gifts', label: 'Handmade & custom gifts'),
+    ShopTypeChoice(id: 'dress_shop', label: 'Dress & clothing shop'),
+    ShopTypeChoice(id: 'other', label: 'Other kind of shop'),
+  ];
   List<Order> orderList = [];
   Map<String, List<OrderTimelineEvent>> timelines = {};
   List<Question> questionList = [];
@@ -98,6 +120,7 @@ class FakeSellixApi implements SellixApi {
         sold: 2,
         counterSales: 1,
         available: 6,
+        stockMode: StockMode.daily,
       ),
       StockRow(
         variantId: FakeIds.variantB,
@@ -434,7 +457,10 @@ class FakeSellixApi implements SellixApi {
       baseImageUrl: update.baseImageUrl ?? product.baseImageUrl,
       stockMode: product.stockMode,
       shelfLifeDays: product.shelfLifeDays,
-      attributes: update.attributes ?? product.attributes,
+      // Like the backend, attributes are merged key by key: a key that is not sent stays.
+      attributes: update.attributes == null
+          ? product.attributes
+          : {...product.attributes, ...update.attributes!},
       isActive: product.isActive,
       variants: product.variants,
       aliases: aliases ?? product.aliases,
@@ -531,32 +557,87 @@ class FakeSellixApi implements SellixApi {
     return _today();
   }
 
+  int _newVariants = 0;
+
+  /// Like the backend: a line updates its row or adds one, rows not listed stay, an omitted
+  /// `stock_mode` or `shelf_life_days` keeps what the item had, and a new product joins the catalogue.
   @override
   Future<Today> setOpeningStock(List<StockLine> lines) async {
     await _call('setOpeningStock');
-    stock = [
-      for (final (index, line) in lines.indexed)
-        StockRow(
-          variantId: stock
-              .where((row) => row.product == line.product && row.variant == line.variant)
-              .map((row) => row.variantId)
-              .firstOrNull ??
-              'variant-new-$index',
-          product: line.product,
-          variant: line.variant,
-          priceMinor: line.priceMinor,
-          currency: line.currency,
-          opening: line.quantity,
-          restocked: 0,
-          held: 0,
-          sold: 0,
-          counterSales: 0,
-          available: line.quantity,
-          stockMode: line.stockMode ?? StockMode.daily,
-          shelfLifeDays: line.shelfLifeDays,
-        ),
-    ];
+    for (final line in lines) {
+      final at = stock.indexWhere((row) => row.product == line.product && row.variant == line.variant);
+      final old = at < 0 ? null : stock[at];
+      final variantId = old?.variantId ?? 'variant-new-${_newVariants++}';
+      final mode = line.stockMode ?? old?.stockMode ?? StockMode.daily;
+      final shelf = line.shelfLifeDays ?? old?.shelfLifeDays;
+      final row = StockRow(
+        variantId: variantId,
+        product: line.product,
+        variant: line.variant,
+        priceMinor: line.priceMinor,
+        currency: line.currency,
+        opening: line.quantity,
+        restocked: old?.restocked ?? 0,
+        held: old?.held ?? 0,
+        sold: old?.sold ?? 0,
+        counterSales: old?.counterSales ?? 0,
+        available: line.quantity + (old?.restocked ?? 0) - (old?.held ?? 0) - (old?.sold ?? 0) -
+            (old?.counterSales ?? 0),
+        stockMode: mode,
+        shelfLifeDays: shelf,
+      );
+      stock = at < 0 ? [...stock, row] : [for (final r in stock) if (r.variantId == variantId) row else r];
+      if (old == null) _joinCatalog(line, variantId, mode, shelf);
+    }
     return _today();
+  }
+
+  void _joinCatalog(StockLine line, String variantId, String mode, int? shelf) {
+    final variant = ProductVariantDetail(
+      id: variantId,
+      sku: null,
+      name: line.variant,
+      priceMinor: line.priceMinor,
+      currency: line.currency,
+      stockMode: mode,
+      shelfLifeDays: shelf,
+      isActive: true,
+    );
+    final known = catalog.where((p) => p.name.toLowerCase() == line.product.toLowerCase()).firstOrNull;
+    if (known == null) {
+      catalog = [
+        ...catalog,
+        ProductDetail(
+          id: 'product-$variantId',
+          name: line.product,
+          stockMode: mode,
+          shelfLifeDays: shelf,
+          isActive: true,
+          variants: [variant],
+        ),
+      ];
+      return;
+    }
+    catalog = [
+      for (final p in catalog)
+        if (p.id == known.id)
+          ProductDetail(
+            id: p.id,
+            name: p.name,
+            title: p.title,
+            description: p.description,
+            category: p.category,
+            baseImageUrl: p.baseImageUrl,
+            stockMode: p.stockMode,
+            shelfLifeDays: p.shelfLifeDays,
+            attributes: p.attributes,
+            isActive: p.isActive,
+            variants: [...p.variants, variant],
+            aliases: p.aliases,
+          )
+        else
+          p,
+    ];
   }
 
   @override
@@ -753,6 +834,18 @@ class FakeSellixApi implements SellixApi {
           if (alias.id != aliasId) alias,
       ],
     );
+  }
+
+  @override
+  Future<ProductSchema> productSchema() async {
+    await _call('productSchema');
+    return schemaByType[answers.shopType] ?? schema;
+  }
+
+  @override
+  Future<List<ShopTypeChoice>> shopTypes() async {
+    await _call('shopTypes');
+    return shopTypeList;
   }
 
   // Orders
@@ -1059,6 +1152,108 @@ class FakeSellixApi implements SellixApi {
     await _call('logout');
     loggedOut = true;
   }
+}
+
+/// Product schemas as `GET /v1/product-schema` answers them (docs: the add-product form).
+abstract final class FakeSchemas {
+  static const _freshBatches = StockModeOption(
+    id: StockMode.daily,
+    label: 'I make fresh batches',
+    hint: 'You set a count every day.',
+    asksShelfLife: true,
+  );
+  static const _keepUntilSold = StockModeOption(
+    id: StockMode.inventory,
+    label: 'I keep stock until it sells',
+    hint: 'Count it once, add more when you restock.',
+  );
+  static const _madeToOrder = StockModeOption(
+    id: StockMode.madeToOrder,
+    label: 'I make it when ordered',
+    hint: 'No count needed.',
+  );
+  static const _always = StockModeOption(
+    id: StockMode.unlimited,
+    label: 'Always available',
+    hint: 'No count needed.',
+  );
+
+  static const bakery = ProductSchema(
+    shopType: 'bakery',
+    label: 'Bakery & sweets',
+    defaultStockMode: StockMode.daily,
+    stockModes: [_freshBatches, _keepUntilSold, _madeToOrder, _always],
+    shelfLifeOptions: [
+      ShelfLifeOption(id: 'same', label: 'Same day', days: 1),
+      ShelfLifeOption(id: '3', label: '3 days', days: 3),
+      ShelfLifeOption(id: '7', label: '1 week', days: 7),
+      ShelfLifeOption(id: '30', label: '1 month', days: 30),
+    ],
+    detailFields: [
+      DetailField(
+        key: 'allergens',
+        label: 'Allergens',
+        type: DetailFieldType.multiChoice,
+        options: ['Egg', 'Milk', 'Gluten', 'Nuts', 'Soy'],
+        note: 'I use this to answer allergy questions.',
+      ),
+      DetailField(
+        key: 'ingredients',
+        label: 'Ingredients',
+        type: DetailFieldType.text,
+        note: 'Shown to customers who ask.',
+      ),
+    ],
+    vocabulary: Vocabulary(
+      stockQuestion: 'What did you make today?',
+      exampleProduct: 'Choco lava',
+      aliasExample: 'lava cake, molten cake',
+    ),
+  );
+
+  /// Keeps stock until it sells, or makes to order: no mode asks a shelf life.
+  static const dressShop = ProductSchema(
+    shopType: 'dress_shop',
+    label: 'Clothing & dresses',
+    defaultStockMode: StockMode.inventory,
+    stockModes: [_keepUntilSold, _madeToOrder],
+    shelfLifeOptions: [],
+    detailFields: [
+      DetailField(
+        key: 'sizes',
+        label: 'Sizes',
+        type: DetailFieldType.multiChoice,
+        options: ['S', 'M', 'L', 'XL'],
+        note: 'I use this to answer size questions.',
+      ),
+      DetailField(
+        key: 'fabric',
+        label: 'Fabric',
+        type: DetailFieldType.text,
+        note: 'Shown to customers who ask.',
+      ),
+    ],
+    vocabulary: Vocabulary(
+      stockQuestion: 'What’s in stock today?',
+      exampleProduct: 'Blue kurti',
+      aliasExample: 'kurta, kurthi',
+    ),
+  );
+
+  /// A schema that allows one mode: the stock question is not asked.
+  static const oneMode = ProductSchema(
+    shopType: 'other',
+    label: 'Other',
+    defaultStockMode: StockMode.inventory,
+    stockModes: [_keepUntilSold],
+    shelfLifeOptions: [],
+    detailFields: [],
+    vocabulary: Vocabulary(
+      stockQuestion: 'What’s in stock today?',
+      exampleProduct: 'Your product name',
+      aliasExample: 'A short name customers use',
+    ),
+  );
 }
 
 /// The ids in [FakeSellixApi]'s data.

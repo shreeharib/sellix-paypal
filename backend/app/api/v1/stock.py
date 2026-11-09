@@ -72,6 +72,8 @@ async def set_upcoming(shop: Shop, body: UpcomingStock) -> list[UpcomingDay]:
             price_minor=line.price_minor,
             quantity=line.quantity,
             currency=line.currency,
+            stock_mode=line.stock_mode,
+            shelf_life_days=line.shelf_life_days,
         )
         for line in body.lines
     ]

@@ -276,7 +276,9 @@ class _PaymentLinkBodyState extends State<_PaymentLinkBody> {
               SxButton(
                 label: 'Try again',
                 kind: SxButtonKind.secondary,
-                onTap: () => setState(() => _future = widget.load()),
+                onTap: () => setState(() {
+                  _future = widget.load();
+                }),
               ),
             ],
           );

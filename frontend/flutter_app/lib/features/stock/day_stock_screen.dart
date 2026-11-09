@@ -227,19 +227,19 @@ class _DayStockScreenState extends ConsumerState<DayStockScreen> {
       subtitle: 'For ${_long(_day!)}',
       builder: (_) => _NewProductSheet(
         currency: data.catalog.firstOrNull?.variants.firstOrNull?.currency,
-        example: ShopTerms.of(ref.read(shopAnswersProvider).value?.category).exampleProduct,
+        example: ref.read(shopSchemaProvider).vocabulary.exampleProduct,
       ),
     );
     if (created != null && mounted) _add(created);
   }
 
   Future<void> _typeIt(_DayData data) async {
-    final terms = ShopTerms.of(ref.read(shopAnswersProvider).value?.category);
+    final vocabulary = ref.read(shopSchemaProvider).vocabulary;
     final lines = await showSxSheet<List<StockLine>>(
       context,
       title: 'Type the stock for ${_long(_day!)}',
       subtitle: 'One line is fine. Write the count, the name and the price.',
-      builder: (_) => _TypeSheet(example: terms.exampleProduct),
+      builder: (_) => _TypeSheet(example: vocabulary.exampleProduct),
     );
     if (lines == null || !mounted) return;
     final catalogue = {for (final e in _catalogue(data, _day!)) e.key: e};
@@ -319,6 +319,8 @@ class _DayStockScreenState extends ConsumerState<DayStockScreen> {
   @override
   Widget build(BuildContext context) {
     final value = ref.watch(_dayDataProvider);
+    // Kept loaded so the type-it and new-product sheets use this shop type's example.
+    ref.watch(shopSchemaProvider);
     final data = value.value;
     if (data != null && _entries == null) {
       final first = widget.day == null ? addDays(_today(data), 1) : dateOnly(widget.day!);

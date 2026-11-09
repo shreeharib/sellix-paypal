@@ -1,0 +1,14 @@
+id: event_payment_received
+version: 1
+description: "Fallback: sent by code when the assistant can't write the payment-received message (model unavailable)."
+texts:
+  en: |-
+    Payment received for order {{ number }}. Thank you!
+  ta-en: |-
+    Order {{ number }} payment vandhuduchu. Nandri!
+  ta: |-
+    ஆர்டர் {{ number }} க்கான பணம் பெறப்பட்டது. நன்றி!
+  hi-en: |-
+    Order {{ number }} ka payment mil gaya. Shukriya!
+  hi: |-
+    ऑर्डर {{ number }} का भुगतान मिल गया। धन्यवाद!

@@ -1,0 +1,14 @@
+id: order_packed
+version: 1
+description: "Sent by code when the merchant marks a delivery order packed (Orders > Mark as packed)."
+texts:
+  en: |-
+    Order {{ number }} is packed and will be on its way soon.
+  ta-en: |-
+    Order {{ number }} pack aayiduchu, seekiram anuppiduvom.
+  ta: |-
+    ஆர்டர் {{ number }} பேக் செய்யப்பட்டது, விரைவில் அனுப்புவோம்.
+  hi-en: |-
+    Order {{ number }} pack ho gaya hai, jaldi bhej denge.
+  hi: |-
+    ऑर्डर {{ number }} पैक हो गया है, जल्दी भेज देंगे।

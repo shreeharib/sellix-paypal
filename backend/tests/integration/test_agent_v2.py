@@ -136,6 +136,36 @@ async def test_a_typed_yes_confirms_the_quote(
     assert await order_count() == 1
 
 
+async def test_a_typed_okay_does_not_place_the_order(
+    v2_shop: ChannelConnection, model: ScriptedModel, instagram: Instagram
+) -> None:
+    """8 Nov chat: "okay" after "when can I pick it up?" was taken as a yes and placed an order."""
+    conversation_id = await reach_quote(v2_shop, model)
+    quote = await latest_quote()
+    model.then(
+        [("confirm_order", {"quote_id": str(quote.id)})],
+        [("send_reply", {"text": "Tap Confirm on the card to place it.", "language": "en"})],
+    )
+
+    await customer_says("okay", "m-2")
+
+    assert await order_count() == 0
+    assert await stage(conversation_id) == "awaiting_confirmation"
+    last_tool_result = [m for m in model.calls[-1][0] if m.role == "tool"][-1]
+    assert "unclear" in last_tool_result.content
+    assert "tap Confirm" in last_tool_result.content
+
+    # An explicit "confirm" afterwards places it.
+    model.then(
+        [("confirm_order", {"quote_id": str(quote.id)})],
+        [("send_reply", {"text": "Thanks!", "language": "en"})],
+    )
+    await customer_says("confirm", "m-3")
+
+    assert await order_count() == 1
+    assert await stage(conversation_id) == "payment_pending"
+
+
 async def test_a_no_never_places_an_order(
     v2_shop: ChannelConnection, model: ScriptedModel, instagram: Instagram
 ) -> None:
@@ -189,7 +219,7 @@ async def test_an_expired_quote_is_refused(
         [("send_reply", {"text": "Quote expire aagiduchu, thirumba solren.", "language": "ta-en"})],
     )
 
-    await customer_says("seri", "m-2")
+    await customer_says("confirm pannunga", "m-2")
 
     assert await order_count() == 0
     last_tool_result = [m for m in model.calls[-1][0] if m.role == "tool"][-1]
@@ -274,7 +304,7 @@ async def test_a_turn_that_crashed_resumes_without_a_second_order_or_link(
         RuntimeError("worker killed"),
     )
     with pytest.raises(RuntimeError):
-        await customer_says("seri", "m-2")
+        await customer_says("confirm", "m-2")
     sent_before = len(instagram.sent)
 
     # The job runs again: the stored confirm_order result is reused, not run twice.

@@ -219,12 +219,13 @@ const Object _keep = Object();
 
 /// The merchant's onboarding answers. Every field is optional: each step can be skipped.
 ///
-/// Short fields allow 200 characters (category, area, city, hours, weeklyOff, intro,
+/// Short fields allow 200 characters (category, shopType, area, city, hours, weeklyOff, intro,
 /// addressCustomers, upiId); long ones 1500 (address, products, fulfilment, customOrders,
 /// cancellations, neverPromise, faqs). A PUT replaces all the answers, so send the whole object.
 class OnboardingAnswers {
   const OnboardingAnswers({
     this.category,
+    this.shopType,
     this.area,
     this.city,
     this.address,
@@ -245,6 +246,7 @@ class OnboardingAnswers {
 
   factory OnboardingAnswers.fromJson(Map<String, dynamic> json) => OnboardingAnswers(
     category: json['category'] as String?,
+    shopType: json['shop_type'] as String?,
     area: json['area'] as String?,
     city: json['city'] as String?,
     address: json['address'] as String?,
@@ -265,6 +267,10 @@ class OnboardingAnswers {
 
   // Shop
   final String? category;
+
+  /// An id from `GET /v1/shop-types` ("bakery", "dress_shop"...). Unset, the backend picks the
+  /// closest type from [category]. Like every answer it is replaced by a PUT, so each save carries it.
+  final String? shopType;
   final String? area;
   final String? city;
   final String? address;
@@ -295,6 +301,7 @@ class OnboardingAnswers {
   /// Passing null clears a field; leaving an argument out keeps it.
   OnboardingAnswers copyWith({
     Object? category = _keep,
+    Object? shopType = _keep,
     Object? area = _keep,
     Object? city = _keep,
     Object? address = _keep,
@@ -315,6 +322,7 @@ class OnboardingAnswers {
     T? pick<T>(Object? next, T? current) => identical(next, _keep) ? current : next as T?;
     return OnboardingAnswers(
       category: pick(category, this.category),
+      shopType: pick(shopType, this.shopType),
       area: pick(area, this.area),
       city: pick(city, this.city),
       address: pick(address, this.address),
@@ -336,6 +344,7 @@ class OnboardingAnswers {
 
   Map<String, dynamic> toJson() => {
     'category': ?category,
+    'shop_type': ?shopType,
     'area': ?area,
     'city': ?city,
     'address': ?address,
@@ -405,6 +414,8 @@ abstract final class StockMode {
   static const inventory = 'inventory';
   static const madeToOrder = 'made_to_order';
   static const unlimited = 'unlimited';
+
+  static const all = [daily, inventory, madeToOrder, unlimited];
 }
 
 class StockRow {
@@ -420,7 +431,7 @@ class StockRow {
     required this.sold,
     required this.counterSales,
     required this.available,
-    this.stockMode = StockMode.daily,
+    this.stockMode,
     this.shelfLifeDays,
   });
 
@@ -436,7 +447,7 @@ class StockRow {
     sold: _intOrNull(json['sold']) ?? 0,
     counterSales: _intOrNull(json['counter_sales']) ?? 0,
     available: _int(json['available']),
-    stockMode: json['stock_mode'] as String? ?? StockMode.daily,
+    stockMode: json['stock_mode'] as String?,
     shelfLifeDays: _intOrNull(json['shelf_life_days']),
   );
 
@@ -455,7 +466,10 @@ class StockRow {
   final int sold;
   final int counterSales;
   final int available;
-  final String stockMode;
+
+  /// Null from a backend that doesn't send it yet: then the catalogue's value is the one to use,
+  /// not an assumed "daily" (see `StockView.join`).
+  final String? stockMode;
   final int? shelfLifeDays;
 
   String get label => _label(product, variant);
@@ -467,7 +481,8 @@ class StockRow {
   int get soldTotal => sold + counterSales;
 
   /// Counted in the stock ledger (made-to-order and unlimited items aren't).
-  bool get isTracked => stockMode == StockMode.daily || stockMode == StockMode.inventory;
+  /// A row with no mode (an older backend) counts as daily, as it always did.
+  bool get isTracked => stockMode == null || stockMode == StockMode.daily || stockMode == StockMode.inventory;
 
   /// Leftovers can carry to the next day: the same rule as `POST /v1/today/rollover`.
   bool get carries => stockMode == StockMode.inventory || (shelfLifeDays ?? 0) > 1;
@@ -1425,6 +1440,172 @@ class CreateAliasRequest {
   final String aliasText;
 
   Map<String, dynamic> toJson() => {'alias_text': aliasText};
+}
+
+// Product schema -------------------------------------------------------------------------------
+
+/// A shop type the backend knows (`GET /v1/shop-types`): the id goes in `answers.shop_type`.
+class ShopTypeChoice {
+  const ShopTypeChoice({required this.id, required this.label});
+
+  factory ShopTypeChoice.fromJson(Map<String, dynamic> json) =>
+      ShopTypeChoice(id: json['id'] as String, label: json['label'] as String);
+
+  final String id;
+  final String label;
+}
+
+/// One way a shop type can stock a product. [id] is a `stock_mode` value (see [StockMode]).
+class StockModeOption {
+  const StockModeOption({
+    required this.id,
+    required this.label,
+    this.hint = '',
+    this.asksShelfLife = false,
+  });
+
+  factory StockModeOption.fromJson(Map<String, dynamic> json) => StockModeOption(
+    id: json['id'] as String,
+    label: json['label'] as String,
+    hint: json['hint'] as String? ?? '',
+    asksShelfLife: json['asks_shelf_life'] as bool? ?? false,
+  );
+
+  final String id;
+  final String label;
+  final String hint;
+
+  /// Only these modes ask "how long can you sell it?".
+  final bool asksShelfLife;
+}
+
+/// A quick answer to "how long can you sell it?". Matched by [days]; [id] is only a key.
+class ShelfLifeOption {
+  const ShelfLifeOption({required this.id, required this.label, required this.days});
+
+  factory ShelfLifeOption.fromJson(Map<String, dynamic> json) =>
+      ShelfLifeOption(id: '${json['id']}', label: json['label'] as String, days: _int(json['days']));
+
+  final String id;
+  final String label;
+  final int days;
+}
+
+/// Values of a detail field's `type`.
+abstract final class DetailFieldType {
+  /// Chips from `options`, and the owner can add their own. Saved as a list of strings.
+  static const multiChoice = 'multi_choice';
+
+  /// One line of text. Saved as a string.
+  static const text = 'text';
+}
+
+/// A product detail this shop type keeps (allergens, size, fabric...), saved in the product's
+/// `attributes` under [key].
+class DetailField {
+  const DetailField({
+    required this.key,
+    required this.label,
+    this.type = DetailFieldType.text,
+    this.options = const [],
+    this.note = '',
+  });
+
+  factory DetailField.fromJson(Map<String, dynamic> json) => DetailField(
+    key: json['key'] as String,
+    label: json['label'] as String,
+    type: json['type'] as String? ?? DetailFieldType.text,
+    options: [for (final option in (json['options'] as List<dynamic>?) ?? const <dynamic>[]) '$option'],
+    note: json['note'] as String? ?? '',
+  );
+
+  final String key;
+  final String label;
+  final String type;
+  final List<String> options;
+  final String note;
+
+  /// Anything but `text` is shown as chips: an unknown type is safer as chips than as nothing.
+  bool get isChoice => type != DetailFieldType.text;
+
+  /// What a product's `attributes` hold for this field, as a list (a comma-separated string
+  /// from an older save reads the same way).
+  List<String> values(Map<String, dynamic> attributes) => switch (attributes[key]) {
+    final List<dynamic> list => [for (final v in list) '$v'.trim()].where((v) => v.isNotEmpty).toList(),
+    final String text when text.trim().isNotEmpty =>
+      isChoice ? text.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList() : [text.trim()],
+    _ => const [],
+  };
+
+  /// The same, as one line of text.
+  String text(Map<String, dynamic> attributes) => values(attributes).join(', ');
+}
+
+/// The words a shop type uses in the stock screens.
+class Vocabulary {
+  const Vocabulary({
+    required this.stockQuestion,
+    required this.exampleProduct,
+    required this.aliasExample,
+  });
+
+  factory Vocabulary.fromJson(Map<String, dynamic> json) => Vocabulary(
+    stockQuestion: json['stock_question'] as String? ?? 'What’s in stock today?',
+    exampleProduct: json['example_product'] as String? ?? 'Your product name',
+    aliasExample: json['alias_example'] as String? ?? 'A short name customers use',
+  );
+
+  final String stockQuestion;
+  final String exampleProduct;
+  final String aliasExample;
+}
+
+/// `GET /v1/product-schema`: what the add-product form asks for this shop type. The backend owns
+/// it; the app has a built-in one (`fallbackSchema`) for when the call fails.
+class ProductSchema {
+  const ProductSchema({
+    required this.shopType,
+    required this.label,
+    required this.defaultStockMode,
+    required this.stockModes,
+    required this.shelfLifeOptions,
+    required this.detailFields,
+    required this.vocabulary,
+  });
+
+  factory ProductSchema.fromJson(Map<String, dynamic> json) => ProductSchema(
+    shopType: json['shop_type'] as String? ?? 'other',
+    label: json['label'] as String? ?? '',
+    defaultStockMode: json['default_stock_mode'] as String? ?? StockMode.inventory,
+    // A mode this app can't map to a `stock_mode` value is left out rather than sent.
+    stockModes: [
+      for (final mode in _list(json['stock_modes'], StockModeOption.fromJson))
+        if (StockMode.all.contains(mode.id)) mode,
+    ],
+    shelfLifeOptions: _list(json['shelf_life_options'], ShelfLifeOption.fromJson),
+    detailFields: _list(json['detail_fields'], DetailField.fromJson),
+    vocabulary: Vocabulary.fromJson(_map(json['vocabulary'])),
+  );
+
+  final String shopType;
+  final String label;
+  final String defaultStockMode;
+
+  /// Only the modes this shop type allows, in display order.
+  final List<StockModeOption> stockModes;
+  final List<ShelfLifeOption> shelfLifeOptions;
+  final List<DetailField> detailFields;
+  final Vocabulary vocabulary;
+
+  StockModeOption? mode(String id) {
+    for (final option in stockModes) {
+      if (option.id == id) return option;
+    }
+    return null;
+  }
+
+  /// [defaultStockMode] when this shop type allows it, else the first mode it lists.
+  String get defaultMode => mode(defaultStockMode)?.id ?? stockModes.firstOrNull?.id ?? defaultStockMode;
 }
 
 class CatalogSearchItem {

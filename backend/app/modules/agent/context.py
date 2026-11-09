@@ -57,6 +57,31 @@ _MENU = re.compile(
     r"|(?:more|other)\s+(?:products?|items?|options?)|show\s+me|available\s+today)\b",
     re.IGNORECASE,
 )
+# Nothing to do with the shop: code, homework, maths, trivia, jokes and poems, politics, weather.
+# Specific phrases only, so "floral print", "dress code" or "what day is it" still reach the shop.
+_OFF_TOPIC = re.compile(
+    r"\b(?:print\s*\(|console\.log|def\s+\w+\s*\(|system\.out"
+    r"|(?:in|using)\s+(?:python|java|javascript|c\+\+|sql|html)\b"
+    r"|(?:python|java|javascript|sql|html)\s+(?:code|program|script|query)"
+    r"|write\s+(?:me\s+)?(?:a|an|the|some)?\s*(?:code|program|script|essay|poem|story|song|letter"
+    r"|email|joke)"
+    r"|(?:program|code|algorithm)\s+(?:for|to)\s+(?:print|find|check|calculate|reverse|sort|add"
+    r"|count|generate)|armstrong|fibonacci|palindrome|prime\s+numbers?"
+    r"|factorial|homework|assignment|equation|integral|derivative|square\s+root|solve\s+(?:this|for)"
+    r"|tell\s+(?:me\s+)?a\s+(?:joke|story)|jokes?\b|poem|riddle|lyrics"
+    r"|capital\s+of|who\s+(?:is|was)\s+the\s+(?:president|prime\s+minister|pm|ceo|king)"
+    r"|who\s+(?:invented|discovered)|politics|election|weather|forecast|cricket\s+score"
+    r"|ipl\s+score|stock\s+market|translate\s+(?:this|to|into))"
+    r"|#include"
+    r"|^\s*(?:what\s+is\s+|what's\s+|calculate\s+)?[\d.()\s]+(?:[-+*/^×÷][\d.()\s]+)+=?\s*\??\s*$",
+    re.IGNORECASE,
+)
+# Insults go to the same playbook, which hands the chat to the owner. Not "stupid" or "dumb":
+# customers say "dumb question, but ...".
+_ABUSE = re.compile(
+    r"\b(?:idiot|moron|shut\s+up|fuck\w*|f\*+k|bitch|bastard|loosu|naaye|chutiya|kamina)\b",
+    re.IGNORECASE,
+)
 _PAYMENT_STAGES = ("payment_pending",)
 _ORDER_STAGES = ("collecting_details", "awaiting_confirmation")
 
@@ -72,6 +97,13 @@ def event_name(line: ChatLine) -> str | None:
     event = line.details.get("event") if line.sender == "system" else None
     name = event.get("event") if isinstance(event, dict) else None
     return name if isinstance(name, str) else None
+
+
+def event_order(line: ChatLine) -> str | None:
+    """The order a shop event is about ("#1003"), if the system line says."""
+    event = line.details.get("event") if line.sender == "system" else None
+    order = event.get("order") if isinstance(event, dict) else None
+    return order if isinstance(order, str) and order else None
 
 
 def owner_answer(line: ChatLine) -> str | None:
@@ -106,6 +138,8 @@ def choose_playbook(stage: str, text: str, details: dict[str, object]) -> str:
         return "custom_or_future_order"
     if _GREETING.match(text):
         return "small_talk"
+    if _OFF_TOPIC.search(text) or _ABUSE.search(text):
+        return "abuse_or_off_topic"
     return "new_order"
 
 
@@ -119,6 +153,7 @@ def build(
     open_questions: list[str],
     window_closing: bool,
     trigger: ChatLine,
+    open_orders: list[int] = (),  # pyright: ignore[reportArgumentType]
     facts: list[tuple[str, object]] = (),  # pyright: ignore[reportArgumentType]
     rules: list[tuple[str, str]] = (),  # pyright: ignore[reportArgumentType]
     glossary: list[tuple[str, str]] = (),  # pyright: ignore[reportArgumentType]
@@ -152,6 +187,7 @@ def build(
                 needed_by=draft.get("needed_by"),
                 quote_id=str(quote.id) if quote and quote.status == "open" else None,
                 quote_shown=bool(quote and quote.shown_message_id),
+                open_orders=list(open_orders),
                 open_questions=open_questions,
                 window_closing=window_closing,
                 facts=[{"key": key, "value": value} for key, value in facts],

@@ -8,6 +8,7 @@ from app.api.v1 import (
     chats,
     onboarding,
     orders,
+    product_schema,
     questions,
     shop,
     simulator,
@@ -28,3 +29,4 @@ router.include_router(chats.router)
 router.include_router(stories.router)
 router.include_router(simulator.router)
 router.include_router(stock.router)
+router.include_router(product_schema.router)

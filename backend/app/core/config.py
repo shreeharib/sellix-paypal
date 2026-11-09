@@ -102,6 +102,24 @@ class Settings(BaseSettings):
     paypal_client_secret: str = ""
     # ID of the webhook registered in the PayPal app; needed to verify webhook signatures.
     paypal_webhook_id: str = ""
+    # Sandbox only: PayPal's negative testing. A JSON value such as
+    # {"mock_application_codes": "INSTRUMENT_DECLINED"} is sent as the PayPal-Mock-Response header
+    # on every PayPal call, so PayPal answers with that error. Leave empty for normal behaviour.
+    paypal_mock_response: str = ""
+    # Who offers the payment link: real PayPal (sandbox or live), or the built-in simulator, a
+    # hosted page with Accept / Reject buttons that sends a webhook, for demos and tests. The
+    # simulator is refused when APP_ENV is prod (payments/simulator.py).
+    payment_provider: Literal["paypal", "simulator"] = "paypal"
+    # A failed payment may be retried until this many links have been made for the order in all,
+    # waiting this long after a failure before the next link, and only while the order is still
+    # held: PAYMENT_HOLD_MINUTES below is the retry window.
+    payment_max_attempts: int = 3
+    payment_retry_cooldown_seconds: int = 60
+    # PayPal can't take every currency (rupees are missing). The order stays in the shop's currency
+    # and PayPal charges dollars at the live rate (payments/fx.py). This fixed rate is the last
+    # resort when both live sources are down, and the sanity check for what they return.
+    fx_fallback_inr_per_usd: float = 94.0
+    fx_cache_minutes: int = 60
     # Unpaid orders give their held stock back after this many minutes.
     payment_hold_minutes: int = 15
 

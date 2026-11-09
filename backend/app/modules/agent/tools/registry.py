@@ -62,6 +62,7 @@ class TurnContext:
     customer_handle: str = "the customer"
     # Set when a shop event (the owner's answer, a payment) triggered this turn, not a message.
     trigger_event: str | None = None
+    trigger_order: str | None = None  # the order that event is about, like "#1003"
     trigger_answer: str | None = None  # the owner's words, when the trigger is their answer
     last_agent_reply: str | None = None  # what we last told the customer
     prompt_refs: set[str] = field(default_factory=set)

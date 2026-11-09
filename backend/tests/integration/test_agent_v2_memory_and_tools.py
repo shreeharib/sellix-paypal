@@ -208,21 +208,26 @@ async def test_cancel_order_releases_the_stock_and_resend_reuses_the_link(
         [("confirm_order", {"quote_id": str(quote.id)})],
         [("send_reply", {"text": "Done!", "language": "en"})],
     )
-    await customer_says("yes", "m-2")
+    await customer_says("yes, confirm", "m-2")
     async with session_scope() as session:
         order = await session.scalar(select(Order))
     assert order is not None
 
+    # The real model never sees an order's id: it works from the number the context lists.
     model.then(
-        [("resend_payment_link", {"order_id": str(order.id)})],
+        [("resend_payment_link", {"order": f"#{order.number}"})],
         [("send_reply", {"text": "Sent again!", "language": "en"})],
     )
+    first_call = len(model.calls)
     await customer_says("link please", "m-3")
+    system_prompt = model.calls[first_call][0][0].content
+    assert f"Orders waiting for payment: #{order.number}" in system_prompt
+    assert str(order.id) not in system_prompt
     links = [t for t in instagram.texts() if "upi://pay" in t]
     assert len(links) == 2 and links[0] == links[1]
 
     model.then(
-        [("cancel_order", {"order_id": str(order.id), "reason": "changed my mind"})],
+        [("cancel_order", {"order": str(order.number), "reason": "changed my mind"})],
         [("send_reply", {"text": "Cancelled.", "language": "en"})],
     )
     conversation_id = await customer_says("cancel it", "m-4")

@@ -234,6 +234,9 @@ async def _apply_tap(ctx: TurnContext, trace: tracing.Trace, messages: list[llm.
     """Layer 0: a Confirm or Change tap is acted on by code, without the model."""
     payload = str(ctx.tap or "")
     action, _, quote_id = payload.partition(":")
+    if action == "RETRY" and quote_id:  # here `quote_id` is an order id
+        await _apply_retry_tap(ctx, trace, messages, quote_id)
+        return
     if action not in ("CONFIRM", "CHANGE") or not quote_id:
         return
     name = "confirm_order" if action == "CONFIRM" else "change_quote"
@@ -271,6 +274,34 @@ async def _apply_tap(ctx: TurnContext, trace: tracing.Trace, messages: list[llm.
     messages.append(llm.Message("tool", _json(result.for_model()), tool_call_id=call.id, name=name))
 
 
+async def _apply_retry_tap(
+    ctx: TurnContext, trace: tracing.Trace, messages: list[llm.Message], order_ref: str
+) -> None:
+    """A tap on "New payment link" after a failed payment: code sends the link, or says to wait."""
+    name = "resend_payment_link"
+    key = f"{trace.turn_id}:tap:{name}"
+    stored = trace.steps.get(key)
+    if stored is not None:
+        result = ToolResult.from_stored(stored)
+        registry.replay(ctx, name, result)
+    elif ctx.stage == "payment_pending":
+        result = await order_tools.retry_payment(ctx, order_ref)
+        await tracing.record(
+            trace,
+            step=-1,
+            kind="tool",
+            name=name,
+            key=key,
+            request={"order": order_ref, "tapped": True},
+            result=result.stored(),
+        )
+    else:
+        return
+    call = llm.ToolCall(f"tap_{trace.turn_id.hex[:12]}", name, {"order": order_ref})
+    messages.append(llm.Message("assistant", "", (call,)))
+    messages.append(llm.Message("tool", _json(result.for_model()), tool_call_id=call.id, name=name))
+
+
 async def _gated(ctx: TurnContext, gate: inbound.Gate) -> None:
     """No model call: a fixed template (if any) and, where needed, a question for the owner."""
     async with session_scope() as session:
@@ -291,6 +322,13 @@ async def _gated(ctx: TurnContext, gate: inbound.Gate) -> None:
                 question=gate.question,
                 trigger_message_id=ctx.trigger_message_id,
             )
+
+
+# When the model can't write the reply to a shop event, this fixed text goes out instead.
+_EVENT_FALLBACKS = {
+    "payment_received": "event_payment_received",
+    "hold_expired": "event_hold_expired",
+}
 
 
 async def _fall_back(ctx: TurnContext) -> None:
@@ -315,6 +353,24 @@ async def _fall_back(ctx: TurnContext) -> None:
                 },
             )
         ctx.prompt_refs.add(prompt_store.ref("owner_answer_relay"))
+        return
+    event_template = _EVENT_FALLBACKS.get(ctx.trigger_event or "")
+    if event_template and ctx.trigger_order:
+        # A shop event (payment received, order expired), not a customer message: "thanks for your
+        # message, I'll check with the shop" would be wrong, so say what happened.
+        async with session_scope() as session:
+            await conversations.queue_message(
+                session,
+                conversation_id=ctx.conversation_id,
+                text=prompt_store.text(event_template, ctx.language, number=ctx.trigger_order),
+                key=f"turn:{ctx.turn_id}:{event_template}",
+                details={
+                    "kind": event_template,
+                    "language": ctx.language,
+                    "trigger_id": str(ctx.trigger_message_id),
+                },
+            )
+        ctx.prompt_refs.add(prompt_store.ref(event_template))
         return
     async with session_scope() as session:
         await conversations.queue_message(
@@ -402,6 +458,7 @@ class _Gathered:
     upcoming: dict[date, list[StockItem]]
     profile: str | None
     quote: SavedQuote | None
+    open_orders: list[int]  # numbers of this chat's orders that wait for payment
     open_questions: list[str]
     window_closing: bool
     facts: list[tuple[str, Any]]
@@ -464,6 +521,11 @@ async def _gather(
             ),
             profile=await shop_profile.latest_profile(session, merchant.id),
             quote=await orders.current_quote(session, conversation_id),
+            open_orders=[
+                order.number
+                for order in await orders.customer_orders(session, merchant.id, state.customer_id)
+                if order.conversation_id == conversation_id and order.status == "awaiting_payment"
+            ],
             open_questions=[
                 q.question
                 for q in await escalations.list_escalations(session, merchant.id, status="open")
@@ -504,6 +566,7 @@ def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, contex
         owner_asked=bool(gathered.open_questions),
         upcoming=gathered.upcoming,
         trigger_event=None if by_customer else context.event_name(trigger),
+        trigger_order=None if by_customer else context.event_order(trigger),
         trigger_answer=None if by_customer else context.owner_answer(trigger),
         last_agent_reply=next(
             (line.body for line in reversed(seen) if line.sender == "agent"), None
@@ -515,6 +578,7 @@ def _build(gathered: _Gathered, turn_id: uuid.UUID) -> tuple[TurnContext, contex
         profile=gathered.profile,
         draft=state.draft,
         quote=gathered.quote,
+        open_orders=gathered.open_orders,
         open_questions=gathered.open_questions,
         window_closing=gathered.window_closing,
         trigger=trigger,

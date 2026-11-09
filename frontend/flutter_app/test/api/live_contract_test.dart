@@ -82,6 +82,18 @@ void main() {
       await api.searchCatalog(first.name.substring(0, 1), limit: 5);
     }, skip: skip);
 
+    test('product schema: stock modes the app can map, a default among them', () async {
+      final schema = await api.productSchema();
+      expect(schema.stockModes, isNotEmpty);
+      for (final mode in schema.stockModes) {
+        expect(StockMode.all, contains(mode.id));
+      }
+      expect(schema.mode(schema.defaultStockMode), isNotNull);
+      for (final field in schema.detailFields) {
+        expect(field.key, isNotEmpty);
+      }
+    }, skip: skip);
+
     test('orders: list, every status filter, timeline, payment link', () async {
       final orders = await api.orders(limit: 200);
       await api.orders(status: [OrderStatus.awaitingPayment, OrderStatus.paid], limit: 5);

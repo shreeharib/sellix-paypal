@@ -11,8 +11,9 @@ class ObAsk {
   final bool isBulk;
 }
 
-/// What a kind of shop sells: the words and questions of the later steps. Only wording: no sample
-/// products, customers or numbers presented as real.
+/// What a kind of shop sells: the words and questions of the rules step. Only wording: no sample
+/// products, customers or numbers presented as real. (The stock step's wording comes from the
+/// backend's product schema.)
 class ObCategory {
   const ObCategory({
     required this.id,
@@ -20,11 +21,9 @@ class ObCategory {
     required this.icon,
     required this.examples,
     required this.unit,
-    required this.stockQuestion,
     required this.customLabel,
     required this.customDetail,
     required this.bulkLimit,
-    required this.exampleProduct,
     required this.ownAsks,
     required this.never,
   });
@@ -34,11 +33,9 @@ class ObCategory {
   final IconData icon;
   final String examples;
   final String unit;
-  final String stockQuestion;
   final String customLabel;
   final String customDetail;
   final int bulkLimit;
-  final String exampleProduct;
   final List<ObAsk> ownAsks;
   final List<String> never;
 
@@ -60,11 +57,9 @@ const obCategories = [
     icon: TablerIcons.hanger,
     examples: 'Kurtis, sarees, tops',
     unit: 'pieces',
-    stockQuestion: 'What’s in stock today?',
     customLabel: 'Custom stitching',
     customDetail: 'Blouse stitching, alterations, photos of a design',
     bulkLimit: 10,
-    exampleProduct: 'cotton kurti',
     ownAsks: [
       ObAsk(TablerIcons.ruler_measure, 'Size and fit questions', 'When your size chart does not answer it'),
       ObAsk(TablerIcons.arrows_exchange, 'Exchanges and returns', 'Wrong size, changed mind'),
@@ -77,11 +72,9 @@ const obCategories = [
     icon: TablerIcons.shoe,
     examples: 'Sandals, sneakers, heels',
     unit: 'pairs',
-    stockQuestion: 'Which pairs are in stock today?',
     customLabel: 'Custom size',
     customDetail: 'Sizes you do not stock, wedding pairs',
     bulkLimit: 6,
-    exampleProduct: 'kolhapuri sandal',
     ownAsks: [
       ObAsk(TablerIcons.ruler_measure, 'Size and fit questions', 'When your size chart does not answer it'),
       ObAsk(TablerIcons.arrows_exchange, 'Exchanges and returns', 'Wrong size, worn shoes'),
@@ -95,11 +88,9 @@ const obCategories = [
     icon: TablerIcons.cake,
     examples: 'Cakes, snacks, home food',
     unit: 'pieces',
-    stockQuestion: 'What did you make today?',
     customLabel: 'Custom order',
     customDetail: 'Photos, tiers, messages on cakes',
     bulkLimit: 30,
-    exampleProduct: 'choco lava',
     ownAsks: [
       ObAsk(TablerIcons.alert_triangle, 'Allergy and diet questions', 'Eggless, nut-free, sugar-free, Jain'),
       ObAsk(TablerIcons.calendar_event, 'Orders for a later date', 'Anything not for today'),
@@ -112,11 +103,9 @@ const obCategories = [
     icon: TablerIcons.droplet,
     examples: 'Face oils, serums, kits',
     unit: 'pieces',
-    stockQuestion: 'What’s in stock today?',
     customLabel: 'Custom gift set',
     customDetail: 'Gift sets, return gifts, your label',
     bulkLimit: 20,
-    exampleProduct: 'aloe face gel',
     ownAsks: [
       ObAsk(TablerIcons.alert_triangle, 'Allergy and skin questions', 'Reactions, pregnancy, sensitive skin'),
       ObAsk(TablerIcons.shield_check, 'Is it original?', 'Ingredients, certificates, batch dates'),
@@ -129,11 +118,9 @@ const obCategories = [
     icon: TablerIcons.diamond,
     examples: 'Earrings, chains, bangles',
     unit: 'pieces',
-    stockQuestion: 'What’s in stock today?',
     customLabel: 'Custom design',
     customDetail: 'Names, photos of a design, your own stones',
     bulkLimit: 15,
-    exampleProduct: 'oxidised jhumka',
     ownAsks: [
       ObAsk(TablerIcons.shield_check, 'Is it real?', 'Hallmark, certificates, purity'),
       ObAsk(TablerIcons.arrows_exchange, 'Returns and exchanges', 'Earrings are often no-return'),
@@ -146,11 +133,9 @@ const obCategories = [
     icon: TablerIcons.lamp,
     examples: 'Cushions, candles, wall art',
     unit: 'pieces',
-    stockQuestion: 'What’s in stock today?',
     customLabel: 'Custom size',
     customDetail: 'Sizes, colours, fabric you choose',
     bulkLimit: 10,
-    exampleProduct: 'cushion cover',
     ownAsks: [
       ObAsk(TablerIcons.package_off, 'Damaged in delivery', 'Cracks, breakage, missing parts'),
       ObAsk(TablerIcons.arrows_exchange, 'Returns and exchanges', 'Colour looks different at home'),
@@ -163,11 +148,9 @@ const obCategories = [
     icon: TablerIcons.gift,
     examples: 'Hampers, crochet, resin',
     unit: 'pieces',
-    stockQuestion: 'What’s ready to sell today?',
     customLabel: 'Personalised order',
     customDetail: 'Names, photos, messages on the gift',
     bulkLimit: 20,
-    exampleProduct: 'crochet keychain',
     ownAsks: [
       ObAsk(TablerIcons.clock, 'Rush orders', 'Anything needed sooner than you can make it'),
       ObAsk(TablerIcons.photo, 'Designs from a photo', 'Customers ask you to copy a design'),
@@ -180,11 +163,9 @@ const obCategories = [
     icon: TablerIcons.plant_2,
     examples: 'Pots, saplings, bouquets',
     unit: 'plants',
-    stockQuestion: 'Which plants are ready today?',
     customLabel: 'Events and custom setups',
     customDetail: 'Events, garlands, balcony setups',
     bulkLimit: 25,
-    exampleProduct: 'money plant',
     ownAsks: [
       ObAsk(TablerIcons.leaf, 'Plant care and sick plants', 'Yellow leaves, pests, plant died'),
       ObAsk(TablerIcons.seeding, 'Replacements', 'You decide if a plant is replaced'),
@@ -200,11 +181,9 @@ const obOtherCategory = ObCategory(
   icon: TablerIcons.dots,
   examples: 'Tell us what you sell',
   unit: 'pieces',
-  stockQuestion: 'What’s in stock today?',
   customLabel: 'Custom order',
   customDetail: 'Anything not in your product list',
   bulkLimit: 15,
-  exampleProduct: 'phone cover',
   ownAsks: [ObAsk(TablerIcons.arrows_exchange, 'Returns and exchanges', 'Changed mind, wrong item')],
   never: ['Exchanges', 'Delivery times', 'Same-day delivery', 'Free delivery', 'Discounts'],
 );

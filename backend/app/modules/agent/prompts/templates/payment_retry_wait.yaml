@@ -1,0 +1,14 @@
+id: payment_retry_wait
+version: 1
+description: "Sent by code when the customer asks for a new payment link before the cooldown after a failed payment has passed."
+texts:
+  en: |-
+    A new payment link will be ready in {{ wait }} seconds. Tap the button again then.
+  ta-en: |-
+    Puthu payment link {{ wait }} second-la ready aagum. Appo button-a marupadiyum tap pannunga.
+  ta: |-
+    புதிய பணம் செலுத்தும் லிங்க் {{ wait }} வினாடியில் தயாராகும். அப்போது பட்டனை மீண்டும் அழுத்துங்கள்.
+  hi-en: |-
+    Naya payment link {{ wait }} second mein ready hoga. Tab button phir se dabaiye.
+  hi: |-
+    नया भुगतान लिंक {{ wait }} सेकंड में तैयार होगा। तब बटन फिर से दबाइए।

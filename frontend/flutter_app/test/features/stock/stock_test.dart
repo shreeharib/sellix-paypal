@@ -23,7 +23,18 @@ import '../../support/fake_sellix_api.dart';
 class _Api extends FakeSellixApi {
   final sent = <List<StockLine>>[];
   bool refuseParse = false;
+  bool failSchema = false;
   List<RolloverItem>? rolled;
+
+  /// An older backend, or no network for this one call: the app uses its built-in schema.
+  @override
+  Future<ProductSchema> productSchema() async {
+    if (failSchema) {
+      calls.add('productSchema');
+      throw const ApiException('Not found', statusCode: 404);
+    }
+    return super.productSchema();
+  }
 
   @override
   Future<Today> setOpeningStock(List<StockLine> lines) {
@@ -35,7 +46,19 @@ class _Api extends FakeSellixApi {
   Future<List<StockLine>> parseStockText(String text, {String defaultCurrency = 'INR'}) async {
     if (refuseParse) {
       calls.add('parseStockText');
-      throw const ApiException('Could not parse', statusCode: 422);
+      // The backend reads "5 gift box 450" and refuses any line with no price.
+      final priced = RegExp(r'^(\d+)\s+(.+?)\s+(\d+)$').firstMatch(text.trim());
+      if (priced == null) {
+        throw const ApiException('Could not parse stock line 1. Expected a count, a name and a price.', statusCode: 422);
+      }
+      return [
+        StockLine(
+          product: priced[2]!,
+          priceMinor: int.parse(priced[3]!) * 100,
+          currency: defaultCurrency,
+          quantity: int.parse(priced[1]!),
+        ),
+      ];
     }
     return super.parseStockText(text, defaultCurrency: defaultCurrency);
   }
@@ -66,7 +89,7 @@ _Api _api() {
       ProductDetail(
         id: 'product-${row.variantId}',
         name: row.product,
-        stockMode: row.stockMode,
+        stockMode: row.stockMode ?? StockMode.daily,
         isActive: true,
         variants: [
           ProductVariantDetail(
@@ -132,6 +155,39 @@ Future<void> _settle(WidgetTester tester) async {
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 600));
   await tester.pump(const Duration(milliseconds: 600));
+}
+
+/// Whether the stock-mode card with this title is the chosen one.
+bool _cardOn(WidgetTester tester, String title) =>
+    tester.widget<SxChoiceCard>(find.widgetWithText(SxChoiceCard, title)).selected;
+
+/// Whether the chip with this label is on.
+bool _chipOn(WidgetTester tester, String label) =>
+    tester.widget<SxPickChip>(find.widgetWithText(SxPickChip, label)).selected;
+
+/// Opens the add-product screen, fills the name and price, applies [steps], saves, and returns the
+/// stock line sent.
+Future<StockLine> _create(
+  WidgetTester tester,
+  _Api api, {
+  List<String> taps = const [],
+  String price = '99',
+  Future<void> Function()? more,
+}) async {
+  await _pump(tester, api, const AddProductScreen());
+  await _settle(tester);
+  await tester.enterText(find.byType(TextField).at(0), 'Gift box');
+  await tester.enterText(find.byType(TextField).at(2), price);
+  await _settle(tester);
+  for (final label in taps) {
+    await _tap(tester, label);
+  }
+  await more?.call();
+  await _tap(tester, 'Save product');
+  await tester.pump(const Duration(seconds: 1));
+  await _settle(tester);
+  await tester.pump(const Duration(seconds: 5));
+  return api.sent.single.single;
 }
 
 /// A label, including on buttons, whose icon is a WidgetSpan beside the text.
@@ -411,6 +467,43 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
 
+    testWidgets('a made-to-order product whose row has no stock type stays under No count needed', (tester) async {
+      final api = _api();
+      api.catalog = [
+        ...api.catalog,
+        const ProductDetail(
+          id: 'p-cake',
+          name: 'Custom cake',
+          stockMode: StockMode.madeToOrder,
+          isActive: true,
+          variants: [
+            ProductVariantDetail(id: 'v-cake', sku: null, name: null, priceMinor: 90000, currency: 'INR', isActive: true),
+          ],
+        ),
+      ];
+      api.stock = [
+        ...api.stock,
+        const StockRow(
+          variantId: 'v-cake',
+          product: 'Custom cake',
+          variant: null,
+          priceMinor: 90000,
+          currency: 'INR',
+          opening: 0,
+          restocked: 0,
+          held: 0,
+          sold: 0,
+          counterSales: 0,
+          available: 0,
+        ),
+      ];
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('Your list: 2 items'), findsOneWidget);
+      expect(find.text('No count needed'), findsOneWidget);
+      expect(find.text('Custom cake'), findsOneWidget);
+    });
+
     testWidgets('an unchanged list makes no write', (tester) async {
       final api = _api();
       await _pump(tester, api, const MorningScreen());
@@ -440,6 +533,36 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
       await _settle(tester);
       await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('+ raises the count, and the count is readable by a screen reader', (tester) async {
+      // T4: the user reported that + does nothing on this screen in the web app.
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      int count() => int.parse(tester.getSemantics(find.bySemanticsLabel('Count of Item B')).value);
+      final before = count();
+
+      await tester.tap(find.bySemanticsLabel('More of Item B'));
+      await _settle(tester);
+      expect(count(), before + 1);
+
+      await tester.tap(find.bySemanticsLabel('Less of Item B'));
+      await _settle(tester);
+      expect(count(), before);
+    });
+
+    testWidgets('the stepper inside a stock row lets one step below the row minimum through', (tester) async {
+      // 9 Nov web bug: the row passed `min: -1 << 31`, which is +2147483648 on the web (unsigned
+      // shifts), so the stepper refused every + in silence. VM tests can't see that, so pin the rule.
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      final steppers = tester.widgetList<SxStepper>(find.byType(SxStepper)).toList();
+      expect(steppers, isNotEmpty);
+      for (final stepper in steppers) {
+        expect(stepper.min, inInclusiveRange(-1, stepperMax));
+      }
     });
 
     testWidgets('error state offers retry', (tester) async {
@@ -538,6 +661,513 @@ void main() {
     });
   });
 
+  group('AddProductScreen and the product schema', () {
+    testWidgets('a bakery is asked how it stocks, and the shelf life only for fresh batches', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      expect(api.calls, contains('productSchema'));
+      expect(find.text('How do you stock this?'), findsOneWidget);
+      for (final mode in [
+        'I make fresh batches',
+        'I keep stock until it sells',
+        'I make it when ordered',
+        'Always available',
+      ]) {
+        expect(find.text(mode), findsOneWidget, reason: mode);
+      }
+      // The schema's default is chosen, and it asks the shelf life.
+      expect(_cardOn(tester, 'I make fresh batches'), isTrue);
+      expect(find.text('How long can you sell it?'), findsOneWidget);
+      for (final days in ['Same day', '3 days', '1 week', '1 month', 'Custom']) {
+        expect(find.text(days), findsOneWidget, reason: days);
+      }
+      expect(find.text('Doesn’t expire'), findsNothing);
+      expect(find.text('Allergens'), findsOneWidget);
+      expect(find.text('Ingredients'), findsOneWidget);
+      // Keeping stock until it sells: no shelf life, but a count.
+      await _tap(tester, 'I keep stock until it sells');
+      expect(_cardOn(tester, 'I keep stock until it sells'), isTrue);
+      expect(find.text('How long can you sell it?'), findsNothing);
+      expect(find.text('How many do you have now?'), findsOneWidget);
+      // Made to order: no shelf life and no count.
+      await _tap(tester, 'I make it when ordered');
+      expect(find.text('How long can you sell it?'), findsNothing);
+      expect(find.text('How many do you have now?'), findsNothing);
+      await _tap(tester, 'I make fresh batches');
+      expect(find.text('How long can you sell it?'), findsOneWidget);
+    });
+
+    testWidgets('a dress shop is never asked a shelf life, and has its own details', (tester) async {
+      final api = _api()..schema = FakeSchemas.dressShop;
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      expect(find.text('How do you stock this?'), findsOneWidget);
+      expect(find.text('I make fresh batches'), findsNothing);
+      expect(find.text('Always available'), findsNothing);
+      expect(_cardOn(tester, 'I keep stock until it sells'), isTrue);
+      expect(find.text('How long can you sell it?'), findsNothing);
+      await _tap(tester, 'I make it when ordered');
+      expect(find.text('How long can you sell it?'), findsNothing);
+      await _tap(tester, 'I keep stock until it sells');
+      expect(find.text('How long can you sell it?'), findsNothing);
+      // Its own details, not a bakery's.
+      expect(find.text('Sizes'), findsOneWidget);
+      expect(find.text('XL'), findsOneWidget);
+      expect(find.text('Fabric'), findsOneWidget);
+      expect(find.text('Allergens'), findsNothing);
+      expect(find.text('Ingredients'), findsNothing);
+      expect(find.text('Blue kurti'), findsOneWidget);
+      expect(find.text('kurta, kurthi'), findsOneWidget);
+    });
+
+    testWidgets('a schema with one stock mode does not ask how it is stocked', (tester) async {
+      final api = _api()..schema = FakeSchemas.oneMode;
+      final line = await _create(
+        tester,
+        api,
+        more: () async {
+          expect(find.text('How do you stock this?'), findsNothing);
+          expect(find.text('How long can you sell it?'), findsNothing);
+        },
+      );
+      expect(line.stockMode, StockMode.inventory);
+      expect(line.shelfLifeDays, isNull);
+    });
+
+    testWidgets('fresh batches send the chosen shelf life', (tester) async {
+      final line = await _create(tester, _api(), taps: ['1 week']);
+      expect(line.stockMode, StockMode.daily);
+      expect(line.shelfLifeDays, 7);
+      expect(line.product, 'Gift box');
+      expect(line.priceMinor, 9900);
+    });
+
+    testWidgets('fresh batches send a custom number of days', (tester) async {
+      final api = _api();
+      final line = await _create(
+        tester,
+        api,
+        taps: ['Custom'],
+        more: () async {
+          // Name, variant, price, then the days.
+          await tester.enterText(find.byType(TextField).at(3), '12');
+          await _settle(tester);
+          expect(find.text('Leftovers carry to the next day for 12 days.'), findsOneWidget);
+        },
+      );
+      expect(line.stockMode, StockMode.daily);
+      expect(line.shelfLifeDays, 12);
+    });
+
+    testWidgets('a fresh-batch default is the shop’s usual shelf life', (tester) async {
+      final api = _api()
+        ..stock = [
+          for (final row in _api().stock)
+            StockRow(
+              variantId: row.variantId,
+              product: row.product,
+              variant: row.variant,
+              priceMinor: row.priceMinor,
+              currency: row.currency,
+              opening: row.opening,
+              restocked: 0,
+              held: 0,
+              sold: 0,
+              counterSales: 0,
+              available: row.opening,
+              stockMode: StockMode.daily,
+              shelfLifeDays: 3,
+            ),
+        ];
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      expect(find.text('3 days'), findsOneWidget);
+      expect(tester.widget<SxPickChip>(find.widgetWithText(SxPickChip, '3 days')).selected, isTrue);
+      expect(tester.widget<SxPickChip>(find.widgetWithText(SxPickChip, 'Same day')).selected, isFalse);
+    });
+
+    testWidgets('keeping stock until it sells sends no shelf life', (tester) async {
+      final line = await _create(tester, _api(), taps: ['I keep stock until it sells']);
+      expect(line.stockMode, StockMode.inventory);
+      expect(line.shelfLifeDays, isNull);
+    });
+
+    testWidgets('made to order and always available send no shelf life; made to order needs no price', (tester) async {
+      final line = await _create(tester, _api(), taps: ['I make it when ordered'], price: '');
+      expect(line.stockMode, StockMode.madeToOrder);
+      expect(line.shelfLifeDays, isNull);
+      expect(line.priceMinor, 0);
+    });
+
+    testWidgets('always available sends unlimited', (tester) async {
+      final line = await _create(tester, _api(), taps: ['Always available']);
+      expect(line.stockMode, StockMode.unlimited);
+      expect(line.shelfLifeDays, isNull);
+    });
+
+    testWidgets('a dress shop sends inventory by default', (tester) async {
+      final line = await _create(tester, _api()..schema = FakeSchemas.dressShop);
+      expect(line.stockMode, StockMode.inventory);
+      expect(line.shelfLifeDays, isNull);
+    });
+
+    testWidgets('a bakery’s details are saved in the attributes, under each key', (tester) async {
+      final api = _api();
+      await _create(
+        tester,
+        api,
+        more: () async {
+          await _tap(tester, 'Egg');
+          await _tap(tester, 'Milk');
+          await tester.enterText(find.byType(TextField).at(3), '  Flour, eggs  ');
+          await _settle(tester);
+        },
+      );
+      final saved = api.catalog.singleWhere((p) => p.name == 'Gift box');
+      expect(saved.attributes, {
+        'allergens': ['Egg', 'Milk'],
+        'ingredients': 'Flour, eggs',
+      });
+      expect(api.calls, contains('updateProduct'));
+    });
+
+    testWidgets('a dress shop’s details, including one it adds itself, are saved', (tester) async {
+      final api = _api()..schema = FakeSchemas.dressShop;
+      await _create(
+        tester,
+        api,
+        more: () async {
+          await _tap(tester, 'M');
+          await _tap(tester, 'Other');
+          await tester.enterText(find.byType(TextField).last, 'XXL');
+          await _tap(tester, 'Add detail');
+          expect(_chipOn(tester, 'XXL'), isTrue);
+          await tester.enterText(find.byType(TextField).at(3), 'Cotton');
+          await _settle(tester);
+        },
+      );
+      final saved = api.catalog.singleWhere((p) => p.name == 'Gift box');
+      expect(saved.attributes, {
+        'sizes': ['M', 'XXL'],
+        'fabric': 'Cotton',
+      });
+    });
+
+    testWidgets('a product with no details makes no attributes call', (tester) async {
+      final api = _api();
+      await _create(tester, api);
+      expect(api.calls, isNot(contains('updateProduct')));
+    });
+
+    testWidgets('if the schema can’t be had the built-in one is used, as before', (tester) async {
+      final api = _api()..failSchema = true;
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      expect(api.calls, contains('productSchema'));
+      expect(find.text('How do you stock this?'), findsOneWidget);
+      for (final mode in [
+        'I make fresh batches',
+        'I keep stock until it sells',
+        'I make it when ordered',
+        'Always available',
+      ]) {
+        expect(find.text(mode), findsOneWidget, reason: mode);
+      }
+      // Today’s behaviour for a new shop: keep until sold, and details by category (not food here).
+      expect(_cardOn(tester, 'I keep stock until it sells'), isTrue);
+      expect(find.text('How long can you sell it?'), findsNothing);
+      await _tap(tester, 'I make fresh batches');
+      expect(find.text('How long can you sell it?'), findsOneWidget);
+      expect(find.text('Same day'), findsOneWidget);
+      expect(find.text('Details'), findsOneWidget);
+      expect(find.text('Colour'), findsOneWidget);
+      expect(find.text('Allergens'), findsNothing);
+    });
+
+    testWidgets('the fallback saves like the schema does', (tester) async {
+      final api = _api()..failSchema = true;
+      final line = await _create(tester, api, taps: ['I make fresh batches', '3 days']);
+      expect(line.stockMode, StockMode.daily);
+      expect(line.shelfLifeDays, 3);
+    });
+
+    testWidgets('an answer with no stock modes also falls back', (tester) async {
+      final api = _api()
+        ..schema = const ProductSchema(
+          shopType: 'other',
+          label: '',
+          defaultStockMode: StockMode.inventory,
+          stockModes: [],
+          shelfLifeOptions: [],
+          detailFields: [],
+          vocabulary: Vocabulary(stockQuestion: '', exampleProduct: '', aliasExample: ''),
+        );
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      expect(find.text('How do you stock this?'), findsOneWidget);
+    });
+
+    testWidgets('editing shows the product’s mode and details, and saves only what changed', (tester) async {
+      final api = _api();
+      await api.updateProduct(
+        'product-${FakeIds.variantB}',
+        const ProductUpdate(attributes: {'allergens': ['Milk'], 'ingredients': 'Cream', 'other_key': 'kept'}),
+      );
+      await _pump(tester, api, const AddProductScreen(variantId: FakeIds.variantB));
+      await _settle(tester);
+      expect(_cardOn(tester, 'I keep stock until it sells'), isTrue);
+      expect(find.text('How long can you sell it?'), findsNothing);
+      expect(_chipOn(tester, 'Milk'), isTrue);
+      expect(_chipOn(tester, 'Egg'), isFalse);
+      expect(find.widgetWithText(TextField, 'Cream'), findsOneWidget);
+      await tester.enterText(find.widgetWithText(TextField, 'Cream'), 'Fresh cream');
+      await _settle(tester);
+      await _tap(tester, 'Save product');
+      await tester.pump(const Duration(seconds: 1));
+      await _settle(tester);
+      await tester.pump(const Duration(seconds: 5));
+      final saved = api.catalog.singleWhere((p) => p.id == 'product-${FakeIds.variantB}');
+      expect(saved.attributes, {
+        'allergens': ['Milk'],
+        'ingredients': 'Fresh cream',
+        'other_key': 'kept',
+      });
+      expect(api.sent, isEmpty);
+    });
+
+    testWidgets('editing a fresh-batch product shows its shelf life, and a change sends mode and days', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const AddProductScreen(variantId: FakeIds.variantB));
+      await _settle(tester);
+      await _tap(tester, 'I make fresh batches');
+      await _tap(tester, '1 week');
+      await _tap(tester, 'Save product');
+      await tester.pump(const Duration(seconds: 1));
+      await _settle(tester);
+      await tester.pump(const Duration(seconds: 5));
+      final line = api.sent.single.single;
+      expect(line.stockMode, StockMode.daily);
+      expect(line.shelfLifeDays, 7);
+      expect(line.quantity, 5);
+    });
+
+    testWidgets('editing a fresh-batch product reads its current shelf life', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const AddProductScreen(variantId: FakeIds.variantA));
+      await _settle(tester);
+      expect(_cardOn(tester, 'I make fresh batches'), isTrue);
+      expect(_chipOn(tester, 'Same day'), isTrue);
+    });
+
+    testWidgets('a product’s own mode stays visible when its shop type does not list it', (tester) async {
+      final api = _api()..schema = FakeSchemas.dressShop;
+      await _pump(tester, api, const AddProductScreen(variantId: FakeIds.variantA));
+      await _settle(tester);
+      // Item A is a fresh-batch product. It keeps showing as one, with its shelf life.
+      expect(_cardOn(tester, 'I make fresh batches'), isTrue);
+      expect(find.text('How long can you sell it?'), findsOneWidget);
+      expect(find.text('I keep stock until it sells'), findsOneWidget);
+    });
+
+    testWidgets('a bad custom number of days is refused', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const AddProductScreen());
+      await _settle(tester);
+      await tester.enterText(find.byType(TextField).at(0), 'Gift box');
+      await tester.enterText(find.byType(TextField).at(2), '99');
+      await _settle(tester);
+      await _tap(tester, 'Custom');
+      await tester.enterText(find.byType(TextField).at(3), '');
+      await _settle(tester);
+      await _tap(tester, 'Save product');
+      expect(find.text('Enter 1 to 3650 days.'), findsOneWidget);
+      expect(api.sent, isEmpty);
+    });
+
+    testWidgets('the product schema shows on the product screen, and a dress shop can’t change a shelf life', (
+      tester,
+    ) async {
+      final api = _api()..schema = FakeSchemas.dressShop;
+      await api.updateProduct('product-${FakeIds.variantB}', const ProductUpdate(attributes: {'sizes': ['S', 'M']}));
+      await _pump(tester, api, const ProductScreen(FakeIds.variantB));
+      await _settle(tester);
+      expect(find.text('Sizes'), findsOneWidget);
+      expect(find.text('S, M'), findsOneWidget);
+      expect(find.text('Fabric'), findsOneWidget);
+      expect(find.text('Allergens'), findsNothing);
+      await tester.ensureVisible(find.text('Stock stays until sold.'));
+      await tester.tap(find.text('Stock stays until sold.'));
+      await _settle(tester);
+      expect(find.text('How do you stock this?'), findsOneWidget);
+      expect(find.text('How long can you sell it?'), findsNothing);
+    });
+
+    testWidgets('the product screen’s change sheet asks the shelf life only for fresh batches', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const ProductScreen(FakeIds.variantB));
+      await _settle(tester);
+      expect(find.text('Allergens'), findsOneWidget);
+      expect(find.text('Ingredients'), findsOneWidget);
+      await tester.ensureVisible(find.text('Stock stays until sold.'));
+      await tester.tap(find.text('Stock stays until sold.'));
+      await _settle(tester);
+      expect(find.text('How long can you sell it?'), findsNothing);
+      await _tap(tester, 'I make fresh batches');
+      expect(find.text('How long can you sell it?'), findsOneWidget);
+      await _tap(tester, '3 days');
+      await _tap(tester, 'Save');
+      final line = api.sent.single.single;
+      expect(line.stockMode, StockMode.daily);
+      expect(line.shelfLifeDays, 3);
+      await tester.pump(const Duration(seconds: 5));
+    });
+  });
+
+  group('shop wording from the product schema', () {
+    testWidgets('the stock screen asks the schema’s question and uses its example', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      // The category is not a food one, so the old regex would have said “What’s in stock today?”.
+      expect(find.text('What did you make today?'), findsOneWidget);
+      await _tap(tester, 'Type it');
+      expect(find.text('5 choco lava'), findsOneWidget);
+    });
+
+    testWidgets('a dress shop’s question and example', (tester) async {
+      final api = _api()..schema = FakeSchemas.dressShop;
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('What’s in stock today?'), findsOneWidget);
+      await _tap(tester, 'Type it');
+      expect(find.text('5 blue kurti'), findsOneWidget);
+    });
+
+    testWidgets('without a schema the wording falls back to the shop’s category', (tester) async {
+      final api = _api()..failSchema = true;
+      api.answers = const OnboardingAnswers(category: 'Bakery');
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('What did you make today?'), findsOneWidget);
+    });
+
+    testWidgets('a product added from Add a missed item shows in Your list when you come back', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('Your list: 2 items'), findsOneWidget);
+      await _tap(tester, 'Add a missed item');
+      await _tap(tester, 'New product');
+      expect(find.text('Save product'), findsOneWidget);
+      await tester.enterText(find.byType(TextField).at(0), 'Gift box');
+      await tester.enterText(find.byType(TextField).at(2), '120');
+      await _settle(tester);
+      await _tap(tester, 'Save product');
+      await tester.pump(const Duration(seconds: 1));
+      await _settle(tester);
+      expect(find.text('Save product'), findsNothing);
+      expect(find.text('Your list: 3 items'), findsOneWidget);
+      expect(find.text('Gift box'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('a made-to-order product added the same way shows under No count needed', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      await _tap(tester, 'Add a missed item');
+      await _tap(tester, 'New product');
+      await tester.enterText(find.byType(TextField).at(0), 'Custom cake');
+      await _settle(tester);
+      await _tap(tester, 'I make it when ordered');
+      await _tap(tester, 'Save product');
+      await tester.pump(const Duration(seconds: 1));
+      await _settle(tester);
+      expect(find.text('Your list: 2 items'), findsOneWidget);
+      expect(find.text('Custom cake'), findsOneWidget);
+      expect(find.text('No count needed'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+    });
+  });
+
+  group('Set today’s stock: coming back, and a new item without a price', () {
+    testWidgets('the list looks again when you come back from New product, even if the form did not save', (
+      tester,
+    ) async {
+      final api = _api();
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('Your list: 2 items'), findsOneWidget);
+      await _tap(tester, 'Add a missed item');
+      await _tap(tester, 'New product');
+      expect(find.text('Save product'), findsOneWidget);
+      // The product is made while the form is open (or the form's own refresh did not run).
+      await api.setOpeningStock(const [
+        StockLine(product: 'Gift box', priceMinor: 12000, quantity: 0, stockMode: StockMode.daily),
+      ]);
+      await tester.tap(find.bySemanticsLabel('Close'));
+      await _settle(tester);
+      expect(find.text('Save product'), findsNothing);
+      expect(find.text('Your list: 3 items'), findsOneWidget);
+      expect(find.text('Gift box'), findsOneWidget);
+    });
+
+    testWidgets('the same from the empty first-product screen', (tester) async {
+      final api = _Api()
+        ..stock = []
+        ..catalog = [];
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      expect(find.text('Add your first product'), findsOneWidget);
+      await _tap(tester, 'Add product');
+      await api.setOpeningStock(const [
+        StockLine(product: 'Gift box', priceMinor: 12000, quantity: 2, stockMode: StockMode.daily),
+      ]);
+      await tester.tap(find.bySemanticsLabel('Close'));
+      await _settle(tester);
+      expect(find.text('Your list: 1 item'), findsOneWidget);
+    });
+
+    testWidgets('a new product typed with no price is asked for its price, not refused with the raw error', (
+      tester,
+    ) async {
+      final api = _api()..refuseParse = true;
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      await _tap(tester, 'Type it');
+      await tester.enterText(find.byType(TextField).last, '3 gift box');
+      await _tap(tester, 'Make the list');
+      expect(find.text('What does Gift box cost? Add the price after the name, like “5 gift box 450”.'), findsOneWidget);
+      expect(find.textContaining('Could not parse'), findsNothing);
+      expect(find.textContaining('No products found'), findsNothing);
+      // The sheet is still open: type the price and it goes through.
+      await tester.enterText(find.byType(TextField).last, '3 gift box 450');
+      await _tap(tester, 'Make the list');
+      expect(find.text('sellix found 1 item'), findsOneWidget);
+      await _tap(tester, 'Confirm and go live');
+      final line = api.sent.single.singleWhere((l) => l.product == 'gift box');
+      expect(line.quantity, 3);
+      expect(line.priceMinor, 45000);
+      await tester.pump(const Duration(seconds: 2));
+      await _settle(tester);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('a known item beside a new one with no price still asks for the price', (tester) async {
+      final api = _api()..refuseParse = true;
+      await _pump(tester, api, const MorningScreen());
+      await _settle(tester);
+      await _tap(tester, 'Type it');
+      await tester.enterText(find.byType(TextField).last, '8 item b, 2 lamp, 4 candle');
+      await _tap(tester, 'Make the list');
+      expect(
+        find.text('What do Lamp and Candle cost? Add the price after each name, like “5 lamp 450”.'),
+        findsOneWidget,
+      );
+    });
+  });
+
   group('small dark phone', () {
     for (final (name, screen) in [
       ('stock', const StockScreen()),
@@ -561,6 +1191,80 @@ void main() {
         FakeIds.variantB: 2,
       });
       expect(matchStockText('bread 5', items), isEmpty);
+    });
+
+    test('a row with no stock type takes the catalogue’s, not a default of daily', () {
+      const row = StockRow(
+        variantId: 'v-cake',
+        product: 'Custom cake',
+        variant: null,
+        priceMinor: 90000,
+        currency: 'INR',
+        opening: 0,
+        restocked: 0,
+        held: 0,
+        sold: 0,
+        counterSales: 0,
+        available: 0,
+      );
+      final catalog = [
+        const ProductDetail(
+          id: 'p-cake',
+          name: 'Custom cake',
+          stockMode: StockMode.madeToOrder,
+          isActive: true,
+          variants: [
+            ProductVariantDetail(
+              id: 'v-cake',
+              sku: null,
+              name: null,
+              priceMinor: 90000,
+              currency: 'INR',
+              isActive: true,
+            ),
+          ],
+        ),
+      ];
+      final today = Today(
+        businessDate: FakeSellixApi.businessDate,
+        agentEnabled: true,
+        stock: const [row],
+        openQuestions: 0,
+        ordersAwaitingPayment: 0,
+        ordersPaid: 0,
+        revenueMinorByCurrency: const {},
+      );
+      final item = StockView.join(today, catalog).items.single;
+      expect(item.stockMode, StockMode.madeToOrder);
+      expect(item.counted, isFalse);
+      // With nothing else to go on (no catalogue entry), such a row is daily, as before.
+      expect(StockView.join(today, const []).items.single.stockMode, StockMode.daily);
+      // A row that says its type wins over the catalogue.
+      final saysInventory = Today(
+        businessDate: FakeSellixApi.businessDate,
+        agentEnabled: true,
+        stock: [
+          StockRow(
+            variantId: 'v-cake',
+            product: 'Custom cake',
+            variant: null,
+            priceMinor: 90000,
+            currency: 'INR',
+            opening: 4,
+            restocked: 0,
+            held: 0,
+            sold: 0,
+            counterSales: 0,
+            available: 4,
+            stockMode: StockMode.inventory,
+          ),
+        ],
+        openQuestions: 0,
+        ordersAwaitingPayment: 0,
+        ordersPaid: 0,
+        revenueMinorByCurrency: const {},
+      );
+      expect(StockView.join(saysInventory, catalog).items.single.stockMode, StockMode.inventory);
     });
 
     test('a stock choice maps both ways', () {

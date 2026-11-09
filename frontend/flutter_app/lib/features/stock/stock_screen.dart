@@ -62,7 +62,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 child: SxEmptyState(
                   icon: TablerIcons.package,
                   title: 'Add your first product',
-                  body: 'A name, a price and how long you can sell it. It takes a minute.',
+                  body: 'A name, a price and how you stock it. It takes a minute.',
                   actionLabel: 'Add product',
                   onAction: () => context.push(Routes.addproduct),
                 ),

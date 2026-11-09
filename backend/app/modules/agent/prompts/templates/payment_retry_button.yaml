@@ -1,0 +1,14 @@
+id: payment_retry_button
+version: 1
+description: "Title of the 'new payment link' button on a declined-payment message (Instagram allows 20 characters)."
+texts:
+  en: |-
+    New payment link
+  ta-en: |-
+    Puthu link
+  ta: |-
+    புதிய லிங்க்
+  hi-en: |-
+    Naya link
+  hi: |-
+    नया लिंक

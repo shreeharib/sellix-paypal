@@ -17,6 +17,9 @@ import 'stock_widgets.dart';
 
 /// New product, or edit with [variantId].
 ///
+/// What the form asks (how the shop stocks it, how long it keeps, which details) comes from the
+/// shop type's product schema, so a dress shop is never asked how long a dress keeps.
+///
 /// BACKEND GAP: no create endpoint. `PUT /v1/today/stock` creates the product as a side effect, so a
 /// new product always gets today's stock line, at zero when the merchant has none yet.
 class AddProductScreen extends ConsumerWidget {
@@ -26,9 +29,12 @@ class AddProductScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final schema = ref.watch(productSchemaProvider);
+    final view = ref.watch(stockViewProvider);
     return SxScaffold(
       body: SxAsyncView<StockView>(
-        value: ref.watch(stockViewProvider),
+        // The form starts from the schema, so it waits for it. The schema never fails: it falls back.
+        value: schema.hasValue ? view : const AsyncLoading<StockView>(),
         onRetry: () {
           ref.invalidate(todayProvider);
           ref.invalidate(catalogProvider);
@@ -43,6 +49,7 @@ class AddProductScreen extends ConsumerWidget {
           key: ValueKey(variantId),
           view: view,
           item: variantId == null ? null : view.byVariant(variantId!),
+          schema: schema.requireValue,
         ),
       ),
     );
@@ -50,10 +57,11 @@ class AddProductScreen extends ConsumerWidget {
 }
 
 class _Form extends ConsumerStatefulWidget {
-  const _Form({super.key, required this.view, required this.item});
+  const _Form({super.key, required this.view, required this.item, required this.schema});
 
   final StockView view;
   final StockItem? item;
+  final ProductSchema schema;
 
   @override
   ConsumerState<_Form> createState() => _FormState();
@@ -62,15 +70,23 @@ class _Form extends ConsumerStatefulWidget {
 class _FormState extends ConsumerState<_Form> {
   StockItem? get _item => widget.item;
 
+  ProductSchema get _schema => widget.schema;
+
   late final _name = TextEditingController(text: _item?.name ?? '');
   late final _variant = TextEditingController(text: _item?.variant ?? '');
   late final _price = TextEditingController(
     text: (_item?.priceMinor ?? 0) > 0 ? minorToInput(_item!.priceMinor) : '',
   );
   late final _aliases = TextEditingController(text: _item?.aliases.map((a) => a.aliasText).join(', ') ?? '');
-  late ShelfChoice _shelf = _item != null ? ShelfChoice.of(_item!.stockMode, _item!.shelfLifeDays) : _suggested;
-  late final Set<String> _details = _startDetails.toSet();
-  late final List<String> _extra = [..._startDetails];
+  late ShelfChoice _shelf = _item != null
+      ? ShelfChoice.of(_item!.stockMode, _item!.shelfLifeDays)
+      : _startChoice;
+
+  // Detail fields, by the field's key. Each is made on first use from the product's own attributes.
+  final _picked = <String, List<String>>{};
+  final _own = <String, List<String>>{};
+  final _texts = <String, TextEditingController>{};
+
   late final String _snapshot = _snap();
   int _count = 0;
   String? _nameError;
@@ -81,29 +97,71 @@ class _FormState extends ConsumerState<_Form> {
   int _nameShakes = 0;
   int _priceShakes = 0;
 
-  ShopTerms get _terms =>
-      ShopTerms.of(ref.read(shopAnswersProvider).value?.category, _item?.attributes ?? const {});
-
-  List<String> get _startDetails => _item == null ? const [] : _terms.read(_item!.attributes);
-
-  /// What this shop's products mostly use.
-  ShelfChoice get _suggested {
+  /// The shelf life most of this shop's fresh-batch products use, if it has any.
+  ShelfChoice? get _usualDaily {
     final tally = <String, int>{};
     final byKey = <String, ShelfChoice>{};
     for (final item in widget.view.tracked) {
+      if (item.stockMode != StockMode.daily) continue;
       final choice = ShelfChoice.of(item.stockMode, item.shelfLifeDays);
       final key = '${choice.c}|${choice.days}';
       tally[key] = (tally[key] ?? 0) + 1;
       byKey[key] = choice;
     }
-    if (tally.isEmpty) return const ShelfChoice('none');
-    final top = tally.entries.reduce((a, b) => b.value > a.value ? b : a).key;
-    return byKey[top]!;
+    if (tally.isEmpty) return null;
+    return byKey[tally.entries.reduce((a, b) => b.value > a.value ? b : a).key];
   }
+
+  /// A new product starts as the shop type's default mode.
+  ShelfChoice get _startChoice => startChoiceFor(_schema, _usualDaily);
+
+  // Details ---------------------------------------------------------------------------------
+
+  Map<String, dynamic> get _attributes => _item?.attributes ?? const {};
+
+  /// What is chosen for a chip field, in the order picked.
+  List<String> _chosen(DetailField f) => _picked.putIfAbsent(f.key, () => [...f.values(_attributes)]);
+
+  /// The product's own values that the schema doesn't list, and any the owner adds, as chips.
+  List<String> _extras(DetailField f) => _own.putIfAbsent(f.key, () => [...f.values(_attributes)]);
+
+  TextEditingController _line(DetailField f) => _texts.putIfAbsent(f.key, () {
+    final controller = TextEditingController(text: f.text(_attributes));
+    controller.addListener(_changed);
+    return controller;
+  });
+
+  /// The value to save for a field, cleaned: a list for chips, a string for a text line.
+  Object _valueOf(DetailField f) => f.isChoice ? [..._chosen(f)] : _clean(_line(f).text);
+
+  Object _originalOf(DetailField f) => f.isChoice ? f.values(_attributes) : f.text(_attributes);
+
+  bool _sameValue(DetailField f) {
+    final now = _valueOf(f);
+    final was = _originalOf(f);
+    if (now is List<String> && was is List<String>) {
+      return now.length == was.length && now.toSet().containsAll(was);
+    }
+    return now == was;
+  }
+
+  bool _isEmpty(Object value) => value is List ? value.isEmpty : '$value'.isEmpty;
+
+  /// Only what changed, for the PATCH. The backend merges attributes key by key.
+  Map<String, dynamic> get _changedDetails => {
+    for (final f in _schema.detailFields)
+      if (!_sameValue(f)) f.key: _valueOf(f),
+  };
+
+  /// Everything filled in, for a new product.
+  Map<String, dynamic> get _filledDetails => {
+    for (final f in _schema.detailFields)
+      if (!_isEmpty(_valueOf(f))) f.key: _valueOf(f),
+  };
 
   String _snap() =>
       '${_name.text}|${_variant.text}|${_price.text}|${_aliases.text}|${_shelf.c}|${_shelf.days}|$_count|'
-      '${(_details.toList()..sort()).join(',')}';
+      '${[for (final f in _schema.detailFields) f.isChoice ? (_chosen(f).toList()..sort()).join(',') : _line(f).text].join('|')}';
 
   bool get _dirty => _snap() != _snapshot;
 
@@ -126,6 +184,9 @@ class _FormState extends ConsumerState<_Form> {
     _variant.dispose();
     _price.dispose();
     _aliases.dispose();
+    for (final c in _texts.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -171,7 +232,7 @@ class _FormState extends ConsumerState<_Form> {
           : 'Price can’t be zero. Add the selling price.';
     }
     if (!_shelf.isValid) {
-      shelfError = 'Enter 1 to 3650 days. If it never ends, choose Doesn’t expire.';
+      shelfError = 'Enter 1 to 3650 days.';
     } else if (_item != null) {
       shelfError = StockActions.shelfRefusal(_item!, _shelf);
     }
@@ -213,7 +274,8 @@ class _FormState extends ConsumerState<_Form> {
       } else {
         actions.announce(message, icon: TablerIcons.check);
       }
-    } on Exception catch (error) {
+    } on Object catch (error) {
+      // Whatever went wrong, the product may already exist: the lists look again.
       actions.refresh();
       if (!mounted) return;
       HapticFeedback.heavyImpact();
@@ -226,16 +288,12 @@ class _FormState extends ConsumerState<_Form> {
     final item = _item!;
     final name = _clean(_name.text);
     final price = parseMoneyMinor(_price.text.trim()) ?? 0;
-    final before = _terms.read(item.attributes).toSet();
-    final detailsChanged = before.length != _details.length || !before.containsAll(_details);
+    final details = _changedDetails;
     final renamed = name != item.name;
-    if (renamed || detailsChanged) {
+    if (renamed || details.isNotEmpty) {
       await api.updateProduct(
         item.productId!,
-        ProductUpdate(
-          name: renamed ? name : null,
-          attributes: detailsChanged ? {_terms.attrKey: _details.toList()} : null,
-        ),
+        ProductUpdate(name: renamed ? name : null, attributes: details.isEmpty ? null : details),
       );
     }
     final was = ShelfChoice.of(item.stockMode, item.shelfLifeDays);
@@ -278,6 +336,7 @@ class _FormState extends ConsumerState<_Form> {
         priceMinor: parseMoneyMinor(_price.text.trim()) ?? 0,
         currency: widget.view.currency,
         quantity: count,
+        // The chosen mode, and a shelf life only for fresh batches.
         stockMode: _shelf.stockMode,
         shelfLifeDays: _shelf.shelfLifeDays,
       ),
@@ -297,48 +356,84 @@ class _FormState extends ConsumerState<_Form> {
         }
       }
     }
-    if (_details.isEmpty && _aliasList.isEmpty) return (message, offer);
+    final details = _filledDetails;
+    if (details.isEmpty && _aliasList.isEmpty) return (message, offer);
     // The stock line returns no product id, so the details wait for a lookup by name.
+    final lost = ('$name added, but its details didn’t save. Add them with Edit product.', offer);
     try {
       final all = await api.products();
-      final product = all.firstWhere((p) => p.name.toLowerCase() == name.toLowerCase());
-      if (_details.isNotEmpty) {
-        await api.updateProduct(product.id, ProductUpdate(attributes: {_terms.attrKey: _details.toList()}));
-      }
+      final product = all.where((p) => p.name.toLowerCase() == name.toLowerCase()).firstOrNull;
+      if (product == null) return lost;
+      if (details.isNotEmpty) await api.updateProduct(product.id, ProductUpdate(attributes: details));
       for (final alias in _aliasList) {
         await api.addProductAlias(product.id, alias);
       }
     } on Exception {
-      return ('$name added, but its details didn’t save. Add them with Edit product.', offer);
+      return lost;
     }
     return (message, offer);
   }
 
-  Future<void> _addDetail() async {
+  Future<void> _addOption(DetailField f) async {
     final text = await showSxSheet<String>(
       context,
-      title: 'Add a detail',
-      subtitle: 'What do customers ask about? ${_terms.attrLabel}, size, care.',
-      builder: (_) => _DetailSheet(hint: _terms.attrOptions.first),
+      title: 'Add your own',
+      subtitle: 'Something customers ask about: ${f.label.toLowerCase()}.',
+      builder: (_) => _DetailSheet(hint: f.options.firstOrNull ?? f.label),
     );
     if (text == null || !mounted) return;
-    final known = [..._terms.attrOptions, ..._extra];
+    final known = [...f.options, ..._extras(f)];
     final match = known.where((a) => a.toLowerCase() == text.toLowerCase()).firstOrNull;
     setState(() {
-      if (match == null) _extra.add(text);
-      _details.add(match ?? text);
+      if (match == null) _extras(f).add(text);
+      final value = match ?? text;
+      if (!_chosen(f).contains(value)) _chosen(f).add(value);
     });
   }
+
+  Widget _choiceField(DetailField f) {
+    final p = context.sx;
+    final options = {...f.options, ..._extras(f)}.toList();
+    final chosen = _chosen(f);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: SxSpace.s8,
+      children: [
+        Text(f.label, style: SxText.label.copyWith(color: p.textPrimary)),
+        Wrap(
+          spacing: SxSpace.s8,
+          runSpacing: SxSpace.s8,
+          children: [
+            for (final option in options)
+              SxPickChip(
+                label: option,
+                selected: chosen.contains(option),
+                onTap: () => setState(() => chosen.contains(option) ? chosen.remove(option) : chosen.add(option)),
+              ),
+            SxPickChip(label: 'Other', icon: TablerIcons.plus, selected: false, onTap: () => _addOption(f)),
+          ],
+        ),
+        if (f.note.isNotEmpty) SxAiNote(f.note),
+      ],
+    );
+  }
+
+  Widget _textField(DetailField f) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    spacing: SxSpace.s8,
+    children: [
+      SxField(label: f.label, controller: _line(f), maxLength: 200),
+      if (f.note.isNotEmpty) SxAiNote(f.note),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) {
     final p = context.sx;
     final item = _item;
-    final terms = _terms;
-    final options = {...terms.attrOptions, ..._extra}.toList();
+    final vocabulary = _schema.vocabulary;
     final currency = item?.currency ?? widget.view.currency;
     final symbol = currency == 'INR' ? '₹' : currency;
-    final category = ref.watch(shopAnswersProvider).value?.category;
     return PopScope(
       canPop: !_dirty || _done,
       onPopInvokedWithResult: (didPop, _) {
@@ -387,7 +482,7 @@ class _FormState extends ConsumerState<_Form> {
                             child: SxField(
                               label: 'Name',
                               controller: _name,
-                              hint: terms.exampleProduct,
+                              hint: vocabulary.exampleProduct,
                               maxLength: 200,
                               errorText: _nameError,
                               textCapitalization: TextCapitalization.sentences,
@@ -425,18 +520,21 @@ class _FormState extends ConsumerState<_Form> {
                               },
                             ),
                           ),
-                          ShelfPicker(
-                            value: _shelf,
-                            errorText: _shelfError,
-                            suggestion: item == null && widget.view.tracked.isNotEmpty && category != null
-                                ? 'Suggested for ${category.toLowerCase()}'
-                                : null,
-                            onChanged: (v) => setState(() {
-                              _shelf = v;
-                              _shelfError = null;
-                              if (v.c == 'mto') _priceError = null;
-                            }),
-                          ),
+                          if (StockTypeQuestion.isNeeded(_schema, _shelf, keepMode: item?.stockMode))
+                            StockTypeQuestion(
+                              schema: _schema,
+                              value: _shelf,
+                              keepMode: item?.stockMode,
+                              dailyStart: _usualDaily,
+                              errorText: _shelfError,
+                              onChanged: (v) => setState(() {
+                                _shelf = v;
+                                _shelfError = null;
+                                if (v.c == 'mto') _priceError = null;
+                              }),
+                            )
+                          else if (_shelfError != null)
+                            WhyText(_shelfError!),
                           if (item == null && !_shelf.isNoCount)
                             WhyStockRow(
                               title: 'How many do you have now?',
@@ -446,49 +544,13 @@ class _FormState extends ConsumerState<_Form> {
                               whyMax: 'The most you can set is $stepperMax.',
                               onChanged: (v) => setState(() => _count = v),
                             ),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            spacing: SxSpace.s8,
-                            children: [
-                              Text.rich(
-                                TextSpan(
-                                  text: 'Details customers ask ',
-                                  children: [
-                                    TextSpan(
-                                      text: '· ${terms.attrLabel}',
-                                      style: TextStyle(color: p.textSecondary),
-                                    ),
-                                  ],
-                                ),
-                                style: SxText.label.copyWith(color: p.textPrimary),
-                              ),
-                              Wrap(
-                                spacing: SxSpace.s8,
-                                runSpacing: SxSpace.s8,
-                                children: [
-                                  for (final a in options)
-                                    SxPickChip(
-                                      label: a,
-                                      selected: _details.contains(a),
-                                      onTap: () => setState(
-                                        () => _details.contains(a) ? _details.remove(a) : _details.add(a),
-                                      ),
-                                    ),
-                                  SxPickChip(
-                                    label: 'Other',
-                                    icon: TablerIcons.plus,
-                                    selected: false,
-                                    onTap: _addDetail,
-                                  ),
-                                ],
-                              ),
-                              SxAiNote(terms.attrNote),
-                            ],
-                          ),
+                          if (_schema.detailFields.isNotEmpty)
+                            Text('Details customers ask about', style: SxText.label.copyWith(color: p.textPrimary)),
+                          for (final f in _schema.detailFields) f.isChoice ? _choiceField(f) : _textField(f),
                           SxField(
                             label: 'Other names customers use',
                             controller: _aliases,
-                            hint: terms.aliasExample,
+                            hint: vocabulary.aliasExample,
                           ),
                         ],
                       ),

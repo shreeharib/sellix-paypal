@@ -1,0 +1,241 @@
+# Shop-type templates: what the add-product form asks, per kind of shop.
+#
+# This is data, not code: adding a shop type means adding an entry here (and a test), not
+# shipping a new app. What a template may NOT do is invent a new stock behaviour: `stock_modes`
+# below are the only four, each with real code behind it (holds, carry-over, restocking).
+#
+# Changing a template never rewrites existing products; bump `version` when you do.
+version: 1
+
+# The four stock behaviours. A template lists which of them its shops may choose.
+stock_modes:
+  daily:
+    label: I make fresh batches
+    hint: You set a count every day. Unsold items can carry over for the days you choose.
+    asks_shelf_life: true
+  inventory:
+    label: I keep stock until it sells
+    hint: Count it once, then add more when you restock.
+    asks_shelf_life: false
+  made_to_order:
+    label: I make it when ordered
+    hint: No count needed. Customers order and you make it.
+    asks_shelf_life: false
+  unlimited:
+    label: Always available
+    hint: No count needed. It never runs out.
+    asks_shelf_life: false
+
+# Only asked for the stock behaviours that set `asks_shelf_life`.
+shelf_life_options:
+  - { id: same, label: Same day, days: 1 }
+  - { id: "3", label: 3 days, days: 3 }
+  - { id: "7", label: 1 week, days: 7 }
+  - { id: "30", label: 1 month, days: 30 }
+
+types:
+  bakery:
+    label: Bakery & sweets
+    # Matched against the shop's free-text category when it hasn't picked a type.
+    match: [food, bak, cake, sweet, snack, cook, kitchen, cafe, tiffin, pickle, choco]
+    default_stock_mode: daily
+    stock_modes: [daily, inventory, made_to_order, unlimited]
+    detail_fields:
+      - key: allergens
+        label: Allergens
+        type: multi_choice
+        options: [Egg, Milk, Gluten, Nuts, Soy]
+        note: I use this to answer allergy questions. If it is not here, I ask you.
+      - key: dietary
+        label: Diet
+        type: multi_choice
+        options: [Eggless, Vegan, Sugar-free, Jain]
+        note: Customers often ask. I answer only from what you tick.
+      - key: ingredients
+        label: Ingredients
+        type: text
+        options: []
+        note: Shown to customers who ask what is in it.
+    vocabulary:
+      stock_question: What did you make today?
+      example_product: Choco lava
+      alias_example: lava cake, molten cake
+
+  # Types are tried in this order when matching a category, so the more specific ones come first
+  # ("fashion jewellery" should be jewellery, not clothing).
+  jewellery:
+    label: Jewellery & accessories
+    match: [jewel, ornament, bangle, earring, necklace, anklet]
+    default_stock_mode: inventory
+    stock_modes: [inventory, made_to_order]
+    detail_fields:
+      - key: material
+        label: Material
+        type: multi_choice
+        options: [Gold, Silver, Rose gold, Brass, Oxidised, Imitation]
+        note: I use this to answer "is it real silver?". If it is not here, I ask you.
+      - key: occasion
+        label: Occasion
+        type: multi_choice
+        options: [Daily wear, Party, Bridal, Festive]
+        note: Helps me suggest the right piece.
+      - key: care
+        label: Care
+        type: text
+        options: []
+        note: For example keep away from water and perfume.
+      - key: returns
+        label: Returns and exchange
+        type: text
+        options: []
+        note: What you offer for this item. I never promise more than this.
+    vocabulary:
+      stock_question: What's in stock today?
+      example_product: Jhumka earrings
+      alias_example: jhumkas, danglers
+
+  beauty:
+    label: Beauty & makeup
+    match: [beauty, makeup, make-up, cosmetic, skin, perfume, fragrance, lipstick]
+    default_stock_mode: inventory
+    stock_modes: [inventory, made_to_order]
+    detail_fields:
+      - key: skin_type
+        label: Skin type
+        type: multi_choice
+        options: [Oily, Dry, Combination, Sensitive, All skin types]
+        note: I use this to answer "is it good for oily skin?". If it is not here, I ask you.
+      - key: shade
+        label: Shade
+        type: text
+        options: []
+        note: The shade or colour name, if the product has one.
+      - key: ingredients
+        label: Ingredients
+        type: text
+        options: []
+        note: Shown to customers who ask what is in it.
+      - key: expiry
+        label: Best before
+        type: text
+        options: []
+        note: For example 24 months from manufacture.
+    vocabulary:
+      stock_question: What's in stock today?
+      example_product: Matte lipstick
+      alias_example: lipstick, lip colour
+
+  plants:
+    label: Plants & garden
+    match: [plant, garden, nursery, flower, sapling]
+    default_stock_mode: inventory
+    stock_modes: [inventory, made_to_order]
+    detail_fields:
+      - key: light
+        label: Light
+        type: multi_choice
+        options: [Full sun, Partial shade, Low light]
+        note: I use this to answer "will it grow indoors?". If it is not here, I ask you.
+      - key: pet_safe
+        label: Pets
+        type: multi_choice
+        options: [Pet safe, Not pet safe]
+        note: Customers often ask. I answer only from what you tick.
+      - key: watering
+        label: Watering
+        type: text
+        options: []
+        note: For example twice a week.
+      - key: pot_size
+        label: Pot size
+        type: text
+        options: []
+        note: For example 6 inch pot.
+    vocabulary:
+      stock_question: What's in stock today?
+      example_product: Money plant
+      alias_example: pothos, devil's ivy
+
+  handmade_gifts:
+    label: Handmade & custom gifts
+    match: [handmade, craft, gift, personalis, personaliz]
+    default_stock_mode: made_to_order
+    stock_modes: [made_to_order, inventory]
+    detail_fields:
+      - key: personalisation
+        label: What can be personalised
+        type: text
+        options: []
+        note: For example name, photo, message.
+      - key: lead_time
+        label: Time to make
+        type: text
+        options: []
+        note: For example 3 days. I quote this to customers.
+      - key: materials
+        label: Materials
+        type: text
+        options: []
+        note: What it is made of.
+      - key: occasion
+        label: Occasion
+        type: multi_choice
+        options: [Birthday, Anniversary, Wedding, Festival, Baby]
+        note: Helps me suggest the right gift.
+    vocabulary:
+      stock_question: What's ready today?
+      example_product: Name keychain
+      alias_example: keyring, custom keychain
+
+  dress_shop:
+    label: Dress & clothing shop
+    match: [cloth, dress, fashion, boutique, kurti, kurta, saree, sari, apparel, garment, tailor]
+    default_stock_mode: inventory
+    # A dress doesn't spoil by the day, so there is no fresh-batch choice and no shelf life.
+    stock_modes: [inventory, made_to_order]
+    detail_fields:
+      - key: sizes
+        label: Sizes
+        type: multi_choice
+        options: [XS, S, M, L, XL, XXL, Free size]
+        note: I use this to answer "do you have it in M?". If it is not here, I ask you.
+      - key: colours
+        label: Colours
+        type: multi_choice
+        options: [Black, White, Red, Blue, Green, Pink, Yellow, Beige]
+        note: Add the colours you actually have.
+      - key: fabric
+        label: Fabric
+        type: text
+        options: []
+        note: For example cotton, silk, georgette.
+      - key: care
+        label: Care
+        type: text
+        options: []
+        note: For example hand wash only.
+      - key: returns
+        label: Returns and exchange
+        type: text
+        options: []
+        note: What you offer for this item. I never promise more than this.
+    vocabulary:
+      stock_question: What's in stock today?
+      example_product: Cotton kurti
+      alias_example: kurta, kurthi
+
+  other:
+    label: Other kind of shop
+    match: []
+    default_stock_mode: inventory
+    stock_modes: [inventory, daily, made_to_order, unlimited]
+    detail_fields:
+      - key: details
+        label: Details
+        type: multi_choice
+        options: [Size, Colour, Material, Care, Warranty]
+        note: Saved with the product. I answer from these, and ask you when one is missing.
+    vocabulary:
+      stock_question: What's in stock today?
+      example_product: Your product name
+      alias_example: A short name customers use

@@ -5,6 +5,7 @@ PayPal's API is replaced; the database, orders and payments are real.
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from app.modules.orders.schemas import (
     QuoteRefused,
     SavedQuote,
 )
-from app.modules.payments import paypal
+from app.modules.payments import fx, paypal
 from app.modules.payments import service as payments
 from app.modules.payments.models import Payment
 from tests.integration.factories import start_conversation
@@ -53,8 +54,8 @@ async def place(shop: ChannelConnection, quantity: int = 2) -> PlacedOrder:
 
 
 @pytest.fixture
-async def pending(shop: ChannelConnection) -> PlacedOrder:
-    """A ₹180 order with a PayPal payment the customer has been sent to."""
+async def stocked(shop: ChannelConnection) -> PlacedOrder:
+    """A ₹180 order, placed and unpaid, that no payment has been started for."""
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, shop.merchant_id)
         await inventory.set_opening_stock(
@@ -63,7 +64,13 @@ async def pending(shop: ChannelConnection) -> PlacedOrder:
             business_date=merchants.business_date(merchant),
             lines=[OpeningStockLine("Brownie", None, 9000, 20)],
         )
-    placed = await place(shop)
+    return await place(shop)
+
+
+async def start_payment(
+    shop: ChannelConnection, placed: PlacedOrder, currency: str, amount_minor: int
+) -> None:
+    """The PayPal payment the customer has been sent to, for this amount."""
     async with session_scope() as session:
         session.add(
             Payment(
@@ -72,11 +79,24 @@ async def pending(shop: ChannelConnection) -> PlacedOrder:
                 provider="paypal",
                 provider_order_id=PAYPAL_ORDER,
                 status="created",
-                currency="INR",
-                amount_minor=18000,
+                currency=currency,
+                amount_minor=amount_minor,
             )
         )
-    return placed
+
+
+@pytest.fixture
+async def pending(shop: ChannelConnection, stocked: PlacedOrder) -> PlacedOrder:
+    """A ₹180 order with a PayPal payment, in rupees, the customer has been sent to."""
+    await start_payment(shop, stocked, "INR", 18000)
+    return stocked
+
+
+@pytest.fixture
+async def pending_in_dollars(shop: ChannelConnection, stocked: PlacedOrder) -> PlacedOrder:
+    """The same ₹180 order, but PayPal was asked for $1.92 (rupees at 94 to the dollar)."""
+    await start_payment(shop, stocked, "USD", 192)
+    return stocked
 
 
 def paypal_order(
@@ -85,6 +105,7 @@ def paypal_order(
     status: str = "COMPLETED",
     capture_status: str = "COMPLETED",
     value: str = "180.00",
+    currency: str = "INR",
 ) -> dict[str, Any]:
     return {
         "id": PAYPAL_ORDER,
@@ -98,7 +119,7 @@ def paypal_order(
                         {
                             "id": "CAPTURE-1",
                             "status": capture_status,
-                            "amount": {"value": value, "currency_code": "INR"},
+                            "amount": {"value": value, "currency_code": currency},
                         }
                     ]
                 },
@@ -239,3 +260,87 @@ async def test_a_customer_cant_hold_more_than_two_unpaid_orders(
             )
 
     assert refused.value.code == "too_many_unpaid_orders"
+
+
+async def test_a_rupee_order_paid_in_the_dollars_asked_for_is_paid_in_full(
+    pending_in_dollars: PlacedOrder, paypal_says: list[dict[str, Any]]
+) -> None:
+    paypal_says.append(paypal_order(pending_in_dollars.order_id, value="1.92", currency="USD"))
+
+    result = await payments.handle_webhook(completed_webhook("1.92"))
+
+    assert result is not None and getattr(result, "outcome", None) == "paid"
+    async with session_scope() as session:
+        order = await session.get(Order, pending_in_dollars.order_id)
+    assert order is not None and order.status == "paid" and order.amount_paid_minor == 18000
+
+
+async def test_other_dollars_than_asked_for_do_not_settle_a_rupee_order(
+    pending_in_dollars: PlacedOrder, paypal_says: list[dict[str, Any]]
+) -> None:
+    paypal_says.append(paypal_order(pending_in_dollars.order_id, value="0.50", currency="USD"))
+
+    result = await payments.handle_webhook(completed_webhook("0.50"))
+
+    assert result is not None and getattr(result, "outcome", None) == "amount_mismatch"
+    assert await order_status(pending_in_dollars.order_id) == "awaiting_payment"
+
+
+async def test_a_rupee_order_is_charged_in_dollars_at_the_live_rate(
+    stocked: PlacedOrder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[dict[str, Any]] = []
+
+    async def create_order(**kwargs: Any) -> paypal.CreatedOrder:
+        sent.append(kwargs)
+        return paypal.CreatedOrder("PP-NEW", "https://paypal.test/approve")
+
+    async def per_dollar(currency: str) -> Decimal:
+        return Decimal("94")
+
+    monkeypatch.setattr(paypal, "configured", lambda: True)
+    monkeypatch.setattr(paypal, "create_order", create_order)
+    monkeypatch.setattr(fx, "per_dollar", per_dollar)
+
+    checkout = await payments.start_checkout(stocked, shop_name="Sweet Crumbs")
+
+    assert (sent[0]["amount_minor"], sent[0]["currency"]) == (192, "USD")  # 18000 paise / 94, up
+    assert "₹180" in sent[0]["description"]
+    assert checkout.converted and checkout.charge_label == "$1.92"
+    async with session_scope() as session:
+        payment = await session.scalar(select(Payment).where(Payment.order_id == stocked.order_id))
+    assert payment is not None
+    assert (payment.currency, payment.amount_minor, payment.provider_order_id) == (
+        "USD",
+        192,
+        "PP-NEW",
+    )
+
+    again = await payments.start_checkout(stocked, shop_name="Sweet Crumbs")  # link resent
+
+    assert again.url == checkout.url and len(sent) == 1
+
+
+async def test_an_approved_payment_is_captured_even_if_the_return_page_never_loaded(
+    pending: PlacedOrder, paypal_says: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def capture_order(paypal_order_id: str) -> paypal.Capture:
+        return paypal.Capture("COMPLETED", "CAPTURE-1", 18000, "INR")
+
+    monkeypatch.setattr(paypal, "capture_order", capture_order)
+    # First look: the buyer approved it. Second, inside capture(): PayPal's record of the payment.
+    paypal_says.extend([{"status": "APPROVED"}, paypal_order(pending.order_id)])
+
+    settled = await payments.settle_open_payments()
+
+    assert [getattr(result, "outcome", None) for result in settled] == ["paid"]
+    assert await order_status(pending.order_id) == "paid"
+
+
+async def test_a_payment_the_buyer_has_not_approved_is_left_alone(
+    pending: PlacedOrder, paypal_says: list[dict[str, Any]]
+) -> None:
+    paypal_says.append({"status": "CREATED"})
+
+    assert await payments.settle_open_payments() == []
+    assert await order_status(pending.order_id) == "awaiting_payment"

@@ -1,6 +1,6 @@
 ---
 id: playbook.new_order
-version: 3
+version: 5
 ---
 # Taking an order
 1. Find the items with search_catalog (or use the ids from today's menu).
@@ -10,8 +10,11 @@ version: 3
 3. When nothing is missing, call create_quote. The customer receives a card with the items, the
    total and Confirm / Change buttons. Your reply is one short line, for example asking them to
    confirm with the button.
-4. When the customer agrees in words ("ok", "seri", "haan confirm"), call confirm_order with the
-   quote id. If they want changes, call update_order_draft again.
+4. When the customer clearly asks to place it in words ("confirm", "place the order", "book it",
+   "confirm pannunga", "order kar do"), call confirm_order with the quote id. A plain "ok",
+   "sure", "seri", "haan" or a thumbs-up is not a confirmation: answer what they asked, then tell
+   them to tap Confirm on the card to place it, or to say what to change. If they want changes,
+   call update_order_draft again.
 5. After confirm_order, thank them briefly. The payment message is sent by the system.
 
 # Orders for another day (pre-orders)

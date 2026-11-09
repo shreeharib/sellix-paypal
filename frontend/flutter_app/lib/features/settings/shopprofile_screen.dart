@@ -92,8 +92,9 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
           next = next.copyWith(
             tone: talk.tone,
             emoji: talk.emoji,
-            addressCustomers: blankToNull(talk.address.text),
-            intro: blankToNull(talk.intro.text),
+            // Not asked any more, and cleared: the agent never introduces itself or says sir / madam.
+            addressCustomers: null,
+            intro: null,
           );
         }
         return next;
@@ -181,10 +182,10 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
                   )
               else ...[
                 SxRowCard(
-                  icon: categoryOf(answers.category).icon,
+                  icon: shopIconOf(answers),
                   title: 'Shop type',
-                  meta: categoryLabel(answers.category),
-                  onTap: () => changeShopType(context, answers.category),
+                  meta: shopTypeLabel(answers, ref.watch(shopTypesProvider).value ?? builtInShopTypes),
+                  onTap: () => changeShopType(context, answers),
                 ),
                 _shopCard(data),
                 _talkCard(answers),
@@ -288,10 +289,8 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
     final bits = [
       if (a.tone != null) a.tone == 'formal' ? 'Formal' : 'Friendly',
       if (a.emoji != null) a.emoji! ? 'light emoji' : 'no emoji',
-      if (blankToNull(a.addressCustomers ?? '') != null) 'calls customers ${a.addressCustomers!.trim()}',
     ].join(', ');
-    final intro = blankToNull(a.intro ?? '');
-    final shown = [if (bits.isNotEmpty) '$bits.', ?intro].join(' ');
+    final shown = bits.isEmpty ? '' : '$bits.';
     final p = context.sx;
     return _card(
       title: 'How sellix talks',
@@ -327,31 +326,8 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
               ),
             ],
           ),
-          Wrap(
-            spacing: SxSpace.s8,
-            runSpacing: SxSpace.s8,
-            children: [
-              for (final label in const ['Sir or madam', 'By name', 'Akka / anna'])
-                SxPickChip(
-                  label: label,
-                  selected: editor.address.text == label,
-                  onTap: () => setState(() => editor.address.text = label),
-                ),
-            ],
-          ),
-          SxField(
-            controller: editor.address,
-            label: 'Call customers',
-            onTile: true,
-            maxLength: answerShortLimit,
-            onChanged: (_) => setState(() {}),
-          ),
-          SxField(
-            controller: editor.intro,
-            label: 'How sellix introduces itself',
-            hint: 'Hi, I am your shop’s assistant',
-            onTile: true,
-            maxLength: answerShortLimit,
+          const SxAiNote(
+            'I use a customer’s name only if they give it, never “sir” or “madam”, and I don’t introduce myself. If a customer asks, I say I’m your shop’s virtual assistant.',
           ),
         ],
       ),
@@ -379,16 +355,10 @@ class _ShopEditor {
 class _TalkEditor {
   _TalkEditor(OnboardingAnswers a)
     : tone = a.tone == 'formal' ? 'formal' : 'friendly',
-      emoji = a.emoji ?? true,
-      address = TextEditingController(text: a.addressCustomers ?? ''),
-      intro = TextEditingController(text: a.intro ?? '');
+      emoji = a.emoji ?? true;
 
   String tone;
   bool emoji;
-  final TextEditingController address, intro;
 
-  void dispose() {
-    address.dispose();
-    intro.dispose();
-  }
+  void dispose() {}
 }

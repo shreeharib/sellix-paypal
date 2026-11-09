@@ -77,13 +77,18 @@ async def create_order(
     brand_name: str,
     return_url: str,
     cancel_url: str,
+    attempt: int = 1,
 ) -> CreatedOrder:
-    """Create a PayPal order the buyer approves at the returned link."""
+    """Create a PayPal order the buyer approves at the returned link.
+
+    `attempt` is 1 for the first link; a customer whose payment was declined gets a new PayPal
+    order for attempt 2, 3, ... (the same request ID would return the declined one).
+    """
     data = await _request(
         "POST",
         "/v2/checkout/orders",
-        # Same order, same request ID: a retry returns the existing PayPal order.
-        request_id=f"sellix-order-{reference_id}",
+        # Same order and attempt, same request ID: a retry returns the existing PayPal order.
+        request_id=f"sellix-order-{reference_id}" + (f"-{attempt}" if attempt > 1 else ""),
         json={
             "intent": "CAPTURE",
             "purchase_units": [
@@ -356,6 +361,9 @@ async def _request(
             headers = {"Authorization": f"Bearer {await _access_token(client)}"}
             if request_id:
                 headers["PayPal-Request-Id"] = request_id
+            settings = get_settings()
+            if settings.paypal_env == "sandbox" and settings.paypal_mock_response:
+                headers["PayPal-Mock-Response"] = settings.paypal_mock_response
             response = await client.request(method, path, json=json, headers=headers)
     except httpx2.HTTPError as exc:
         raise PayPalError(0, f"network error: {exc.__class__.__name__}") from exc

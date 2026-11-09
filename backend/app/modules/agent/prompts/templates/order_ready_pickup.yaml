@@ -1,0 +1,14 @@
+id: order_ready_pickup
+version: 1
+description: "Sent by code when the merchant marks a pickup order ready (Orders > Mark as ready for pickup)."
+texts:
+  en: |-
+    Good news: order {{ number }} is ready for pickup. See you soon!
+  ta-en: |-
+    Order {{ number }} pickup-ku ready! Eppo venumnaalum vandhu vaangikkonga.
+  ta: |-
+    ஆர்டர் {{ number }} எடுத்துச் செல்ல தயாராக உள்ளது. வந்து வாங்கிக்கொள்ளுங்கள்!
+  hi-en: |-
+    Order {{ number }} pickup ke liye ready hai. Aakar le jaiye!
+  hi: |-
+    ऑर्डर {{ number }} पिकअप के लिए तैयार है। आकर ले जाइए!

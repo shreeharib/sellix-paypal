@@ -111,6 +111,8 @@ class StockRow(BaseModel):
     sold: int
     counter_sales: int
     available: int
+    stock_mode: str = "daily"
+    shelf_life_days: int | None = None
 
 
 class Today(BaseModel):
@@ -129,6 +131,10 @@ class StockLine(BaseModel):
     price_minor: int = Field(ge=0)
     currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
     quantity: int = Field(ge=0, le=100_000)
+    # How long the shop can sell it (the app's "How long can you sell it?"). Left out: the
+    # product keeps what it has; a new product is a daily item.
+    stock_mode: Literal["daily", "inventory", "made_to_order", "unlimited"] | None = None
+    shelf_life_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class OpeningStock(BaseModel):

@@ -231,7 +231,7 @@ class StockActions {
     final next = await showSxSheet<ShelfChoice>(
       context,
       title: item.label,
-      builder: (sheet) => _ShelfSheet(item: item),
+      builder: (sheet) => _ShelfSheet(item: item, schema: _container.read(shopSchemaProvider)),
     );
     if (next == null || next.sameAs(ShelfChoice.of(item.stockMode, item.shelfLifeDays))) return;
     final wasCounted = item.counted;
@@ -438,9 +438,10 @@ class _QtySheetState extends State<_QtySheet> {
 }
 
 class _ShelfSheet extends StatefulWidget {
-  const _ShelfSheet({required this.item});
+  const _ShelfSheet({required this.item, required this.schema});
 
   final StockItem item;
+  final ProductSchema schema;
 
   @override
   State<_ShelfSheet> createState() => _ShelfSheetState();
@@ -454,8 +455,10 @@ class _ShelfSheetState extends State<_ShelfSheet> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      ShelfPicker(
+      StockTypeQuestion(
+        schema: widget.schema,
         value: _value,
+        keepMode: widget.item.stockMode,
         errorText: _error,
         onChanged: (v) => setState(() {
           _value = v;
@@ -468,7 +471,7 @@ class _ShelfSheetState extends State<_ShelfSheet> {
         fullWidth: true,
         onTap: () {
           if (!_value.isValid) {
-            setState(() => _error = 'Enter 1 to 3650 days. If it never ends, choose Doesn’t expire.');
+            setState(() => _error = 'Enter 1 to 3650 days.');
             return;
           }
           final refusal = StockActions.shelfRefusal(widget.item, _value);

@@ -126,6 +126,7 @@ void main() {
     test('every answer round-trips', () {
       const json = {
         'category': 'bakery',
+        'shop_type': 'dress_shop',
         'area': 'Anna Nagar',
         'city': 'Chennai',
         'address': '1 Test Rd',
@@ -144,6 +145,23 @@ void main() {
         'upi_id': 'test@upi',
       };
       expect(OnboardingAnswers.fromJson(json).toJson(), json);
+    });
+
+    test('the shop type survives copyWith, so a save of another answer cannot erase it', () {
+      final answers = OnboardingAnswers.fromJson({'category': 'Clothing', 'shop_type': 'dress_shop'});
+      expect(answers.shopType, 'dress_shop');
+      final next = answers.copyWith(upiId: 'a@upi', hours: '9 to 5', category: 'Dresses');
+      expect(next.shopType, 'dress_shop');
+      expect(next.toJson()['shop_type'], 'dress_shop');
+      // Changing it sets it, clearing it takes it out of the PUT.
+      expect(answers.copyWith(shopType: 'bakery').shopType, 'bakery');
+      expect(answers.copyWith(shopType: null).toJson().containsKey('shop_type'), isFalse);
+    });
+
+    test('shop types: id and label', () {
+      final type = ShopTypeChoice.fromJson({'id': 'dress_shop', 'label': 'Dress & clothing shop'});
+      expect(type.id, 'dress_shop');
+      expect(type.label, 'Dress & clothing shop');
     });
 
     test('skipped answers stay out of the JSON', () {
@@ -207,15 +225,28 @@ void main() {
       expect(row.carries, isTrue);
     });
 
-    test('StockRow from before stock_mode existed gets the defaults', () {
+    test('StockRow from before stock_mode existed has no mode, not a daily one', () {
       final json = _stockRow()
         ..remove('stock_mode')
         ..remove('shelf_life_days');
       final row = StockRow.fromJson(json);
-      expect(row.stockMode, 'daily');
+      expect(row.stockMode, isNull);
       expect(row.shelfLifeDays, isNull);
       expect(row.carries, isFalse);
+      // Home still counts such a row as tracked stock, as it always did.
       expect(row.isTracked, isTrue);
+    });
+
+    test('a made-to-order row reads its mode, and has no shelf life', () {
+      final row = StockRow.fromJson(
+        _stockRow()
+          ..['stock_mode'] = 'made_to_order'
+          ..['shelf_life_days'] = null,
+      );
+      expect(row.stockMode, StockMode.madeToOrder);
+      expect(row.shelfLifeDays, isNull);
+      expect(row.isTracked, isFalse);
+      expect(row.carries, isFalse);
     });
 
     test('CounterSaleResponse and RolloverResponse carry Today', () {
@@ -548,6 +579,84 @@ void main() {
 
     test('ProductUpdate sends only what is set', () {
       expect(const ProductUpdate(category: 'cakes').toJson(), {'category': 'cakes'});
+    });
+  });
+
+  group('product schema', () {
+    // The contract, as the backend sends it (a bakery).
+    Map<String, dynamic> bakery() => {
+      'shop_type': 'bakery',
+      'label': 'Bakery & sweets',
+      'default_stock_mode': 'daily',
+      'stock_modes': [
+        {'id': 'daily', 'label': 'I make fresh batches', 'hint': 'You set a count every day.', 'asks_shelf_life': true},
+        {'id': 'inventory', 'label': 'I keep stock until it sells', 'hint': 'Count it once.', 'asks_shelf_life': false},
+        {'id': 'made_to_order', 'label': 'I make it when ordered', 'hint': 'No count needed.', 'asks_shelf_life': false},
+        {'id': 'unlimited', 'label': 'Always available', 'hint': 'No count needed.', 'asks_shelf_life': false},
+      ],
+      'shelf_life_options': [
+        {'id': 'same', 'label': 'Same day', 'days': 1},
+        {'id': '3', 'label': '3 days', 'days': 3},
+        {'id': '7', 'label': '1 week', 'days': 7},
+        {'id': '30', 'label': '1 month', 'days': 30},
+      ],
+      'detail_fields': [
+        {
+          'key': 'allergens',
+          'label': 'Allergens',
+          'type': 'multi_choice',
+          'options': ['Egg', 'Milk', 'Gluten', 'Nuts', 'Soy'],
+          'note': 'I use this to answer allergy questions.',
+        },
+        {'key': 'ingredients', 'label': 'Ingredients', 'type': 'text', 'options': <String>[], 'note': 'Shown to customers who ask.'},
+      ],
+      'vocabulary': {
+        'stock_question': 'What did you make today?',
+        'example_product': 'Choco lava',
+        'alias_example': 'lava cake, molten cake',
+      },
+    };
+
+    test('the contract parses field for field', () {
+      final schema = ProductSchema.fromJson(bakery());
+      expect(schema.shopType, 'bakery');
+      expect(schema.defaultMode, StockMode.daily);
+      expect([for (final m in schema.stockModes) m.id], [
+        StockMode.daily,
+        StockMode.inventory,
+        StockMode.madeToOrder,
+        StockMode.unlimited,
+      ]);
+      expect(schema.mode(StockMode.daily)!.asksShelfLife, isTrue);
+      expect(schema.mode(StockMode.inventory)!.asksShelfLife, isFalse);
+      expect([for (final o in schema.shelfLifeOptions) o.days], [1, 3, 7, 30]);
+      expect(schema.detailFields.first.isChoice, isTrue);
+      expect(schema.detailFields.first.options, contains('Nuts'));
+      expect(schema.detailFields.last.isChoice, isFalse);
+      expect(schema.vocabulary.stockQuestion, 'What did you make today?');
+      expect(schema.vocabulary.aliasExample, 'lava cake, molten cake');
+    });
+
+    test('a default mode the shop type does not list falls to its first mode; unknown modes are left out', () {
+      final json = bakery()
+        ..['default_stock_mode'] = 'inventory'
+        ..['stock_modes'] = [
+          {'id': 'made_to_order', 'label': 'To order', 'hint': '', 'asks_shelf_life': false},
+          {'id': 'subscription', 'label': 'Unknown to this app', 'hint': '', 'asks_shelf_life': false},
+        ];
+      final schema = ProductSchema.fromJson(json);
+      expect(schema.stockModes.single.id, StockMode.madeToOrder);
+      expect(schema.defaultMode, StockMode.madeToOrder);
+    });
+
+    test('a detail field reads a list, a comma-separated string or nothing', () {
+      final field = ProductSchema.fromJson(bakery()).detailFields.first;
+      expect(field.values({'allergens': ['Egg', 'Milk']}), ['Egg', 'Milk']);
+      expect(field.values({'allergens': 'Egg, Milk'}), ['Egg', 'Milk']);
+      expect(field.values({'allergens': <String>[]}), isEmpty);
+      expect(field.values(const {}), isEmpty);
+      final line = ProductSchema.fromJson(bakery()).detailFields.last;
+      expect(line.text({'ingredients': 'Flour, sugar'}), 'Flour, sugar');
     });
   });
 

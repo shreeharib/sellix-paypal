@@ -17,7 +17,9 @@ from app.modules.agent import service as agent
 from app.modules.conversations import outbox, service
 from app.modules.conversations.service import TurnRequest
 from app.modules.escalations import service as escalations
+from app.modules.orders import service as orders
 from app.modules.orders.schemas import ExpiredOrder, PaymentResult
+from app.modules.payments import service as payments
 from app.modules.payments.service import PaymentFailed
 
 log = structlog.get_logger()
@@ -126,11 +128,7 @@ async def inform_customer(
 async def after_payment(result: PaymentResult | PaymentFailed) -> None:
     """Tell the customer (and, if needed, the merchant) what a payment event means."""
     if isinstance(result, PaymentFailed):
-        await inform_customer(
-            result.conversation_id,
-            agent.prompt("v1.note.payment_failed", number=result.number),
-            event={"event": "payment_failed", "order": f"#{result.number}"},
-        )
+        await _payment_failed(result)
         return
 
     await _order_settled(result.conversation_id)
@@ -161,6 +159,72 @@ async def after_payment(result: PaymentResult | PaymentFailed) -> None:
         )
 
 
+async def _payment_failed(result: PaymentFailed) -> None:
+    """A payment was rejected or declined. Code, not the model, answers: this is about money.
+
+    While the order may still get a new link, the customer is told how many tries are left and
+    gets a button for the new link (after the cooldown). Otherwise the order is cancelled and its
+    items released.
+    """
+    if result.conversation_id is None:
+        return
+    status = await payments.retry_status(result.order_id)
+    if status.reason == "not_payable":
+        return  # already paid, cancelled or expired: nothing to offer
+    number = f"#{result.number}"
+    async with session_scope() as session:
+        language = await service.customer_language(session, result.conversation_id)
+        if status.can_retry:
+            await service.queue_message(
+                session,
+                conversation_id=result.conversation_id,
+                text=agent.fixed_text(
+                    "payment_declined",
+                    language,
+                    number=number,
+                    attempts_left=status.attempts_left,
+                    wait=status.wait_seconds,
+                ),
+                key=f"order:{result.order_id}:declined:{status.attempts_left}",
+                details={
+                    "order_id": str(result.order_id),
+                    "kind": "payment_declined",
+                    "language": language,
+                },
+                quick_replies=(
+                    (
+                        agent.fixed_text("payment_retry_button", language),
+                        f"RETRY:{result.order_id}",
+                    ),
+                ),
+            )
+            return
+        order = await orders.get_order(session, result.order_id)
+        if order is None or order.merchant_id is None:
+            return
+        await orders.cancel_order(
+            session,
+            result.order_id,
+            merchant_id=order.merchant_id,
+            actor="system",
+            reason=f"payment failed ({status.reason})",
+        )
+        await service.queue_message(
+            session,
+            conversation_id=result.conversation_id,
+            text=agent.fixed_text("payment_gave_up", language, number=number),
+            key=f"order:{result.order_id}:gave_up",
+            details={
+                "order_id": str(result.order_id),
+                "kind": "payment_gave_up",
+                "language": language,
+            },
+        )
+        state = await service.load_state(session, result.conversation_id, lock=True)
+        if state is not None and state.stage == "payment_pending":
+            await service.set_stage(session, result.conversation_id, "browsing")
+
+
 async def after_expiry(order: ExpiredOrder) -> None:
     await _order_settled(order.conversation_id)
     await inform_customer(
@@ -168,6 +232,45 @@ async def after_expiry(order: ExpiredOrder) -> None:
         agent.prompt("v1.note.hold_expired", number=order.number),
         event={"event": "hold_expired", "order": f"#{order.number}"},
     )
+
+
+# The merchant moved an order on (Orders screen): what the customer is told. Code, not the model:
+# it is a plain fact about their order. Other statuses (accepted, picked up) send nothing.
+_STATUS_TEMPLATES = {
+    ("ready", "pickup"): "order_ready_pickup",
+    ("ready", "delivery"): "order_packed",
+    ("ready", "local_delivery"): "order_packed",
+    ("ready", "courier"): "order_packed",
+    ("delivered", "delivery"): "order_delivered",
+    ("delivered", "local_delivery"): "order_delivered",
+    ("delivered", "courier"): "order_delivered",
+    ("completed", "digital"): "order_sent",
+}
+
+
+async def after_status_change(order_id: uuid.UUID, merchant_id: uuid.UUID) -> None:
+    """Tell the customer, in their chat, that the merchant marked their order ready / delivered.
+
+    Each status is sent at most once per order (the outbox key), so an undo and redo, or a
+    retried request, doesn't message the customer twice.
+    """
+    async with session_scope() as session:
+        order = await orders.get_order(session, order_id, merchant_id)
+        if order is None or order.conversation_id is None:
+            return
+        template = _STATUS_TEMPLATES.get((order.status, order.fulfilment_method or "pickup"))
+        if template is None:
+            return
+        conversation_id = order.conversation_id
+        language = await service.customer_language(session, conversation_id)
+        await service.queue_message(
+            session,
+            conversation_id=conversation_id,
+            text=agent.fixed_text(template, language, number=f"#{order.number}"),
+            key=f"order:{order_id}:status:{order.status}",
+            details={"order_id": str(order_id), "kind": template, "language": language},
+        )
+    await schedule_delivery(conversation_id, datetime.now(UTC))
 
 
 async def _order_settled(conversation_id: uuid.UUID | None) -> None:

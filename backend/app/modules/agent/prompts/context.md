@@ -1,6 +1,6 @@
 ---
 id: context
-version: 4
+version: 5
 description: "The per-turn context block: shop, time, menu, stage, draft, quote, open questions."
 ---
 # The shop: {{ shop_name }}
@@ -37,6 +37,8 @@ Stage: {{ stage }}
 {% if draft_lines %}Order draft{% if draft_date %} for {{ draft_date }}{% endif %}: {{ draft_lines | join(", ") }}{% if fulfilment %}; {{ fulfilment }}{% endif %}{% if needed_by %}; needed by {{ needed_by }}{% endif %}
 {% endif -%}
 {% if quote_id %}Open quote: {{ quote_id }}, total [[quote_total]], card {% if quote_shown %}delivered{% else %}not delivered yet{% endif %}
+{% endif -%}
+{% if open_orders %}Orders waiting for payment: {% for number in open_orders %}#{{ number }}{% if not loop.last %}, {% endif %}{% endfor %}. To cancel one, or to send its payment link again, call the tool with that number (for example 1003).
 {% endif -%}
 {% if open_questions %}Waiting on the shop owner for: {{ open_questions | join("; ") }}. Don't answer these yourself.
 {% endif -%}

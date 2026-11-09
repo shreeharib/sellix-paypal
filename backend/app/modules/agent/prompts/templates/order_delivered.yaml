@@ -1,0 +1,14 @@
+id: order_delivered
+version: 1
+description: "Sent by code when the merchant marks an order delivered (Orders > Mark as delivered)."
+texts:
+  en: |-
+    Order {{ number }} has been delivered. Thank you for ordering with us!
+  ta-en: |-
+    Order {{ number }} deliver aayiduchu. Order pannadhukku nandri!
+  ta: |-
+    ஆர்டர் {{ number }} டெலிவரி செய்யப்பட்டது. ஆர்டர் செய்ததற்கு நன்றி!
+  hi-en: |-
+    Order {{ number }} deliver ho gaya hai. Order karne ke liye shukriya!
+  hi: |-
+    ऑर्डर {{ number }} डिलीवर हो गया है। ऑर्डर करने के लिए शुक्रिया!

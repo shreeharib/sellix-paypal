@@ -45,6 +45,27 @@ final shopAnswersProvider = FutureProvider.autoDispose<OnboardingAnswers?>((ref)
   }
 });
 
+/// What the add-product form asks for this shop type (`GET /v1/product-schema`). When the call fails
+/// (offline, a backend without it, an answer with no stock modes) it is the built-in schema, which
+/// is what the app did before, so the form always works.
+final productSchemaProvider = FutureProvider.autoDispose<ProductSchema>((ref) async {
+  try {
+    final schema = await ref.watch(sellixApiProvider).productSchema();
+    if (schema.stockModes.isNotEmpty) return schema;
+  } on Object catch (_) {
+    // Falls through to the built-in schema.
+  }
+  return fallbackSchema((await ref.watch(shopAnswersProvider.future))?.category);
+});
+
+/// [productSchemaProvider] as a plain value for wording and detail fields: the built-in schema for
+/// the shop's category until the real one arrives. Watch it where the wording is drawn, so it loads.
+final shopSchemaProvider = Provider.autoDispose<ProductSchema>(
+  (ref) =>
+      ref.watch(productSchemaProvider).value ??
+      fallbackSchema(ref.watch(shopAnswersProvider).value?.category),
+);
+
 final carriedLogProvider = Provider<CarriedLog>(
   (ref) => CarriedLog(ref.watch(sharedPreferencesProvider)),
 );

@@ -67,6 +67,8 @@ void main() {
     'PATCH /v1/products/p1': (a) => a.updateProduct('p1', const ProductUpdate(name: 'x')),
     'POST /v1/products/p1/aliases': (a) => a.addProductAlias('p1', 'x'),
     'DELETE /v1/products/p1/aliases/a1': (a) => a.deleteProductAlias('p1', 'a1'),
+    'GET /v1/product-schema': (a) => a.productSchema(),
+    'GET /v1/shop-types': (a) => a.shopTypes(),
     'GET /v1/orders': (a) => a.orders(),
     'POST /v1/orders/o1/refund': (a) => a.refundOrder('o1'),
     'POST /v1/orders/o1/invoice': (a) => a.createInvoice('o1'),
@@ -116,6 +118,25 @@ void main() {
     adapter.responseBody = '[]';
     await api.orders(status: ['paid', 'ready'], paymentStatus: ['paid'], limit: 20);
     expect(adapter.last!.uri.query, 'status=paid&status=ready&payment_status=paid&limit=20');
+  });
+
+  test('a 409 on the payment link keeps the server’s detail as the message', () async {
+    adapter
+      ..statusCode = 409
+      ..responseBody = '{"detail": "Wait 40 seconds before a new payment link."}';
+    await expectLater(
+      api.paymentLink('o1'),
+      throwsA(
+        isA<ApiException>()
+            .having((e) => e.message, 'message', 'Wait 40 seconds before a new payment link.')
+            .having((e) => e.statusCode, 'statusCode', 409),
+      ),
+    );
+    adapter.responseBody = '{"detail": "This order has used all its payment attempts."}';
+    await expectLater(
+      api.paymentLink('o1'),
+      throwsA(isA<ApiException>().having((e) => e.message, 'message', 'This order has used all its payment attempts.')),
+    );
   });
 
   test('orders leaves out empty filters', () async {
@@ -232,6 +253,7 @@ bool _returnsList(String route) => const {
   'GET /v1/stock/upcoming',
   'PUT /v1/stock/upcoming',
   'GET /v1/products',
+  'GET /v1/shop-types',
   'GET /v1/orders',
   'GET /v1/orders/o1/timeline',
   'GET /v1/questions',

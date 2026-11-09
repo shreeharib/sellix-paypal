@@ -239,3 +239,10 @@ docker stop sellix-tunnel sellix-postgres    # tunnel and database (data is kept
 | `curl: (35) ... revocation` | Company proxy: add `--ssl-no-revoke`. |
 | Database tests "skipped" | Postgres isn't running: `just db-up`. |
 | `Unable to determine engine version` (Flutter) | You ran `flutter.bat`; use `D:\Android\flutter-direct.cmd`. |
+
+
+
+To run it
+Restart the API. Use D:\Tools\sellix\restart-sellix-api.cmd for real PayPal, or D:\Tools\sellix\restart-sellix-api.cmd simulator for the Accept/Reject page.
+Restart the web app with D:\Tools\sellix\run-sellix-web.cmd, so it picks up the new screens.
+Re-save products you made earlier, such as hot chocolate, to give them a shelf life.

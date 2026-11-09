@@ -17,12 +17,12 @@ String itemName(String product, String? variant) {
 
 bool isCounted(String mode) => mode == StockMode.daily || mode == StockMode.inventory;
 
-// BACKEND GAP: a null shelf_life_days means "keep" on PUT /v1/today/stock, so going from 3 days to
-// Doesn't expire leaves the old number stored. Inventory always reads as Doesn't expire here.
+// BACKEND GAP: a null shelf_life_days means "keep" on PUT /v1/today/stock, so changing a 3-day product
+// to one kept until sold leaves the old number stored. Inventory always reads as kept until sold here.
 String shelfLabel(String mode, int? days) {
   if (mode == StockMode.madeToOrder) return 'Made to order';
   if (mode == StockMode.unlimited) return 'Always available';
-  if (mode == StockMode.inventory) return 'Doesn’t expire';
+  if (mode == StockMode.inventory) return 'Kept until sold';
   if (days == null || days <= 1) return 'Same day';
   return 'Good for $days days';
 }
@@ -31,22 +31,13 @@ String noCountWhy(String mode) => mode == StockMode.madeToOrder
     ? 'No count. sellix checks each order with you.'
     : 'No count. sellix can always sell it.';
 
-/// One answer to "How long can you sell it?". [days] is null while the custom field isn't a number.
+/// One answer to "How do you stock this?" and, for fresh batches, "How long can you sell it?".
+/// [days] is null while the custom field isn't a number.
 class ShelfChoice {
   const ShelfChoice(this.c, [this.days = 5]);
 
   final String c;
   final int? days;
-
-  static const quick = [
-    ('same', 'Same day'),
-    ('3', '3 days'),
-    ('7', '1 week'),
-    ('30', '1 month'),
-    ('none', 'Doesn’t expire'),
-    ('custom', 'Custom'),
-  ];
-  static const noCount = [('mto', 'Made to order'), ('always', 'Always available')];
 
   factory ShelfChoice.of(String mode, int? days) {
     if (mode == StockMode.madeToOrder) return const ShelfChoice('mto');
@@ -74,7 +65,8 @@ class ShelfChoice {
     _ => int.parse(c),
   };
 
-  bool sameAs(ShelfChoice other) => c == other.c && (c != 'custom' || days == other.days);
+  /// The same stock type and shelf life, however it was chosen: "Custom, 7" is "1 week".
+  bool sameAs(ShelfChoice other) => stockMode == other.stockMode && shelfLifeDays == other.shelfLifeDays;
 
   String get line {
     final n = c == 'custom' ? days : int.tryParse(c);
@@ -212,7 +204,7 @@ class StockView {
           variant: row.variant,
           priceMinor: row.priceMinor,
           currency: row.currency,
-          stockMode: row.stockMode,
+          stockMode: row.stockMode ?? StockMode.daily,
           shelfLifeDays: row.shelfLifeDays,
           row: row,
         ),
@@ -240,8 +232,9 @@ class StockView {
   String get currency => items.isEmpty ? 'INR' : items.first.currency;
 }
 
-/// Wording that depends on the kind of shop. Food shops answer allergy questions from `allergens`,
-/// the one field here the assistant reads.
+/// The built-in wording by shop category: the source of [fallbackSchema], used when the backend's
+/// product schema can't be had. Food shops answer allergy questions from `allergens`, the one field
+/// here the assistant reads.
 class ShopTerms {
   const ShopTerms._({
     required this.stockQuestion,
@@ -283,19 +276,92 @@ class ShopTerms {
       attrLabel: 'Details',
       attrKey: 'details',
       attrOptions: ['Size', 'Colour', 'Material', 'Care', 'Warranty'],
-      // BACKEND GAP: get_product_details reads only ingredients, allergens and dietary from
-      // attributes, so the assistant can't answer from `details` yet.
-      attrNote: 'Saved with the product. sellix can’t answer from these yet, so it asks you.',
+      attrNote: 'I use these to answer customers who ask. If it is not here, I ask you.',
       aliasExample: 'A short name customers use',
       exampleProduct: 'Your product name',
     );
   }
+}
 
-  List<String> read(Map<String, dynamic> attributes) => switch (attributes[attrKey]) {
-    final List<dynamic> list => [for (final v in list) '$v'],
-    final String text when text.trim().isNotEmpty => text.split(',').map((s) => s.trim()).toList(),
-    _ => const [],
-  };
+/// Every stock mode in plain words, as the backend's schema words them. The fallback schema offers
+/// all four; a product whose mode its shop type doesn't list still shows its own in the form.
+const builtInStockModes = [
+  StockModeOption(
+    id: StockMode.daily,
+    label: 'I make fresh batches',
+    hint: 'You set a count every day.',
+    asksShelfLife: true,
+  ),
+  StockModeOption(
+    id: StockMode.inventory,
+    label: 'I keep stock until it sells',
+    hint: 'Count it once, add more when you restock.',
+  ),
+  StockModeOption(id: StockMode.madeToOrder, label: 'I make it when ordered', hint: 'No count needed.'),
+  StockModeOption(id: StockMode.unlimited, label: 'Always available', hint: 'No count needed.'),
+];
+
+/// The modes the form offers: the shop type's, plus [keepMode] (a product's current mode) when its
+/// shop type doesn't list it, so editing a product never shows or changes it to another.
+List<StockModeOption> stockModesFor(ProductSchema schema, String? keepMode) {
+  final modes = [...schema.stockModes];
+  if (keepMode != null && !modes.any((m) => m.id == keepMode)) {
+    final extra = builtInStockModes.where((m) => m.id == keepMode).firstOrNull;
+    if (extra != null) modes.add(extra);
+  }
+  return modes;
+}
+
+const builtInShelfLife = [
+  ShelfLifeOption(id: 'same', label: 'Same day', days: 1),
+  ShelfLifeOption(id: '3', label: '3 days', days: 3),
+  ShelfLifeOption(id: '7', label: '1 week', days: 7),
+  ShelfLifeOption(id: '30', label: '1 month', days: 30),
+];
+
+/// Where a new product starts: the shop type's default mode, and for fresh batches the shop's
+/// [usualDaily] shelf life, else the first shelf-life answer.
+ShelfChoice startChoiceFor(ProductSchema schema, [ShelfChoice? usualDaily]) {
+  final mode = schema.defaultMode;
+  if (mode != StockMode.daily) return ShelfChoice.of(mode, null);
+  return usualDaily ?? ShelfChoice.of(StockMode.daily, shelfLifeFor(schema).first.days);
+}
+
+/// The schema's quick shelf-life answers; the built-in ones when it lists none.
+List<ShelfLifeOption> shelfLifeFor(ProductSchema schema) {
+  final listed = [
+    for (final o in schema.shelfLifeOptions)
+      if (o.days >= 1 && o.days <= 3650) o,
+  ];
+  return listed.isEmpty ? builtInShelfLife : listed;
+}
+
+/// What the app did before the backend served a schema: every stock mode, today's shelf-life
+/// answers, and the wording and detail chips of [ShopTerms]. It is what the form uses when
+/// `GET /v1/product-schema` fails (offline, or a backend without it), so the form never breaks.
+ProductSchema fallbackSchema(String? category, [Map<String, dynamic> attributes = const {}]) {
+  final terms = ShopTerms.of(category, attributes);
+  return ProductSchema(
+    shopType: 'other',
+    label: '',
+    defaultStockMode: StockMode.inventory,
+    stockModes: builtInStockModes,
+    shelfLifeOptions: builtInShelfLife,
+    detailFields: [
+      DetailField(
+        key: terms.attrKey,
+        label: terms.attrLabel,
+        type: DetailFieldType.multiChoice,
+        options: terms.attrOptions,
+        note: terms.attrNote,
+      ),
+    ],
+    vocabulary: Vocabulary(
+      stockQuestion: terms.stockQuestion,
+      exampleProduct: terms.exampleProduct,
+      aliasExample: terms.aliasExample,
+    ),
+  );
 }
 
 /// Finds "10 blue kurti" in free text, against the shop's own names and aliases.

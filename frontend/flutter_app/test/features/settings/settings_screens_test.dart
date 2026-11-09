@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sellix_merchant/core/api/api_exception.dart';
 import 'package:sellix_merchant/core/api/models.dart';
 import 'package:sellix_merchant/core/auth/auth_controller.dart';
+import 'package:sellix_merchant/core/providers.dart';
 import 'package:sellix_merchant/design/design.dart';
 import 'package:sellix_merchant/features/settings/automation_screen.dart';
 import 'package:sellix_merchant/features/settings/automations_screen.dart';
@@ -12,7 +14,9 @@ import 'package:sellix_merchant/features/settings/newauto_screen.dart';
 import 'package:sellix_merchant/features/settings/payments_screen.dart';
 import 'package:sellix_merchant/features/settings/profile_screen.dart';
 import 'package:sellix_merchant/features/settings/rules_screen.dart';
+import 'package:sellix_merchant/features/settings/settings_providers.dart';
 import 'package:sellix_merchant/features/settings/shopprofile_screen.dart';
+import 'package:sellix_merchant/features/stock/stock_providers.dart';
 
 import '../../support/fake_sellix_api.dart';
 import 'settings_harness.dart';
@@ -22,6 +26,16 @@ const _failure = ApiException('Server is down');
 /// Records what each save asked for.
 class _SpyApi extends FakeSellixApi {
   final List<bool> completeFlags = [];
+  bool failShopTypes = false;
+
+  @override
+  Future<List<ShopTypeChoice>> shopTypes() async {
+    if (failShopTypes) {
+      calls.add('shopTypes');
+      throw const ApiException('Not found', statusCode: 404);
+    }
+    return super.shopTypes();
+  }
 
   @override
   Future<Onboarding> saveOnboarding({
@@ -139,18 +153,107 @@ void main() {
       await drain(tester);
     });
 
-    testWidgets('shop type saves the category only, with Undo', (tester) async {
+    testWidgets('shop type saves the backend id and the category, keeps the rest, with Undo', (tester) async {
       final fake = _SpyApi();
       await pumpScreen(tester, const ProfileScreen(), fake);
       await settle(tester);
       await tapText(tester, 'Test category');
-      await tapText(tester, 'Clothing');
-      expect(fake.answers.category, 'Clothing');
+      // The backend's types, not the app's own.
+      expect(fake.calls, contains('shopTypes'));
+      for (final label in ['Bakery & sweets', 'Jewellery & accessories', 'Beauty & makeup', 'Plants & garden']) {
+        expect(find.text(label), findsOneWidget, reason: label);
+      }
+      expect(find.text('Clothing'), findsNothing);
+      await tapText(tester, 'Dress & clothing shop');
+      expect(fake.answers.shopType, 'dress_shop');
+      expect(fake.answers.category, 'Dress & clothing shop');
       expect(fake.answers.city, 'Test City');
       expect(fake.completeFlags, [false]);
+      expect(find.text('Shop type is now Dress & clothing shop.'), findsOneWidget);
       await tapText(tester, 'Undo');
       expect(fake.answers.category, 'Test category');
+      expect(fake.answers.shopType, isNull);
       await drain(tester);
+    });
+
+    testWidgets('the list is the backend’s, whatever it holds', (tester) async {
+      final fake = _SpyApi()
+        ..shopTypeList = const [
+          ShopTypeChoice(id: 'cobbler', label: 'Cobbler & shoe repair'),
+          ShopTypeChoice(id: 'other', label: 'Other kind of shop'),
+        ];
+      await pumpScreen(tester, const ProfileScreen(), fake);
+      await settle(tester);
+      await tapText(tester, 'Test category');
+      expect(find.text('Cobbler & shoe repair'), findsOneWidget);
+      expect(find.text('Bakery & sweets'), findsNothing);
+      await tapText(tester, 'Cobbler & shoe repair');
+      expect(fake.answers.shopType, 'cobbler');
+      expect(fake.answers.category, 'Cobbler & shoe repair');
+      await drain(tester);
+    });
+
+    testWidgets('if the list can’t be had, the built-in seven are offered', (tester) async {
+      final fake = _SpyApi()..failShopTypes = true;
+      await pumpScreen(tester, const ProfileScreen(), fake);
+      await settle(tester);
+      await tapText(tester, 'Test category');
+      expect(fake.calls, contains('shopTypes'));
+      for (final t in builtInShopTypes) {
+        expect(find.text(t.label), findsOneWidget, reason: t.label);
+      }
+      expect(builtInShopTypes.map((t) => t.id), [
+        'bakery',
+        'jewellery',
+        'beauty',
+        'plants',
+        'handmade_gifts',
+        'dress_shop',
+        'other',
+      ]);
+      await tapText(tester, 'Plants & garden');
+      expect(fake.answers.shopType, 'plants');
+      await drain(tester);
+    });
+
+    testWidgets('Other keeps what the merchant typed as the category', (tester) async {
+      final fake = _SpyApi();
+      await pumpScreen(tester, const ProfileScreen(), fake);
+      await settle(tester);
+      await tapText(tester, 'Test category');
+      await tapText(tester, 'Other kind of shop');
+      await tapText(tester, 'Save shop type');
+      expect(find.text('Type what you sell first'), findsOneWidget);
+      await tester.enterText(find.widgetWithText(SxField, 'What do you sell?').last, 'Kites');
+      await tapText(tester, 'Save shop type');
+      expect(fake.answers.shopType, 'other');
+      expect(fake.answers.category, 'Kites');
+      // The row shows what was typed, not the type's generic label.
+      expect(find.text('Kites'), findsWidgets);
+      await drain(tester);
+    });
+
+    testWidgets('a saved shop type shows by its label, and is the one ticked', (tester) async {
+      final fake = _SpyApi()..answers = const OnboardingAnswers(category: 'Dress & clothing shop', shopType: 'dress_shop', city: 'Test City');
+      await pumpScreen(tester, const ProfileScreen(), fake);
+      await settle(tester);
+      await tapText(tester, 'Dress & clothing shop');
+      final tick = tester.widget<SxChoiceCard>(find.widgetWithText(SxChoiceCard, 'Dress & clothing shop'));
+      expect(tick.selected, isTrue);
+      expect(tester.widget<SxChoiceCard>(find.widgetWithText(SxChoiceCard, 'Bakery & sweets')).selected, isFalse);
+      await drain(tester);
+    });
+
+    test('changing the type makes the add-product form follow', () async {
+      final fake = _SpyApi();
+      final container = ProviderContainer(overrides: [sellixApiProvider.overrideWithValue(fake)]);
+      addTearDown(container.dispose);
+      container.listen(productSchemaProvider, (_, _) {});
+      expect((await container.read(productSchemaProvider.future)).shopType, 'bakery');
+      await saveAnswers(container, (a) => a.copyWith(shopType: 'dress_shop', category: 'Dress & clothing shop'));
+      final schema = await container.read(productSchemaProvider.future);
+      expect(schema.shopType, 'dress_shop');
+      expect(schema.stockModes.map((m) => m.id), isNot(contains(StockMode.daily)));
     });
 
     testWidgets('morning reminder is local and says so', (tester) async {
@@ -192,6 +295,28 @@ void main() {
       expect(fake.onboardingCompleted, isTrue);
       expect(find.text('route:/profile'), findsOneWidget);
       expect(find.text('Payment settings saved.'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('payments and hours keep the shop type', (tester) async {
+      final fake = _SpyApi();
+      fake.answers = fake.answers.copyWith(shopType: 'dress_shop');
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      await tester.enterText(find.byType(TextField), 'shop@okbank');
+      await tester.pump();
+      await tapText(tester, 'Save');
+      await settle(tester, 10);
+      expect(fake.answers.upiId, 'shop@okbank');
+      expect(fake.answers.shopType, 'dress_shop');
+      await drain(tester);
+
+      await pumpScreen(tester, const HoursScreen(), fake);
+      await settle(tester);
+      await tapText(tester, 'Save');
+      await settle(tester, 10);
+      expect(fake.answers.hours, isNotNull);
+      expect(fake.answers.shopType, 'dress_shop');
       await drain(tester);
     });
 
@@ -385,9 +510,13 @@ void main() {
 
     testWidgets('changes tone and shop name, refusing an empty name', (tester) async {
       final fake = _SpyApi();
+      // Saved by an older app: cleared on the next save, never shown.
+      fake.answers = fake.answers.copyWith(addressCustomers: 'Sir or madam', intro: 'Hi, I am Test Shop’s assistant');
       await pumpScreen(tester, const ShopProfileScreen(), fake);
       await settle(tester);
       await tapText(tester, 'How sellix talks');
+      expect(find.text('Sir or madam'), findsNothing);
+      expect(find.text('How sellix introduces itself'), findsNothing);
       await tapText(tester, 'Formal');
       await tapText(tester, 'Shop');
       await tester.enterText(find.byType(TextField).first, '  ');
@@ -401,6 +530,8 @@ void main() {
       await tapText(tester, 'Save');
       await settle(tester, 10);
       expect(fake.answers.tone, 'formal');
+      expect(fake.answers.addressCustomers, isNull);
+      expect(fake.answers.intro, isNull);
       expect(fake.merchant.name, 'New Name');
       expect(fake.answers.category, 'Test category');
       await drain(tester);

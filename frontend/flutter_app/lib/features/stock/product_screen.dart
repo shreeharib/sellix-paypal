@@ -65,12 +65,12 @@ class _Body extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final p = context.sx;
     final actions = StockActions(context);
-    final terms = ShopTerms.of(ref.watch(shopAnswersProvider).value?.category, item.attributes);
-    final details = terms.read(item.attributes);
+    final schema = ref.watch(shopSchemaProvider);
     final carried = ref.read(carriedLogProvider).read(ref.watch(todayProvider).value?.businessDate ?? DateTime(0));
     final carriedHere = carried[item.variantId] ?? 0;
     final left = item.available;
     final choice = ShelfChoice.of(item.stockMode, item.shelfLifeDays);
+    final canChangeStock = StockTypeQuestion.isNeeded(schema, choice, keepMode: item.stockMode);
     final cost = item.costPriceMinor ?? 0;
     final margin = cost > 0 && item.priceMinor > 0
         ? ((item.priceMinor - cost) * 100 + item.priceMinor ~/ 2) ~/ item.priceMinor
@@ -238,19 +238,23 @@ class _Body extends ConsumerWidget {
                 title: item.shelf,
                 subtitle: choice.line,
                 icon: TablerIcons.hourglass,
-                chevron: true,
-                onTap: () => actions.changeShelf(context, item),
+                // A shop type with one way to stock has nothing to change here.
+                chevron: canChangeStock,
+                onTap: canChangeStock ? () => actions.changeShelf(context, item) : null,
               ),
               if (margin != null)
                 SxListRow(
                   title: 'Cost ${money(cost, item.currency)} · margin $margin%',
                   icon: TablerIcons.coin_rupee,
                 ),
-              SxListRow(
-                title: terms.attrLabel,
-                subtitle: details.isEmpty ? 'Not added. sellix asks you when a customer asks.' : details.join(', '),
-                icon: TablerIcons.list_details,
-              ),
+              for (final field in schema.detailFields)
+                SxListRow(
+                  title: field.label,
+                  subtitle: field.text(item.attributes).isEmpty
+                      ? 'Not added. sellix asks you when a customer asks.'
+                      : field.text(item.attributes),
+                  icon: TablerIcons.list_details,
+                ),
             ],
           ),
         ),

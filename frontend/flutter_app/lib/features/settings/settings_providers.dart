@@ -10,6 +10,7 @@ import '../../core/api/models.dart';
 import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../design/design.dart';
+import '../stock/stock_providers.dart';
 
 /// The signed-in merchant and their channels.
 final meProvider = FutureProvider.autoDispose<Me>((ref) => ref.watch(sellixApiProvider).me());
@@ -23,6 +24,29 @@ final onboardingProvider = FutureProvider.autoDispose<Onboarding>(
 final shopProfileProvider = FutureProvider.autoDispose<ShopProfile?>(
   (ref) => ref.watch(sellixApiProvider).shopProfile(),
 );
+
+/// The seven shop types the backend serves, for when `GET /v1/shop-types` fails (offline, or a
+/// backend without it). The ids are what `answers.shop_type` takes.
+const builtInShopTypes = [
+  ShopTypeChoice(id: 'bakery', label: 'Bakery & sweets'),
+  ShopTypeChoice(id: 'jewellery', label: 'Jewellery & accessories'),
+  ShopTypeChoice(id: 'beauty', label: 'Beauty & makeup'),
+  ShopTypeChoice(id: 'plants', label: 'Plants & garden'),
+  ShopTypeChoice(id: 'handmade_gifts', label: 'Handmade & custom gifts'),
+  ShopTypeChoice(id: 'dress_shop', label: 'Dress & clothing shop'),
+  ShopTypeChoice(id: 'other', label: 'Other kind of shop'),
+];
+
+/// The shop types a shop can pick: the backend's list, or [builtInShopTypes] if it can't be had.
+final shopTypesProvider = FutureProvider.autoDispose<List<ShopTypeChoice>>((ref) async {
+  try {
+    final types = await ref.watch(sellixApiProvider).shopTypes();
+    if (types.isNotEmpty) return types;
+  } on Object catch (_) {
+    // Falls through to the built-in list.
+  }
+  return builtInShopTypes;
+});
 
 /// The most an answer field holds on the backend (`modules/shop_profile/schemas.py`).
 const answerShortLimit = 200;
@@ -50,7 +74,10 @@ Future<Onboarding> saveAnswers(
   container
     ..invalidate(onboardingProvider)
     ..invalidate(shopProfileProvider)
-    ..invalidate(meProvider);
+    ..invalidate(meProvider)
+    // The shop type and category decide the add-product form and the wording of the stock screens.
+    ..invalidate(productSchemaProvider)
+    ..invalidate(shopAnswersProvider);
   return saved;
 }
 

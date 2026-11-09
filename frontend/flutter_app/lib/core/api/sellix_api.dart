@@ -65,6 +65,13 @@ abstract interface class SellixApi {
   Future<ProductAliasDetail> addProductAlias(String productId, String aliasText);
   Future<void> deleteProductAlias(String productId, String aliasId);
 
+  /// What the add-product form asks for this shop type: stock modes, shelf-life answers, detail
+  /// fields and wording. A backend without the endpoint answers 404; the app then uses its own.
+  Future<ProductSchema> productSchema();
+
+  /// Every shop type a shop can pick, for the chooser in Settings.
+  Future<List<ShopTypeChoice>> shopTypes();
+
   // Orders
   /// Filters are ORed within a list. [paymentStatus] accepts "pending", "paid",
   /// "partially_refunded", "refunded" and "failed" only: the backend refuses "unpaid", so filter
@@ -319,6 +326,14 @@ class HttpSellixApi implements SellixApi {
   Future<void> deleteProductAlias(String productId, String aliasId) async {
     await _request<Object?>('DELETE', '/v1/products/$productId/aliases/$aliasId');
   }
+
+  @override
+  Future<ProductSchema> productSchema() async =>
+      ProductSchema.fromJson(await _object('GET', '/v1/product-schema'));
+
+  @override
+  Future<List<ShopTypeChoice>> shopTypes() async =>
+      _parseList(await _array('GET', '/v1/shop-types'), ShopTypeChoice.fromJson);
 
   // Orders
 

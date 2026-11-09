@@ -98,12 +98,12 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
   }
 
   Future<void> _typeIt(StockView view) async {
-    final terms = ShopTerms.of(ref.read(shopAnswersProvider).value?.category);
+    final vocabulary = ref.read(shopSchemaProvider).vocabulary;
     final typed = await showSxSheet<_Typed>(
       context,
       title: 'Type today’s stock',
       subtitle: 'One line is fine. Write the count, then the name.',
-      builder: (_) => _TypeSheet(view: view, example: terms.exampleProduct),
+      builder: (_) => _TypeSheet(view: view, example: vocabulary.exampleProduct),
     );
     if (typed != null && mounted) _applyTyped(view, typed);
   }
@@ -134,10 +134,7 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
       ),
     );
     if (picked == null || !mounted) return;
-    if (picked == '+new') {
-      await context.push(Routes.addproduct);
-      return;
-    }
+    if (picked == '+new') return _newProduct();
     final item = view.byVariant(picked);
     if (item == null) return;
     final least = _minNew(item, carried[picked] ?? 0);
@@ -146,6 +143,15 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
       _ids.add(picked);
       _counts[picked] = least > 1 ? least : 1;
     });
+  }
+
+  /// The add-product screen, then a fresh look at the catalogue and today: a product made over there
+  /// is on this list when you come back, as `_sync` adopts what it hasn't seen.
+  Future<void> _newProduct() async {
+    await context.push(Routes.addproduct);
+    if (!mounted) return;
+    ref.invalidate(todayProvider);
+    ref.invalidate(catalogProvider);
   }
 
   List<StockLine> _lines(StockView view) {
@@ -262,7 +268,7 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
           ? SxBottomCta(
               label: 'Add product',
               icon: TablerIcons.plus,
-              onTap: () => context.push(Routes.addproduct),
+              onTap: _newProduct,
             )
           : SxBottomCta(
               label: _done ? 'You are live' : (_saving ? 'Going live…' : 'Confirm and go live'),
@@ -285,7 +291,7 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
               empty: const SxEmptyState(
                 icon: TablerIcons.package,
                 title: 'Add your first product',
-                body: 'A name, a price and how long you can sell it. You need one product to go live.',
+                body: 'A name, a price and how you stock it. You need one product to go live.',
               ),
               builder: (context, view) {
                 _sync(view);
@@ -300,8 +306,7 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
 
   Widget _body(StockView view) {
     final p = context.sx;
-    final answers = ref.watch(shopAnswersProvider).value;
-    final terms = ShopTerms.of(answers?.category);
+    final vocabulary = ref.watch(shopSchemaProvider).vocabulary;
     final carried = _carried(view);
     final hasTracked = view.tracked.isNotEmpty;
     final hint = _ids.take(2).map((id) => '5 ${_item(view, id)?.label.toLowerCase()}').join(', ');
@@ -323,7 +328,7 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(terms.stockQuestion, style: SxText.titleL.copyWith(color: p.textPrimary)),
+              Text(vocabulary.stockQuestion, style: SxText.titleL.copyWith(color: p.textPrimary)),
               const SizedBox(height: SxSpace.s8),
               Text(
                 'Type a count and a name. sellix makes the list. You fix the counts.',
@@ -504,6 +509,27 @@ class _TypeSheetState extends ConsumerState<_TypeSheet> {
     return null;
   }
 
+  /// Names typed as "3 gift box" that the catalogue doesn't have: a count and a name, no price.
+  List<String> _unpriced(String text) {
+    final names = <String>[];
+    for (final part in text.split(RegExp(r'[\n,;]'))) {
+      final line = part.trim();
+      if (line.isEmpty || matchStockText(line, widget.view.tracked).isNotEmpty) continue;
+      final name = RegExp(r'^\d+\s*(?:x\s*)?(\D.*)$', caseSensitive: false).firstMatch(line)?[1]?.trim();
+      if (name == null || !RegExp(r'\p{L}', unicode: true).hasMatch(name)) continue;
+      names.add('${name[0].toUpperCase()}${name.substring(1)}');
+    }
+    return names;
+  }
+
+  String _priceQuestion(List<String> names) {
+    final example = '5 ${names.first.toLowerCase()} 450';
+    return names.length == 1
+        ? 'What does ${names.first} cost? Add the price after the name, like “$example”.'
+        : 'What do ${names.take(2).join(' and ')}${names.length > 2 ? ' and ${names.length - 2} more' : ''} cost? '
+              'Add the price after each name, like “$example”.';
+  }
+
   /// `parse-stock-text` first, since it can also read new items with their prices. It refuses a line
   /// with no price, so a plain "5 kurti" falls back to matching the shop's own names here.
   Future<void> _go() async {
@@ -533,8 +559,20 @@ class _TypeSheetState extends ConsumerState<_TypeSheet> {
           fresh.add(line);
         }
       }
-    } on ApiException {
+    } on ApiException catch (error) {
       found.addAll(matchStockText(text, widget.view.tracked));
+      // The parser refuses a line with no price (422). A product that isn't in the catalogue can't
+      // be added without one, so ask for it, rather than leave it out or show the refusal.
+      final unpriced = error.statusCode == 422 ? _unpriced(text) : const <String>[];
+      if (unpriced.isNotEmpty) {
+        HapticFeedback.heavyImpact();
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _error = _priceQuestion(unpriced);
+        });
+        return;
+      }
     }
     if (!mounted) return;
     if (found.isEmpty && fresh.isEmpty) {

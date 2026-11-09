@@ -109,6 +109,31 @@ void main() {
       await finishSnack(tester);
     });
 
+    testWidgets('a cooldown shows the server’s own words, and Try again works after it', (tester) async {
+      final api = _LinkRefusedApi('Wait 40 seconds before a new payment link.')
+        ..answers = const OnboardingAnswers(upiId: 'shop@okbank');
+      await pumpScreen(tester, api, const OrderScreen(FakeIds.orderUnpaid));
+      await tester.tap(find.text('Get payment link'));
+      await tester.pumpAndSettle();
+      expect(find.text('Wait 40 seconds before a new payment link.'), findsOneWidget);
+      expect(find.textContaining('Something went wrong'), findsNothing);
+      expect(find.textContaining('upi://pay'), findsNothing);
+      api.refusal = null;
+      await tester.tap(find.text('Try again'));
+      await tester.pumpAndSettle();
+      expect(find.text('Wait 40 seconds before a new payment link.'), findsNothing);
+      expect(find.textContaining('upi://pay'), findsOneWidget);
+    });
+
+    testWidgets('running out of attempts is said as the server says it', (tester) async {
+      final api = _LinkRefusedApi('This order has used all its payment attempts.');
+      await pumpScreen(tester, api, const OrderScreen(FakeIds.orderUnpaid));
+      await tester.tap(find.text('Get payment link'));
+      await tester.pumpAndSettle();
+      expect(find.text('This order has used all its payment attempts.'), findsOneWidget);
+      expect(find.textContaining('Something went wrong'), findsNothing);
+    });
+
     testWidgets('hides a UPI link when the shop has no UPI ID', (tester) async {
       final api = FakeSellixApi()..answers = const OnboardingAnswers();
       await pumpScreen(tester, api, const OrderScreen(FakeIds.orderUnpaid));
@@ -294,6 +319,23 @@ void main() {
     expect(text, contains('No money moved'));
     expect(text, isNot(contains('123e4567')));
   });
+}
+
+/// The payment link route answering 409 with a reason, as the backend does for a cooldown.
+class _LinkRefusedApi extends FakeSellixApi {
+  _LinkRefusedApi(this.refusal);
+
+  String? refusal;
+
+  @override
+  Future<PaymentLinkResponse> paymentLink(String orderId) {
+    final reason = refusal;
+    if (reason != null) {
+      calls.add('paymentLink');
+      throw ApiException(reason, statusCode: 409);
+    }
+    return super.paymentLink(orderId);
+  }
 }
 
 class _FailingRefundApi extends FakeSellixApi {

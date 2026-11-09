@@ -184,6 +184,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   Widget _body(BuildContext context, Me me) {
     final p = context.sx;
     final onboarding = ref.watch(onboardingProvider).value;
+    final shopTypes = ref.watch(shopTypesProvider).value ?? builtInShopTypes;
     final profile = ref.watch(shopProfileProvider);
     final automations = ref.watch(automationsProvider).value;
     final orders = ref.watch(ordersProvider).value;
@@ -245,21 +246,21 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   const SizedBox(height: SxSpace.s12),
                   Divider(height: 1, thickness: 1, color: p.line),
                   SxPressable(
-                    onTap: onboarding == null ? null : () => changeShopType(context, onboarding.answers.category),
-                    semanticLabel: 'Shop type: ${categoryLabel(onboarding?.answers.category)}. Change it',
+                    onTap: onboarding == null ? null : () => changeShopType(context, onboarding.answers),
+                    semanticLabel: 'Shop type: ${shopTypeLabel(onboarding?.answers, shopTypes)}. Change it',
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: SxSpace.s12),
                       child: Row(
                         spacing: SxSpace.s12,
                         children: [
-                          SxIconTile(icon: categoryOf(onboarding?.answers.category).icon, size: 36),
+                          SxIconTile(icon: shopIconOf(onboarding?.answers), size: 36),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text('Shop type', style: SxText.caption.copyWith(color: p.textSecondary)),
                                 Text(
-                                  onboarding == null ? ' ' : categoryLabel(onboarding.answers.category),
+                                  onboarding == null ? ' ' : shopTypeLabel(onboarding.answers, shopTypes),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: SxText.bodyStrong.copyWith(color: p.textPrimary),

@@ -45,23 +45,33 @@ class SxStepper extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         _StepButton(icon: TablerIcons.minus, label: 'Less$suffix', onTap: onChanged == null ? null : () => _step(-1)),
-        SizedBox(
-          width: 38,
-          height: 22,
-          child: ClipRect(
-            child: AnimatedSwitcher(
-              duration: SxMotion.base,
-              switchInCurve: SxMotion.curve,
-              switchOutCurve: SxMotion.curve,
-              transitionBuilder: (child, a) => SlideTransition(
-                position: Tween(begin: const Offset(0, 1), end: Offset.zero).animate(a),
-                child: FadeTransition(opacity: a, child: child),
-              ),
-              child: Text(
-                '$value',
-                key: ValueKey(value),
-                textAlign: TextAlign.center,
-                style: SxText.counter.copyWith(height: 22 / 17, color: value == 0 ? p.textSecondary : p.textPrimary),
+        // One node with the current count ("Count of Rose saree", "3"): the rolling text keeps
+        // both the old and the new number on screen for a moment, so it isn't read itself.
+        Semantics(
+          container: true,
+          liveRegion: true,
+          label: 'Count$suffix',
+          value: '$value',
+          child: ExcludeSemantics(
+            child: SizedBox(
+              width: 38,
+              height: 22,
+              child: ClipRect(
+                child: AnimatedSwitcher(
+                  duration: SxMotion.base,
+                  switchInCurve: SxMotion.curve,
+                  switchOutCurve: SxMotion.curve,
+                  transitionBuilder: (child, a) => SlideTransition(
+                    position: Tween(begin: const Offset(0, 1), end: Offset.zero).animate(a),
+                    child: FadeTransition(opacity: a, child: child),
+                  ),
+                  child: Text(
+                    '$value',
+                    key: ValueKey(value),
+                    textAlign: TextAlign.center,
+                    style: SxText.counter.copyWith(height: 22 / 17, color: value == 0 ? p.textSecondary : p.textPrimary),
+                  ),
+                ),
               ),
             ),
           ),

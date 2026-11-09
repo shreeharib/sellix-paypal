@@ -913,6 +913,21 @@ async def inform_customer(
     await tasks.inform_customer(conversation_id, note, event=event)
 
 
+async def customer_language(session: AsyncSession, conversation_id: uuid.UUID) -> str:
+    """The language our latest reply to this customer used (English until we have replied)."""
+    language = await session.scalar(
+        select(Message.details["language"].as_string())
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.direction == "outbound",
+            Message.details.has_key("language"),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    return language or "en"
+
+
 async def after_payment(result: PaymentResult | PaymentFailed) -> None:
     """Tell the customer (and, if needed, the merchant) what a payment event means."""
     from app.modules.conversations import tasks
@@ -925,3 +940,10 @@ async def after_expiry(order: ExpiredOrder) -> None:
     from app.modules.conversations import tasks
 
     await tasks.after_expiry(order)
+
+
+async def after_status_change(order_id: uuid.UUID, merchant_id: uuid.UUID) -> None:
+    """Tell the customer when the merchant marks their order ready, packed, delivered or sent."""
+    from app.modules.conversations import tasks
+
+    await tasks.after_status_change(order_id, merchant_id)

@@ -1,0 +1,14 @@
+id: event_hold_expired
+version: 1
+description: "Fallback: sent by code when the assistant can't write the order-expired message (model unavailable)."
+texts:
+  en: |-
+    Order {{ number }} wasn't paid in time, so we released the items. Message us if you'd like to order again.
+  ta-en: |-
+    Order {{ number }} nerathula pay pannala, athanaala items release panniyaachu. Marubadiyum order panna message pannunga.
+  ta: |-
+    ஆர்டர் {{ number }} க்கு நேரத்தில் பணம் செலுத்தப்படவில்லை, அதனால் பொருட்கள் விடுவிக்கப்பட்டன. மீண்டும் ஆர்டர் செய்ய செய்தி அனுப்புங்கள்.
+  hi-en: |-
+    Order {{ number }} ka payment time par nahi hua, isliye items release kar diye. Dobara order karna ho to message kijiye.
+  hi: |-
+    ऑर्डर {{ number }} का भुगतान समय पर नहीं हुआ, इसलिए सामान वापस रख दिया। फिर से ऑर्डर करना हो तो संदेश भेजिए।

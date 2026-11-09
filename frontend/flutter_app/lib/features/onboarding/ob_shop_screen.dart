@@ -63,10 +63,14 @@ class _ObShopScreenState extends ConsumerState<ObShopScreen> with ObSaving {
       HapticFeedback.heavyImpact();
       return;
     }
+    final saved = category == obOtherCategory ? other : category.label;
     saveThen(
       shopName: name,
+      // A shop type picked in Settings stays while the category is the same; a different category
+      // goes back to the backend choosing the type from it.
       (a) => a.copyWith(
-        category: category == obOtherCategory ? other : category.label,
+        category: saved,
+        shopType: saved == a.category ? a.shopType : null,
         area: obText(_area.text),
         city: obText(_city.text),
         address: obText(_pickup.text),

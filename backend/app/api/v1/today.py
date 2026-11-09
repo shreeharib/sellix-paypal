@@ -40,6 +40,8 @@ async def set_opening_stock(shop: Shop, body: schemas.OpeningStock) -> schemas.T
                         price_minor=line.price_minor,
                         quantity=line.quantity,
                         currency=line.currency,
+                        stock_mode=line.stock_mode,
+                        shelf_life_days=line.shelf_life_days,
                     )
                     for line in body.lines
                 ],
@@ -126,7 +128,7 @@ async def record_counter_sale(
 
 
 @router.post("/parse-stock-text")
-async def parse_stock_text(body: schemas.ParseStockTextRequest) -> schemas.OpeningStock:
+async def parse_stock_text(shop: Shop, body: schemas.ParseStockTextRequest) -> schemas.OpeningStock:
     """Parse free-form merchant text into structured stock lines for morning setup."""
     try:
         lines = inventory.parse_stock_text(body.text, default_currency=body.default_currency)

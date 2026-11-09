@@ -39,6 +39,9 @@ class LedgerRow:
     sold: int
     counter_sales: int
     available: int
+    # How the shop sells it: the app must not guess (a made-to-order item is not a counted one).
+    stock_mode: str = "daily"
+    shelf_life_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,9 @@ class OpeningStockLine:
     price_minor: int
     quantity: int
     currency: str = "INR"
+    # None: leave the product as it is (a new one is a daily item with no shelf life).
+    stock_mode: str | None = None
+    shelf_life_days: int | None = None
 
 
 @dataclass(frozen=True)

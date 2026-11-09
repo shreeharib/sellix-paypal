@@ -10,7 +10,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.db import session_scope
@@ -221,7 +221,10 @@ async def confirm(ctx: TurnContext, quote_ref: str, *, tapped: bool) -> ToolResu
             )
         if answer != "yes":
             return ToolResult.fail(
-                "unclear", "It isn't clear the customer agreed", "Ask them to confirm"
+                "unclear",
+                "The customer didn't clearly ask to place the order: nothing was placed",
+                "Answer anything they asked, then tell them to tap Confirm on the card to place"
+                " it, or to say what to change",
             )
     try:
         async with session_scope() as session:
@@ -302,7 +305,14 @@ class GetOrderStatus(Tool):
 
 
 class OrderArgs(BaseModel):
-    order_id: str = Field(min_length=1, max_length=64)
+    # The model never sees an order's internal id, only its number from "Orders waiting for
+    # payment" in its context. The id is still accepted (older traces and tests pass it).
+    order: str = Field(
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("order", "order_id"),
+        description="The order number as listed under 'Orders waiting for payment', e.g. 1003",
+    )
 
 
 class CancelOrderArgs(OrderArgs):
@@ -316,9 +326,9 @@ class CancelOrder(Tool):
     writes = True
 
     async def run(self, ctx: TurnContext, args: CancelOrderArgs) -> ToolResult:
-        order_id = await _own_unpaid_order(ctx, args.order_id)
+        order_id = await _own_unpaid_order(ctx, args.order)
         if order_id is None:
-            return ToolResult.fail("unknown_order", "No unpaid order with that id in this chat")
+            return ToolResult.fail("unknown_order", "No unpaid order with that number in this chat")
         async with session_scope() as session:
             await orders.cancel_order(
                 session,
@@ -343,36 +353,65 @@ class ResendPaymentLink(Tool):
     writes = True
 
     async def run(self, ctx: TurnContext, args: OrderArgs) -> ToolResult:
-        order_id = await _own_unpaid_order(ctx, args.order_id)
+        order_id = await _own_unpaid_order(ctx, args.order)
         if order_id is None:
-            return ToolResult.fail("unknown_order", "No unpaid order with that id in this chat")
-        async with session_scope() as session:
-            order = await orders.get_order(session, order_id, ctx.merchant.id)
-        assert order is not None
-        placed = PlacedOrder(
-            order.id,
-            order.number,
-            order.currency,
-            order.total_minor,
-            get_settings().payment_hold_minutes,
-        )
-        # The same PayPal order (its request id is per order) or the same UPI link: never a
-        # second payment for one order.
-        payment, link = await _send_payment(ctx, placed, resend=True)
-        ctx.payment_link = link
-        return ToolResult(True, {"payment": payment}, private={"payment_link": link})
+            return ToolResult.fail("unknown_order", "No unpaid order with that number in this chat")
+        return await _resend(ctx, order_id)
 
     def replay(self, ctx: TurnContext, result: ToolResult) -> None:
         ctx.payment_link = result.private.get("payment_link") or ctx.payment_link
+        if result.data.get("payment") == "gave_up":
+            ctx.stage = "browsing"
+
+
+async def retry_payment(ctx: TurnContext, order_ref: str) -> ToolResult:
+    """The customer tapped "New payment link" after a failed payment: code acts, no model."""
+    order_id = await _own_unpaid_order(ctx, order_ref)
+    if order_id is None:
+        return ToolResult.fail("unknown_order", "No unpaid order with that number in this chat")
+    return await _resend(ctx, order_id)
+
+
+async def _resend(ctx: TurnContext, order_id: uuid.UUID) -> ToolResult:
+    async with session_scope() as session:
+        order = await orders.get_order(session, order_id, ctx.merchant.id)
+    assert order is not None
+    placed = PlacedOrder(
+        order.id,
+        order.number,
+        order.currency,
+        order.total_minor,
+        get_settings().payment_hold_minutes,
+    )
+    # The link still open (same PayPal order or UPI link), or, after a failed payment and once the
+    # cooldown has passed, a new one: never two live payments for one order.
+    payment, link = await _send_payment(ctx, placed, resend=True)
+    ctx.payment_link = link
+    if payment == "gave_up":
+        ctx.stage = "browsing"
+    return ToolResult(
+        True,
+        {
+            "payment": payment,
+            "next": "The customer has been sent the payment message or told when to try again. "
+            "Add at most one short line; don't repeat it.",
+        },
+        private={"payment_link": link},
+    )
 
 
 async def _own_unpaid_order(ctx: TurnContext, order_ref: str) -> uuid.UUID | None:
-    try:
-        order_id = uuid.UUID(order_ref)
-    except ValueError:
-        return None
+    """An unpaid order of this chat, named by its number ("1003", "#1003") or by its id."""
+    ref = order_ref.strip().lstrip("#")
     async with session_scope() as session:
-        order = await orders.get_order(session, order_id, ctx.merchant.id)
+        if ref.isdigit():
+            found = await orders.customer_orders(session, ctx.merchant.id, ctx.customer_id)
+            order = next((o for o in found if o.number == int(ref)), None)
+        else:
+            try:
+                order = await orders.get_order(session, uuid.UUID(ref), ctx.merchant.id)
+            except ValueError:
+                return None
     if order is None or order.conversation_id != ctx.conversation_id:
         return None
     return order.id if order.status == "awaiting_payment" else None
@@ -387,18 +426,28 @@ async def _send_payment(
         onboarding = await shop_profile.get_onboarding(session, ctx.merchant.id)
     vpa = (onboarding.answers or {}).get("upi_id") if onboarding else None
     link: str | None = None
+    charge = ""  # what PayPal charges, when that isn't the order's own currency
     if placed.currency == "INR" and vpa:
         link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=ctx.merchant.name)
     elif payments.accepts(placed.currency):
         try:
-            link = await payments.create_checkout(placed, shop_name=ctx.merchant.name)
+            checkout = await payments.start_checkout(placed, shop_name=ctx.merchant.name)
+        except payments.RetryRefused as refused:
+            return await _refuse_retry(ctx, placed, refused)
         except payments.PaymentUnavailable as exc:
             log.error("agent.checkout_failed", order_id=str(placed.order_id), error=str(exc))
+        else:
+            link, charge = checkout.url, checkout.charge_label
     values: dict[str, Any] = {"number": f"#{placed.number}", "total": total}
     async with session_scope() as session:
         if link:
             text = prompt_store.text(
-                "payment_link", ctx.language, link=link, hold_minutes=placed.hold_minutes, **values
+                "payment_link",
+                ctx.language,
+                link=link,
+                hold_minutes=placed.hold_minutes,
+                charge=charge,
+                **values,
             )
         else:
             text = prompt_store.text("payment_offline", ctx.language, **values)
@@ -416,9 +465,57 @@ async def _send_payment(
             conversation_id=ctx.conversation_id,
             text=text,
             key=f"order:{placed.order_id}:link" + (f":resend:{ctx.turn_id}" if resend else ""),
-            details={"order_id": str(placed.order_id), "kind": "payment"},
+            details={
+                "order_id": str(placed.order_id),
+                "kind": "payment",
+                "language": ctx.language,
+            },
         )
     return ("link_sent" if link else "shop_will_share_payment_details"), link
+
+
+async def _refuse_retry(
+    ctx: TurnContext, placed: PlacedOrder, refused: payments.RetryRefused
+) -> tuple[str, str | None]:
+    """No new payment link now: say how long to wait, or, if the order can't be paid, cancel it."""
+    if refused.reason == "not_payable":
+        return "not_payable", None
+    details = {"order_id": str(placed.order_id), "language": ctx.language}
+    async with session_scope() as session:
+        if refused.reason == "cooldown":
+            await conversations.queue_message(
+                session,
+                conversation_id=ctx.conversation_id,
+                text=prompt_store.text(
+                    "payment_retry_wait", ctx.language, wait=refused.wait_seconds
+                ),
+                key=f"order:{placed.order_id}:wait:{ctx.turn_id}",
+                details={**details, "kind": "payment_retry_wait"},
+                quick_replies=(
+                    (
+                        prompt_store.text("payment_retry_button", ctx.language),
+                        f"RETRY:{placed.order_id}",
+                    ),
+                ),
+            )
+            return "retry_cooldown", None
+        # Out of tries, or the time to pay is over: the order can't be paid any more.
+        await orders.cancel_order(
+            session,
+            placed.order_id,
+            merchant_id=ctx.merchant.id,
+            actor="system",
+            reason=f"payment failed ({refused.reason})",
+        )
+        await conversations.set_stage(session, ctx.conversation_id, "browsing", draft={})
+        await conversations.queue_message(
+            session,
+            conversation_id=ctx.conversation_id,
+            text=prompt_store.text("payment_gave_up", ctx.language, number=f"#{placed.number}"),
+            key=f"order:{placed.order_id}:gave_up",
+            details={**details, "kind": "payment_gave_up"},
+        )
+    return "gave_up", None
 
 
 def _date_problem(ctx: TurnContext, value: str) -> ToolResult | None:

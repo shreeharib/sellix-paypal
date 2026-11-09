@@ -1,0 +1,14 @@
+id: payment_gave_up
+version: 1
+description: "Sent by code when an order is cancelled because its payments kept failing, or the time to pay ran out."
+texts:
+  en: |-
+    Order {{ number }} is cancelled because the payment didn't go through in time. Your items are released. Message us if you'd like to order again.
+  ta-en: |-
+    Payment sariyaa nadakkala, athanaala order {{ number }} cancel aayiduchu. Items release panniyaachu. Marubadiyum order panna message pannunga.
+  ta: |-
+    பணம் செலுத்தப்படாததால் ஆர்டர் {{ number }} ரத்து செய்யப்பட்டது. பொருட்கள் விடுவிக்கப்பட்டன. மீண்டும் ஆர்டர் செய்ய எங்களுக்கு செய்தி அனுப்புங்கள்.
+  hi-en: |-
+    Payment nahi ho paya, isliye order {{ number }} cancel ho gaya. Items release kar diye gaye. Dobara order karna ho to message kijiye.
+  hi: |-
+    भुगतान नहीं हो पाया, इसलिए ऑर्डर {{ number }} रद्द हो गया। सामान वापस रख दिया गया। फिर से ऑर्डर करना हो तो संदेश भेजिए।

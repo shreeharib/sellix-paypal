@@ -1,0 +1,19 @@
+id: payment_declined
+version: 1
+description: "Sent by code when a payment is rejected or declined and the customer may still try again. `wait` is the cooldown in seconds before a new link (0: now)."
+texts:
+  en: |-
+    The payment for order {{ number }} didn't go through. {% if attempts_left == 1 %}You have 1 more try.{% else %}You have {{ attempts_left }} more tries.{% endif %}
+    {% if wait %}You can ask for a new link in {{ wait }} seconds.{% else %}Tap the button below for a new payment link.{% endif %}
+  ta-en: |-
+    Order {{ number }} payment fail aayiduchu. Innum {{ attempts_left }} try irukku.
+    {% if wait %}{{ wait }} second kazhichu puthu link kekkalaam.{% else %}Puthu link-ku keezha button-a tap pannunga.{% endif %}
+  ta: |-
+    ஆர்டர் {{ number }} பணம் செலுத்த முடியவில்லை. இன்னும் {{ attempts_left }} முயற்சி உள்ளது.
+    {% if wait %}{{ wait }} வினாடிக்குப் பிறகு புதிய லிங்க் கேட்கலாம்.{% else %}புதிய லிங்குக்கு கீழே உள்ள பட்டனை அழுத்துங்கள்.{% endif %}
+  hi-en: |-
+    Order {{ number }} ka payment nahi ho paya. {{ attempts_left }} try aur baaki hai.
+    {% if wait %}{{ wait }} second baad naya link maang sakte hain.{% else %}Naye link ke liye neeche button dabaiye.{% endif %}
+  hi: |-
+    ऑर्डर {{ number }} का भुगतान नहीं हो पाया। {{ attempts_left }} कोशिश और बाकी है।
+    {% if wait %}{{ wait }} सेकंड बाद नया लिंक माँग सकते हैं।{% else %}नए लिंक के लिए नीचे बटन दबाइए।{% endif %}
