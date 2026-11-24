@@ -9,9 +9,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -23,11 +25,15 @@ import 'orders_providers.dart';
 ProviderContainer _containerOf(BuildContext context) =>
     ProviderScope.containerOf(context, listen: false);
 
-/// Orders, this order's history, and the stock counts a payment, cancel or refund can change.
+/// Orders, this order and its payments and history, and the stock counts a payment, cancel or
+/// refund can change.
 void _refresh(ProviderContainer container, String orderId) {
-  container.invalidate(ordersProvider);
-  container.invalidate(orderTimelineProvider(orderId));
-  container.invalidate(todayProvider);
+  container
+    ..invalidate(ordersProvider)
+    ..invalidate(orderProvider(orderId))
+    ..invalidate(orderPaymentsProvider(orderId))
+    ..invalidate(orderTimelineProvider(orderId))
+    ..invalidate(todayProvider);
 }
 
 String _subtitle(Order order, String name) => '#${order.number} · $name · ${itemsLine(order)}';
@@ -167,14 +173,13 @@ Future<void> showGoBackSheet(BuildContext context, Order order, String name, Str
 
 Future<void> showMarkPaidSheet(BuildContext context, Order order, String name) async {
   final amount = money(order.totalMinor, order.currency);
-  final where = order.currency == 'INR' ? 'bank app' : 'PayPal';
   final container = _containerOf(context);
   final api = container.read(sellixApiProvider);
   var method = 'upi';
   final result = await showSxSheet<Order>(
     context,
     title: 'Did the $amount reach you?',
-    subtitle: 'Check your $where for $amount from $name. Only say yes if you see the money.',
+    subtitle: 'Check your bank or UPI app for $amount from $name. Only say yes if you see the money.',
     builder: (_) => OrderActionSheet<Order>(
       content: (_, setState) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -226,7 +231,7 @@ class _LinkResult {
 Future<_LinkResult> _loadLink(ProviderContainer container, Order order) async {
   final api = container.read(sellixApiProvider);
   final link = await api.paymentLink(order.id);
-  if (link.paymentMethod != 'upi') return _LinkResult(link);
+  if (link.paymentMethod != PaymentMethod.upi) return _LinkResult(link);
   // With no UPI ID saved, the server makes one up from the shop name (`<shopname>@upi`).
   final onboarding = await api.onboarding();
   final upi = onboarding.answers.upiId?.trim() ?? '';
@@ -347,12 +352,34 @@ class _PaymentLinkBodyState extends State<_PaymentLinkBody> {
                 ),
               ],
             ),
+            SxLinkButton(
+              label: 'Share link',
+              icon: TablerIcons.share,
+              onTap: () => shareText(context, link),
+            ),
           ],
         );
       },
     );
   }
 }
+
+/// Opens the phone's share sheet. Tests replace it ([shareTextOverride]).
+Future<void> shareText(BuildContext context, String text) async {
+  final override = shareTextOverride;
+  if (override != null) return override(text);
+  try {
+    await SharePlus.instance.share(ShareParams(text: text));
+  } on Object {
+    if (context.mounted) {
+      showSxSnack(context, 'Could not open sharing. Copy the link instead.', icon: TablerIcons.share, sellix: false);
+    }
+  }
+}
+
+/// Set in tests to see what would be shared.
+@visibleForTesting
+Future<void> Function(String text)? shareTextOverride;
 
 Future<void> copyText(BuildContext context, String text, String what) async {
   await Clipboard.setData(ClipboardData(text: text));
@@ -474,53 +501,64 @@ Future<void> showCancelSheet(BuildContext context, Order order, String name) asy
 
 // ---------- Refund ----------
 
-/// The server's reason in merchant words. Its messages can hold ids and PayPal's raw text.
+final _serverId = RegExp(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}');
+
+/// The server's reason in merchant words. A 400 means nothing was refunded; a message that holds
+/// internal ids is replaced, since the merchant can't use them.
 String refundErrorText(Object error) {
-  final text = error is ApiException ? error.message : '';
-  if (text.contains('No completed PayPal payment')) {
-    return 'sellix can only refund PayPal payments, and this order has none. No money moved. '
-        'Send it back yourself.';
-  }
-  if (text.contains('isn\'t configured')) {
-    return 'PayPal isn’t set up, so sellix cannot refund this. No money moved.';
-  }
-  if (text.contains('PayPal refused')) return 'PayPal refused the refund. No money moved.';
+  if (error is! ApiException || error.statusCode != 400) return sxErrorMessage(error);
+  final text = error.message.trim();
   if (text.contains('already refunded')) return 'This order is already refunded.';
-  return sxErrorMessage(error);
+  if (text.isEmpty || _serverId.hasMatch(text)) return 'The refund didn’t go through. No money moved.';
+  final sentence = RegExp(r'[.!?]$').hasMatch(text) ? text : '$text.';
+  return sentence.contains('No money moved') ? sentence : '$sentence No money moved.';
 }
 
-/// BACKEND GAP: `POST /refund` is full only and moves money through PayPal only. There's no part
-/// refund, no way to record a refund the merchant sent by UPI, and the order doesn't say how it was
-/// paid, so the app learns a refund isn't possible from the server's answer.
+/// What a refund does, by `refund_mode`.
+String refundWords(String? mode, String amount, String name) => switch (mode) {
+  RefundMode.razorpay => 'Razorpay sends $amount back to $name (usually 5–7 days).',
+  RefundMode.manual => 'You return the money to $name yourself; sellix records the refund.',
+  RefundMode.simulator => 'This was a test payment. No real money moves.',
+  _ => 'sellix records a full refund of $amount.',
+};
+
+/// Full refunds only (`POST /orders/{id}/refund`). The wording follows how the order was paid: a
+/// Razorpay payment goes back by itself; UPI or cash the merchant returns, and sellix records it.
 Future<void> showRefundSheet(BuildContext context, Order order, String name) async {
   final amount = money(order.totalMinor, order.currency);
   final reached = isFinished(order);
   final canRestock = refundCanRestock(order);
   final container = _containerOf(context);
   final api = container.read(sellixApiProvider);
+  String? mode;
+  try {
+    mode = (await container.read(orderPaymentsProvider(order.id).future)).refundMode;
+  } on Object {
+    // The sheet still opens; the server decides how the refund goes.
+  }
+  if (!context.mounted) return;
   var restock = canRestock && !reached;
+  final reason = TextEditingController();
+  final manual = mode == RefundMode.manual;
   final result = await showSxSheet<RefundResponse>(
     context,
-    title: 'Refund this order?',
-    subtitle:
-        'sellix sends the money back by PayPal. If $name paid by UPI or cash, this stops with an '
-        'error and no money moves.',
+    title: manual ? 'Record a refund?' : 'Refund this order?',
+    subtitle: refundWords(mode, amount, name),
     builder: (_) => OrderActionSheet<RefundResponse>(
       content: (_, setState) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         spacing: SxSpace.s8,
         children: [
-          SxChoiceCard(
-            title: 'Full refund',
-            subtitle: '$amount. This closes the order.',
-            selected: true,
-            check: true,
-            onTap: () {},
+          SxCard(
+            padding: const EdgeInsets.symmetric(horizontal: SxSpace.card, vertical: SxSpace.s4),
+            child: SxKeyValue(label: 'Full refund', value: '$amount. Refunds are full only.'),
           ),
-          const SxChoiceCard(
-            title: 'Part refund',
-            subtitle: 'Not available yet. Refunds are full only.',
-            onTap: null,
+          SxField(
+            controller: reason,
+            label: 'Reason (optional)',
+            hint: 'Out of stock',
+            maxLength: 500,
+            textCapitalization: TextCapitalization.sentences,
           ),
           if (canRestock)
             SxSwitchRow(
@@ -540,24 +578,30 @@ Future<void> showRefundSheet(BuildContext context, Order order, String name) asy
         ],
       ),
       cancelLabel: 'Keep order',
-      confirmLabel: 'Refund',
+      confirmLabel: manual ? 'Record refund' : 'Refund',
       confirmIcon: TablerIcons.arrow_back_up,
       errorText: refundErrorText,
       run: () async {
-        final refund = await api.refundOrder(order.id, restock: restock);
+        final text = reason.text.trim();
+        final refund = await api.refundOrder(order.id, reason: text.isEmpty ? null : text, restock: restock);
         _refresh(container, order.id);
         return refund;
       },
     ),
   );
+  // The controller is left to the garbage collector: the sheet may still be animating out.
   if (result == null || !context.mounted) return;
   final sent = money(result.amountMinor, result.currency);
+  final status = result.status.toLowerCase();
   showSxSnack(
     context,
-    result.status.toUpperCase() == 'COMPLETED'
-        ? '$sent refund sent. No message sent.'
-        : 'PayPal has not confirmed the $sent refund yet. The order changes when it does.',
-    icon: TablerIcons.arrow_back_up,
+    switch (status) {
+      'pending' => 'Refund started. Razorpay is sending $sent back to $name.',
+      'failed' => 'The refund failed. No money moved.',
+      _ when (result.mode ?? mode) == RefundMode.manual => 'Refund of $sent recorded. No message sent.',
+      _ => '$sent refunded. No message sent.',
+    },
+    icon: status == 'failed' ? TablerIcons.alert_triangle : TablerIcons.arrow_back_up,
     sellix: false,
   );
 }
@@ -570,8 +614,11 @@ Future<void> showOrderMenu(
   Order order,
   String name, {
   DateTime? lastChange,
+  OrderPayments? payments,
 }) async {
   final back = previousStatusOf(order, lastChange: lastChange);
+  // The server says whether it can be refunded; until it has, the order's own state decides.
+  final refundable = payments?.refundable ?? canRefund(order);
   final choice = await showSxSheet<String>(
     context,
     title: 'Order #${order.number}',
@@ -584,7 +631,7 @@ Future<void> showOrderMenu(
             subtitle: 'Used if you tapped by mistake',
             onTap: () => Navigator.of(sheet).pop('back'),
           ),
-        if (!isClosed(order) && !isFinished(order))
+        if (kShowComingSoon && !isClosed(order) && !isFinished(order))
           // BACKEND GAP: no endpoint edits an order's address or time.
           const SxListRow(
             icon: TablerIcons.edit,
@@ -598,11 +645,15 @@ Future<void> showOrderMenu(
           subtitle: 'Items and address',
           onTap: () => Navigator.of(sheet).pop('slip'),
         ),
-        if (canRefund(order))
+        if (refundable)
           SxListRow(
             icon: TablerIcons.arrow_back_up,
             title: 'Refund',
-            subtitle: 'Full refund, for PayPal payments',
+            subtitle: switch (payments?.refundMode) {
+              RefundMode.razorpay => 'Razorpay sends the money back',
+              RefundMode.manual => 'You send it back; sellix records it',
+              _ => 'Full refund',
+            },
             onTap: () => Navigator.of(sheet).pop('refund'),
           ),
         if (canCancel(order))
@@ -671,12 +722,13 @@ Future<void> showSlipSheet(BuildContext context, Order order, String name) {
         SxButtonRow(
           children: [
             // Printing needs a plugin the app doesn't ship. Copying is real, so that's the action.
-            const SxButton(
-              label: 'Print soon',
-              icon: TablerIcons.printer,
-              kind: SxButtonKind.secondary,
-              onTap: null,
-            ),
+            if (kShowComingSoon)
+              const SxButton(
+                label: 'Print soon',
+                icon: TablerIcons.printer,
+                kind: SxButtonKind.secondary,
+                onTap: null,
+              ),
             SxButton(
               label: 'Copy slip',
               icon: TablerIcons.copy,

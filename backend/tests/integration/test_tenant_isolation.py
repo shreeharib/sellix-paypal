@@ -15,6 +15,7 @@ import pytest
 
 from app.core.db import session_scope
 from app.main import create_app
+from app.modules.agent import service as agent
 from app.modules.channels.models import ChannelConnection
 from app.modules.conversations.models import Conversation
 from app.modules.escalations import service as escalations
@@ -24,7 +25,6 @@ from app.modules.merchants.models import Merchant
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest
-from app.modules.payments import paypal
 from tests.integration.factories import start_conversation
 from tests.integration.test_api import bearer, sign_in_as
 
@@ -37,6 +37,7 @@ class Ids:
     order: uuid.UUID
     question: uuid.UUID
     conversation: uuid.UUID
+    rule: uuid.UUID | None = None  # a saved "always" answer
 
 
 @pytest.fixture
@@ -83,11 +84,19 @@ async def world(api: httpx2.AsyncClient, shop: ChannelConnection) -> tuple[Ids, 
         await session.flush()
         other_id = other.id
     intruder = await sign_in_as(other_id, subject="17841400000009999")
+    await agent.save_rule(
+        merchant_id=shop.merchant_id,
+        question="Discount?",
+        answer="No discounts, sorry",
+        source_escalation_id=question.id,
+    )
+    [rule] = await agent.saved_rules(shop.merchant_id)
     ids = Ids(
         product=product_id,
         order=placed.order_id,
         question=question.id,
         conversation=turn.conversation_id,
+        rule=rule.id,
     )
     return ids, owner, intruder
 
@@ -95,7 +104,7 @@ async def world(api: httpx2.AsyncClient, shop: ChannelConnection) -> tuple[Ids, 
 def attacks(ids: Ids) -> dict[str, tuple[str, dict[str, Any] | None]]:
     """ "METHOD /v1/path/{param}" -> (path with shop A's ids, JSON body)."""
     unknown = uuid.uuid4()
-    return {
+    table: dict[str, tuple[str, dict[str, Any] | None]] = {
         "GET /v1/products/{product_id}": (f"/v1/products/{ids.product}", None),
         "PATCH /v1/products/{product_id}": (
             f"/v1/products/{ids.product}",
@@ -109,8 +118,9 @@ def attacks(ids: Ids) -> dict[str, tuple[str, dict[str, Any] | None]]:
             f"/v1/products/{ids.product}/aliases/{unknown}",
             None,
         ),
+        "GET /v1/orders/{order_id}": (f"/v1/orders/{ids.order}", None),
         "POST /v1/orders/{order_id}/refund": (f"/v1/orders/{ids.order}/refund", {}),
-        "POST /v1/orders/{order_id}/invoice": (f"/v1/orders/{ids.order}/invoice", {}),
+        "GET /v1/orders/{order_id}/payments": (f"/v1/orders/{ids.order}/payments", None),
         "POST /v1/orders/{order_id}/mark-paid": (f"/v1/orders/{ids.order}/mark-paid", {}),
         "POST /v1/orders/{order_id}/complete": (f"/v1/orders/{ids.order}/complete", None),
         "POST /v1/orders/{order_id}/cancel": (f"/v1/orders/{ids.order}/cancel", {}),
@@ -134,6 +144,10 @@ def attacks(ids: Ids) -> dict[str, tuple[str, dict[str, Any] | None]]:
         "GET /v1/conversations/{conversation_id}/messages": (
             f"/v1/conversations/{ids.conversation}/messages",
             None,
+        ),
+        "POST /v1/conversations/{conversation_id}/messages": (
+            f"/v1/conversations/{ids.conversation}/messages",
+            {"text": "Hijacked"},
         ),
         "PUT /v1/conversations/{conversation_id}/agent": (
             f"/v1/conversations/{ids.conversation}/agent",
@@ -167,7 +181,16 @@ def attacks(ids: Ids) -> dict[str, tuple[str, dict[str, Any] | None]]:
             f"/v1/stories/posts/{ids.product}",
             {"ig_media_id": "123"},
         ),
+        "DELETE /v1/rules/{rule_id}": (f"/v1/rules/{ids.rule or unknown}", None),
     }
+    # The chat endpoints are served under /v1/chats as well (docs/api-changes-2026-11-24.md).
+    for name, (path, body) in list(table.items()):
+        if " /v1/conversations/" in name:
+            table[name.replace("/v1/conversations/", "/v1/chats/")] = (
+                path.replace("/v1/conversations/", "/v1/chats/"),
+                body,
+            )
+    return table
 
 
 async def test_every_endpoint_with_an_id_is_covered_here(
@@ -190,8 +213,6 @@ async def test_another_shop_gets_not_found_everywhere_and_changes_nothing(
     api: httpx2.AsyncClient, world: tuple[Ids, str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids, owner, intruder = world
-    # So the refund is refused because the order isn't theirs, not because PayPal is off.
-    monkeypatch.setattr(paypal, "configured", lambda: True)
     leaks: list[str] = []
 
     for name, (path, body) in attacks(ids).items():
@@ -214,6 +235,7 @@ async def test_another_shop_gets_not_found_everywhere_and_changes_nothing(
     assert question.status == "open"
     assert conversation is not None
     assert conversation.agent_active is True
+    assert [rule.id for rule in await agent.saved_rules(conversation.merchant_id)] == [ids.rule]
     product = await api.get(f"/v1/products/{ids.product}", headers=bearer(owner))
     assert product.json()["name"] == "Sourdough"
     assert "stolen" not in [alias["alias_text"] for alias in product.json()["aliases"]]
@@ -226,6 +248,8 @@ async def test_another_shop_gets_not_found_everywhere_and_changes_nothing(
         "/v1/products",
         "/v1/products/search?q=sourdough",
         "/v1/conversations",
+        "/v1/chats",
+        "/v1/rules",
         "/v1/questions",
         "/v1/today",
         "/v1/today/leftovers",
@@ -245,3 +269,32 @@ async def test_lists_of_another_shop_show_none_of_this_shops_data(
     for secret in ("Sourdough", str(ids.product), str(ids.order), str(ids.conversation)):
         assert secret not in theirs.text
     assert mine.status_code == 200
+
+
+def body_attacks(variant_id: str) -> dict[str, dict[str, Any]]:
+    """Endpoints that take shop A's id in the JSON body, not the path."""
+    return {
+        "/v1/today/restock": {"variant_id": variant_id, "quantity": 5},
+        "/v1/today/sold-out": {"variant_id": variant_id},
+        "/v1/today/counter-sale": {"variant_id": variant_id, "quantity": 1},
+        "/v1/today/rollover": {"items": [{"variant_id": variant_id, "rollover_quantity": 1}]},
+    }
+
+
+async def test_another_shops_id_in_a_request_body_is_not_found_and_changes_nothing(
+    api: httpx2.AsyncClient, world: tuple[Ids, str, str]
+) -> None:
+    _, owner, intruder = world
+    before = (await api.get("/v1/today", headers=bearer(owner))).json()["stock"]
+    variant_id = before[0]["variant_id"]
+    leaks: list[str] = []
+
+    for path, body in body_attacks(variant_id).items():
+        response = await api.post(path, headers=bearer(intruder), json=body)
+        if response.status_code not in (404, 422):
+            leaks.append(f"POST {path} -> {response.status_code} {response.text[:120]}")
+
+    assert not leaks, "\n".join(leaks)
+    after = (await api.get("/v1/today", headers=bearer(owner))).json()["stock"]
+    assert after == before
+    assert (after[0]["opening"], after[0]["restocked"], after[0]["counter_sales"]) == (10, 0, 0)

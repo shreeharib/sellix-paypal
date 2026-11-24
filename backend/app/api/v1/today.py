@@ -61,6 +61,7 @@ async def restock(shop: Shop, body: schemas.RestockRequest) -> schemas.Today:
         try:
             await inventory.restock(
                 session,
+                merchant_id=merchant.id,
                 variant_id=body.variant_id,
                 business_date=day,
                 quantity=body.quantity,
@@ -83,6 +84,7 @@ async def mark_sold_out(shop: Shop, body: schemas.SoldOutRequest) -> schemas.Tod
         try:
             await inventory.mark_sold_out(
                 session,
+                merchant_id=merchant.id,
                 variant_id=body.variant_id,
                 business_date=day,
             )
@@ -104,6 +106,7 @@ async def record_counter_sale(
         try:
             remaining = await inventory.record_counter_sale(
                 session,
+                merchant_id=merchant.id,
                 variant_id=body.variant_id,
                 business_date=day,
                 quantity=body.quantity,
@@ -204,6 +207,8 @@ async def apply_rollover(shop: Shop, body: schemas.RolloverRequest) -> schemas.R
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:  # not this shop's item
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     async with session_scope() as session:
         today_state = await _today(session, shop.merchant_id)

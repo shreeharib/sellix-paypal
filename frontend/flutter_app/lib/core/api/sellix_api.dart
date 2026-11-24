@@ -59,7 +59,8 @@ abstract interface class SellixApi {
 
   // Catalog
   Future<CatalogSearchResponse> searchCatalog(String query, {int? limit});
-  Future<List<ProductDetail>> products({String? category});
+  /// Active products only, unless [includeInactive].
+  Future<List<ProductDetail>> products({String? category, bool includeInactive = false});
   Future<ProductDetail> product(String productId);
   Future<ProductDetail> updateProduct(String productId, ProductUpdate update);
   Future<ProductAliasDetail> addProductAlias(String productId, String aliasText);
@@ -73,18 +74,27 @@ abstract interface class SellixApi {
   Future<List<ShopTypeChoice>> shopTypes();
 
   // Orders
-  /// Filters are ORed within a list. [paymentStatus] accepts "pending", "paid",
+  /// Newest first. Filters are ORed within a list. [paymentStatus] accepts "pending", "paid",
   /// "partially_refunded", "refunded" and "failed" only: the backend refuses "unpaid", so filter
   /// unpaid orders with `status: ['awaiting_payment']`. [limit] is 1 to 200 (backend default 50).
-  Future<List<Order>> orders({List<String>? status, List<String>? paymentStatus, int? limit});
-
-  /// PayPal payments only; anything else fails with a message.
-  Future<RefundResponse> refundOrder(String orderId, {String? reason, bool restock = true});
-  Future<CreateInvoiceResponse> createInvoice(
-    String orderId, {
-    String? customerName,
-    String? customerEmail,
+  /// [before] pages: pass the `createdAt` of the last order you have (exclusive).
+  Future<List<Order>> orders({
+    List<String>? status,
+    List<String>? paymentStatus,
+    int? limit,
+    DateTime? before,
   });
+
+  /// One order; 404 if it isn't this shop's.
+  Future<Order> order(String orderId);
+
+  /// The order's payment links and payments, its refund, and whether it can be refunded.
+  Future<OrderPayments> orderPayments(String orderId);
+
+  /// Full refunds only. Razorpay sends the money back (status "pending" until it confirms); a UPI
+  /// or cash order is recorded as refunded by the merchant ("completed"). 400 when not paid or when
+  /// Razorpay refuses.
+  Future<RefundResponse> refundOrder(String orderId, {String? reason, bool restock = true});
 
   /// [method] is "upi", "cash" or "card".
   Future<Order> markOrderPaid(String orderId, {String method = 'upi', String? referenceId});
@@ -97,6 +107,24 @@ abstract interface class SellixApi {
   Future<Order> updateOrderStatus(String orderId, String status, {String? comment});
   Future<List<OrderTimelineEvent>> orderTimeline(String orderId);
 
+  // Payments
+  Future<PaymentAccount> paymentAccount();
+
+  /// Checks the keys with Razorpay and connects them. 422: malformed or refused keys; 502:
+  /// Razorpay couldn't be reached; 403: staff.
+  Future<PaymentAccount> connectPaymentAccount({required String keyId, required String keySecret});
+
+  /// New links fall back to the shop's UPI ID. Owner only.
+  Future<void> disconnectPaymentAccount();
+
+  /// A new webhook secret. Owner only; 404 if not connected.
+  Future<PaymentAccount> rotateWebhookSecret();
+
+  // Rules
+  /// The saved "always" answers.
+  Future<List<MerchantRule>> rules();
+  Future<void> deleteRule(String ruleId);
+
   // Ask me
   /// [status] is "open", "answered" or "closed". The backend has no "all": leaving it out means open.
   Future<List<Question>> questions({String status = 'open'});
@@ -106,7 +134,12 @@ abstract interface class SellixApi {
   Future<Question> closeQuestion(String questionId);
 
   // Chats
-  Future<List<Conversation>> conversations();
+  /// Newest first. [before] pages: pass the `lastMessageAt` of the last chat you have (exclusive).
+  Future<List<Conversation>> conversations({DateTime? before, int? limit});
+
+  /// Sends the merchant's own message (1 to 1000 characters) and pauses the assistant in this chat
+  /// (reason `merchant_replied`). 409 when Instagram's 24-hour reply window is closed.
+  Future<SentMessage> sendMessage(String conversationId, String text);
 
   /// [limit] is 1 to 500 (backend default 100).
   Future<List<ChatMessage>> messages(String conversationId, {int? limit});
@@ -141,6 +174,10 @@ abstract interface class SellixApi {
 
   // Session
   Future<void> logout();
+
+  /// Deletes the shop and its data and signs everyone out. Owner only; 422 if the name doesn't
+  /// match exactly.
+  Future<void> deleteShop(String confirmName);
 }
 
 class HttpSellixApi implements SellixApi {
@@ -297,10 +334,15 @@ class HttpSellixApi implements SellixApi {
       );
 
   @override
-  Future<List<ProductDetail>> products({String? category}) async => _parseList(
-    await _array('GET', '/v1/products', query: {'category': ?category}),
-    ProductDetail.fromJson,
-  );
+  Future<List<ProductDetail>> products({String? category, bool includeInactive = false}) async =>
+      _parseList(
+        await _array(
+          'GET',
+          '/v1/products',
+          query: {'category': ?category, if (includeInactive) 'include_inactive': true},
+        ),
+        ProductDetail.fromJson,
+      );
 
   @override
   Future<ProductDetail> product(String productId) async =>
@@ -342,6 +384,7 @@ class HttpSellixApi implements SellixApi {
     List<String>? status,
     List<String>? paymentStatus,
     int? limit,
+    DateTime? before,
   }) async => _parseList(
     await _array(
       'GET',
@@ -351,10 +394,19 @@ class HttpSellixApi implements SellixApi {
         if (status != null && status.isNotEmpty) 'status': status,
         if (paymentStatus != null && paymentStatus.isNotEmpty) 'payment_status': paymentStatus,
         'limit': ?limit,
+        if (before != null) 'before': before.toUtc().toIso8601String(),
       },
     ),
     Order.fromJson,
   );
+
+  @override
+  Future<Order> order(String orderId) async =>
+      Order.fromJson(await _object('GET', '/v1/orders/$orderId'));
+
+  @override
+  Future<OrderPayments> orderPayments(String orderId) async =>
+      OrderPayments.fromJson(await _object('GET', '/v1/orders/$orderId/payments'));
 
   @override
   Future<RefundResponse> refundOrder(
@@ -366,19 +418,6 @@ class HttpSellixApi implements SellixApi {
       'POST',
       '/v1/orders/$orderId/refund',
       body: RefundRequest(reason: reason, restock: restock).toJson(),
-    ),
-  );
-
-  @override
-  Future<CreateInvoiceResponse> createInvoice(
-    String orderId, {
-    String? customerName,
-    String? customerEmail,
-  }) async => CreateInvoiceResponse.fromJson(
-    await _object(
-      'POST',
-      '/v1/orders/$orderId/invoice',
-      body: CreateInvoiceRequest(customerName: customerName, customerEmail: customerEmail).toJson(),
     ),
   );
 
@@ -428,6 +467,46 @@ class HttpSellixApi implements SellixApi {
     OrderTimelineEvent.fromJson,
   );
 
+  // Payments
+
+  @override
+  Future<PaymentAccount> paymentAccount() async =>
+      PaymentAccount.fromJson(await _object('GET', '/v1/payments/account'));
+
+  @override
+  Future<PaymentAccount> connectPaymentAccount({
+    required String keyId,
+    required String keySecret,
+  }) async => PaymentAccount.fromJson(
+    await _object(
+      'PUT',
+      '/v1/payments/account',
+      body: PaymentAccountConnect(keyId: keyId, keySecret: keySecret).toJson(),
+      // The server checks the keys with Razorpay before it answers.
+      receiveTimeout: const Duration(seconds: 45),
+    ),
+  );
+
+  @override
+  Future<void> disconnectPaymentAccount() async {
+    await _request<Object?>('DELETE', '/v1/payments/account');
+  }
+
+  @override
+  Future<PaymentAccount> rotateWebhookSecret() async =>
+      PaymentAccount.fromJson(await _object('POST', '/v1/payments/account/webhook-secret'));
+
+  // Rules
+
+  @override
+  Future<List<MerchantRule>> rules() async =>
+      _parseList(await _array('GET', '/v1/rules'), MerchantRule.fromJson);
+
+  @override
+  Future<void> deleteRule(String ruleId) async {
+    await _request<Object?>('DELETE', '/v1/rules/$ruleId');
+  }
+
   // Ask me
 
   @override
@@ -456,8 +535,23 @@ class HttpSellixApi implements SellixApi {
   // Chats
 
   @override
-  Future<List<Conversation>> conversations() async =>
-      _parseList(await _array('GET', '/v1/conversations'), Conversation.fromJson);
+  Future<List<Conversation>> conversations({DateTime? before, int? limit}) async => _parseList(
+    await _array(
+      'GET',
+      '/v1/conversations',
+      query: {'limit': ?limit, if (before != null) 'before': before.toUtc().toIso8601String()},
+    ),
+    Conversation.fromJson,
+  );
+
+  @override
+  Future<SentMessage> sendMessage(String conversationId, String text) async => SentMessage.fromJson(
+    await _object(
+      'POST',
+      '/v1/conversations/$conversationId/messages',
+      body: SendMessageRequest(text: text).toJson(),
+    ),
+  );
 
   @override
   Future<List<ChatMessage>> messages(String conversationId, {int? limit}) async => _parseList(
@@ -569,6 +663,15 @@ class HttpSellixApi implements SellixApi {
   @override
   Future<void> logout() async {
     await _request<Object?>('POST', '/v1/auth/logout');
+  }
+
+  @override
+  Future<void> deleteShop(String confirmName) async {
+    await _request<Object?>(
+      'DELETE',
+      '/v1/shop',
+      body: DeleteShopRequest(confirmName: confirmName).toJson(),
+    );
   }
 
   // Plumbing

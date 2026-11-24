@@ -88,3 +88,39 @@ class SxErrorState extends StatelessWidget {
     );
   }
 }
+
+/// "Load more" at the end of a paged list. Shows the failure, if the last page didn't load.
+class SxLoadMore extends StatelessWidget {
+  const SxLoadMore({super.key, required this.onTap, this.loading = false, this.error, this.label = 'Load more'});
+
+  final VoidCallback? onTap;
+  final bool loading;
+  final Object? error;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(SxSpace.screen, SxSpace.s8, SxSpace.screen, SxSpace.s8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: SxSpace.s8,
+        children: [
+          if (error != null)
+            Text(
+              sxErrorMessage(error),
+              textAlign: TextAlign.center,
+              style: SxText.caption.copyWith(color: context.sx.errorText),
+            ),
+          SxButton(
+            label: error != null ? 'Try again' : label,
+            kind: SxButtonKind.secondary,
+            fullWidth: true,
+            loading: loading,
+            onTap: loading ? null : onTap,
+          ),
+        ],
+      ),
+    );
+  }
+}

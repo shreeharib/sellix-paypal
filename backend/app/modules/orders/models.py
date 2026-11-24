@@ -115,6 +115,8 @@ class OrderItem(Base):
     fulfilment_status: Mapped[str] = mapped_column(server_default=text("'unfulfilled'"))
     option_values: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     personalization: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
+    # False: a made-to-order or always-available item, sold with no hold and no stock change.
+    stock_counted: Mapped[bool] = mapped_column(server_default=text("true"), default=True)
 
     @property
     def variant_name(self) -> str | None:

@@ -74,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help='JSON list: [{"product": "Scoop cookie", "variant": "Chocolate", '
         '"price": "60", "quantity": 10, "currency": "INR"}]; variant and currency are '
-        "optional (currency defaults to INR; PayPal needs e.g. USD)",
+        "optional (currency defaults to INR; Razorpay links are offered in INR)",
     )
     command.add_argument(
         "--date", type=date.fromisoformat, help="business date (default: today for the merchant)"

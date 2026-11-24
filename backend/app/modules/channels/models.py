@@ -20,6 +20,8 @@ class ChannelConnection(Base):
     merchant_id: Mapped[uuid.UUID]
     channel: Mapped[str]
     external_account_id: Mapped[str]
+    # Instagram's app-scoped user id (`id` from /me): Meta's data-deletion callback names it.
+    app_user_id: Mapped[str | None] = mapped_column(nullable=True, default=None)
     username: Mapped[str | None]
     access_token_encrypted: Mapped[str]
     token_expires_at: Mapped[datetime | None]

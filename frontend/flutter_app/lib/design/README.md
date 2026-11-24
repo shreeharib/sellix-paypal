@@ -38,6 +38,7 @@ Root tabs: same, with `SxRootHeader`, no `floating` (the shell draws the nav). N
 | `SxEmptyState` | `icon, title, body?, actionLabel?, onAction?, action?` |
 | `SxErrorState` | `error?, message?, onRetry?, retryLabel='Try again'` |
 | `sxErrorMessage(error)` | safe text: `ApiException.message`, or a generic line |
+| `SxLoadMore` | `onTap, loading=false, error?, label='Load more'`: the end of a paged list |
 
 ## Headers and sections
 
@@ -76,7 +77,7 @@ Root tabs: same, with `SxRootHeader`, no `floating` (the shell draws the nav). N
 | `SxCustomerAvatar` | `name, needsYou=false, large=false, channel?` |
 | `SxInitialsAvatar` | `name, size=36, background?, foreground?` |
 | `sxInitials(name)` | `'@priya.nair'` gives `PN` |
-| `SxBrandIcon` | `SxBrandIcon(SxBrand.instagram, size=20, color?)`. `SxBrand`: `instagram whatsapp paypal upi messenger facebook google apple` |
+| `SxBrandIcon` | `SxBrandIcon(SxBrand.instagram, size=20, color?)`. `SxBrand`: `instagram whatsapp upi messenger facebook google apple` |
 | `SxLogo` | `size=44, surface=SxLogoSurface.page, semanticLabel='sellix'`. Surfaces: `page card anchor photo`. Glyph in light, app tile in dark |
 
 ## Cards and rows
@@ -170,6 +171,8 @@ Constructors: `ChatScreen(conversationId)`, `OrderScreen(orderId)`, `ProductScre
 - Sign out: `ref.read(authControllerProvider.notifier).signOut()` is enough; the redirect handles the rest.
 
 ## Other shared state
+
+- `kShowComingSoon` (`lib/core/config.dart`, false): unfinished features (other sign-ins, timed pause, app languages, phone-only reminders, automations, WhatsApp connect, photo stock) stay hidden behind it rather than shown as dead controls.
 
 - `themeModeProvider` (`lib/core/theme_mode.dart`): `ref.read(themeModeProvider.notifier).set(ThemeMode.dark)`.
 - `sharedPreferencesProvider` (same file): synchronous `SharedPreferences` for "saved on this phone only" features.

@@ -6,12 +6,12 @@ attributes (dietary, allergens, categories, MRP, and AI search aliases).
 
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.catalog.models import Product, ProductAlias, ProductVariant
@@ -46,11 +46,21 @@ async def list_variants_by_ids(
     variant_ids: Iterable[uuid.UUID],
     *,
     active_only: bool = False,
+    also_modes: Collection[str] = (),
 ) -> list[VariantCatalogInfo]:
-    """Fetch variant & parent product catalog metadata for a set of variant IDs, ordered by name."""
+    """Catalog details of the shop's variants with these ids, ordered by name.
+
+    `also_modes`: also every variant of the shop whose stock mode (the variant's, else the
+    product's) is one of these, whatever its id (made-to-order items need no stock row).
+    Another shop's ids are never returned.
+    """
     ids = list(variant_ids)
-    if not ids:
+    if not ids and not also_modes:
         return []
+    mode = func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily")
+    wanted = ProductVariant.id.in_(ids)
+    if also_modes:
+        wanted = or_(wanted, mode.in_(list(also_modes)))
     query = (
         select(
             ProductVariant.id,
@@ -59,16 +69,13 @@ async def list_variants_by_ids(
             ProductVariant.name,
             ProductVariant.price_minor,
             ProductVariant.currency,
-            func.coalesce(ProductVariant.stock_mode, Product.stock_mode, "daily"),
+            mode,
             func.coalesce(ProductVariant.shelf_life_days, Product.shelf_life_days),
             Product.available_on,
             Product.order_by_date,
         )
         .join(Product, Product.id == ProductVariant.product_id)
-        .where(
-            Product.merchant_id == merchant_id,
-            ProductVariant.id.in_(ids),
-        )
+        .where(Product.merchant_id == merchant_id, wanted)
     )
     if active_only:
         query = query.where(Product.is_active.is_(True), ProductVariant.is_active.is_(True))
@@ -369,12 +376,13 @@ async def list_products(
     *,
     category: str | None = None,
     is_active: bool = True,
+    include_inactive: bool = False,
 ) -> list[Product]:
-    """List all products for a merchant with optional category filtering."""
-    query = select(Product).where(
-        Product.merchant_id == merchant_id,
-        Product.is_active == is_active,
-    )
+    """The shop's products (active ones, or inactive with `is_active=False`; both with
+    `include_inactive`), optionally in one category."""
+    query = select(Product).where(Product.merchant_id == merchant_id)
+    if not include_inactive:
+        query = query.where(Product.is_active == is_active)
     if category:
         query = query.where(func.lower(Product.category) == category.strip().lower())
     query = query.order_by(Product.name)
@@ -460,6 +468,10 @@ class AvailabilityError(ValueError):
     """The availability dates don't make sense together."""
 
 
+class ProductNameTaken(ValueError):
+    """Another of the shop's products (removed ones too) already has this name."""
+
+
 async def update_product(
     session: AsyncSession,
     *,
@@ -474,18 +486,43 @@ async def update_product(
     available_on: date | None | _Unset = UNSET,
     order_by_date: date | None | _Unset = UNSET,
     today: date | None = None,
+    is_active: bool | None = None,
 ) -> Product | None:
     """Update a product's details, attributes and when it can be ordered.
 
     `available_on`: the one day it's sold (None: any day). `order_by_date`: the last day to
     order (None: until the stock is gone). Dates must not be in the past (`today`), and the
     last order date can't come after the day it's sold.
+
+    `name` renames the same product (its variants, stock and aliases stay; past orders keep the
+    name they were sold under). `is_active=False` removes it from stock lists, menus and the
+    assistant; True brings it back.
     """
     prod = await session.scalar(
         select(Product).where(Product.merchant_id == merchant_id, Product.id == product_id)
     )
     if not prod:
         return None
+    if name is not None:
+        new_name = name.strip()
+        if not new_name:
+            raise ValueError("A product needs a name")
+        clash = await session.scalar(
+            select(Product.name).where(
+                Product.merchant_id == merchant_id,
+                func.lower(Product.name) == new_name.lower(),
+                Product.id != product_id,
+            )
+        )
+        if clash is not None:
+            raise ProductNameTaken(f"You already have a product called {clash}")
+        if not prod.title or prod.title == prod.name:  # the title follows the name unless set
+            prod.title = new_name
+        if new_name != prod.name:
+            await _seed_auto_aliases(session, prod.id, new_name, None)
+        prod.name = new_name
+    if is_active is not None:
+        prod.is_active = is_active
     if not isinstance(available_on, _Unset) or not isinstance(order_by_date, _Unset):
         new_on = prod.available_on if isinstance(available_on, _Unset) else available_on
         new_by = prod.order_by_date if isinstance(order_by_date, _Unset) else order_by_date
@@ -498,8 +535,6 @@ async def update_product(
             raise AvailabilityError("The last order date can't be after the day it's sold")
         prod.available_on = new_on
         prod.order_by_date = new_by
-    if name is not None:
-        prod.name = name.strip()
     if title is not None:
         prod.title = title.strip()
     if description is not None:

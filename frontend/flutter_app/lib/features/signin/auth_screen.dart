@@ -2,11 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/config.dart';
 import '../../core/router.dart';
+import '../../core/server_config.dart';
 import '../../design/design.dart';
+import '../settings/server_sheet.dart';
 
 const _tiles = [
   TablerIcons.hanger,
@@ -23,19 +28,23 @@ const _tiles = [
 const _notes = [
   (TablerIcons.shopping_bag, 'New order', 'sellix took it in the DM', 'Order'),
   (TablerIcons.language, 'sellix replied', 'In your customer’s language', 'Tamil'),
-  (TablerIcons.credit_card, 'Paid by PayPal', 'sellix marked the order paid', 'Paid'),
+  (TablerIcons.credit_card, 'Paid by UPI', 'sellix marked the order paid', 'Paid'),
 ];
 
 enum _Mode { up, into }
 
-class AuthScreen extends StatefulWidget {
+/// Opens the privacy policy the server publishes (`GET /privacy`).
+@visibleForTesting
+Future<bool> Function(Uri url) openPolicy = (url) => launchUrl(url, mode: LaunchMode.externalApplication);
+
+class AuthScreen extends ConsumerStatefulWidget {
   const AuthScreen({super.key});
 
   @override
-  State<AuthScreen> createState() => _AuthScreenState();
+  ConsumerState<AuthScreen> createState() => _AuthScreenState();
 }
 
-class _AuthScreenState extends State<AuthScreen> {
+class _AuthScreenState extends ConsumerState<AuthScreen> {
   _Mode _mode = _Mode.up;
 
   void _instagram() {
@@ -44,10 +53,19 @@ class _AuthScreenState extends State<AuthScreen> {
     context.push(_mode == _Mode.up ? Routes.welcome : Routes.iglogin);
   }
 
+  Future<void> _openPolicy() async {
+    final url = Uri.parse('${ref.read(serverUrlProvider)}/privacy');
+    final opened = await openPolicy(url);
+    if (!opened && mounted) {
+      showSxSnack(context, 'Could not open the privacy policy.', aboveBar: false, sellix: false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.sx;
     final verb = _mode == _Mode.up ? 'Sign up' : 'Sign in';
+    final server = ref.watch(serverUrlProvider);
     return SxScaffold(
       statusOnAnchor: true,
       safeTop: false,
@@ -87,32 +105,46 @@ class _AuthScreenState extends State<AuthScreen> {
                         onTap: _instagram,
                       ),
                       // BACKEND GAP: the API signs in with Instagram only (ADR 0004). No Google, Apple or email.
-                      const SizedBox(height: 10),
-                      _AuthButton(label: '$verb with Google', leading: const SxBrandIcon(SxBrand.google), onTap: null),
-                      const SizedBox(height: 10),
-                      _AuthButton(
-                        label: '$verb with Apple',
-                        leading: SxBrandIcon(SxBrand.apple, color: p.textPrimary),
-                        onTap: null,
-                      ),
-                      const SizedBox(height: 10),
-                      _AuthButton(
-                        label: '$verb with email',
-                        leading: Icon(TablerIcons.mail, size: 20, color: p.textPrimary),
-                        onTap: null,
-                      ),
+                      if (kShowComingSoon) ...[
+                        const SizedBox(height: 10),
+                        _AuthButton(label: '$verb with Google', leading: const SxBrandIcon(SxBrand.google), onTap: null),
+                        const SizedBox(height: 10),
+                        _AuthButton(
+                          label: '$verb with Apple',
+                          leading: SxBrandIcon(SxBrand.apple, color: p.textPrimary),
+                          onTap: null,
+                        ),
+                        const SizedBox(height: 10),
+                        _AuthButton(
+                          label: '$verb with email',
+                          leading: Icon(TablerIcons.mail, size: 20, color: p.textPrimary),
+                          onTap: null,
+                        ),
+                      ],
                       const SizedBox(height: SxSpace.s12),
-                      Text(
-                        'Google, Apple and email are not available yet. Use Instagram for now.',
-                        textAlign: TextAlign.center,
-                        style: SxText.caption.copyWith(color: p.textSecondary),
-                      ),
-                      const SizedBox(height: SxSpace.s8),
-                      // BACKEND GAP: no Terms or Privacy policy URL to link to.
                       Text(
                         'By continuing, you agree to sellix’s Terms and Privacy policy.',
                         textAlign: TextAlign.center,
                         style: SxText.caption.copyWith(color: p.textSecondary),
+                      ),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: SxSpace.s16,
+                        children: [
+                          SxLinkButton(
+                            label: 'Terms and privacy',
+                            icon: TablerIcons.shield_lock,
+                            color: p.textSecondary,
+                            onTap: _openPolicy,
+                          ),
+                          SxLinkButton(
+                            label: 'Server: ${serverHost(server)}',
+                            icon: TablerIcons.server,
+                            color: p.textSecondary,
+                            onTap: () => showServerSheet(context),
+                          ),
+                        ],
                       ),
                     ],
                   ),

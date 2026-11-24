@@ -187,7 +187,7 @@ class _GalleryState extends State<_Gallery> {
 
 void main() {
   testWidgets('every svg asset parses and draws', (tester) async {
-    const names = ['apple', 'facebook', 'google', 'instagram', 'logo_glyph', 'logo_tile', 'messenger', 'paypal', 'upi', 'whatsapp'];
+    const names = ['apple', 'facebook', 'google', 'instagram', 'logo_glyph', 'logo_tile', 'messenger', 'upi', 'whatsapp'];
     for (final name in names) {
       final info = await tester.runAsync(() => vg.loadPicture(SvgAssetLoader('assets/icons/$name.svg'), null));
       expect(info!.size.isEmpty, isFalse, reason: name);

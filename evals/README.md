@@ -30,6 +30,7 @@ How the models are chosen and how prompt changes are checked. Background: [docs/
 just cli create-merchant --name "Eval Bakery"                      # note the id
 just cli set-stock --merchant-id <id> --file ../evals/demo_stock.json
 just cli set-agent-engine --merchant-id <id> v2
+just cli set-agent --merchant-id <id> on                           # new shops start with it off
 TOKEN=$(just cli issue-token --merchant-id <id>)
 python evals/run.py --token "$TOKEN" evals/datasets/scenarios.jsonl evals/datasets/adversarial.jsonl --min-score 0.9
 ```

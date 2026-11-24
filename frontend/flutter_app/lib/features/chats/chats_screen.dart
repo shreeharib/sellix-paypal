@@ -63,6 +63,7 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen> {
 
   Widget _list(BuildContext context, ChatListData data) {
     final p = context.sx;
+    final older = ref.watch(olderChatsProvider);
     final rows = filterChats(data, _filter, _search.text);
     final searching = _search.text.trim().isNotEmpty;
     return SxScrollList(
@@ -139,6 +140,16 @@ class _ChatsScreenState extends ConsumerState<ChatsScreen> {
                   ),
               ],
             ),
+          ),
+        if (mayHaveOlderChats(data, older))
+          SxLoadMore(
+            label: 'Load older chats',
+            loading: older.loading,
+            error: older.error,
+            onTap: () {
+              final oldest = oldestChatTime(data.conversations);
+              if (oldest != null) ref.read(olderChatsProvider.notifier).loadMore(oldest);
+            },
           ),
       ],
     );

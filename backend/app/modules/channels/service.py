@@ -1,6 +1,11 @@
 """Public interface of the channels module."""
 
+import base64
+import hashlib
+import hmac
+import json
 import re
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -8,14 +13,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import crypto, signing
 from app.core.config import get_settings
 from app.modules.channels import instagram
 from app.modules.channels.models import ChannelConnection
-from app.modules.channels.schemas import ChannelConnectionInfo, IncomingMessage
+from app.modules.channels.schemas import ChannelConnectionInfo, CustomerProfile, IncomingMessage
 from app.modules.merchants import service as merchants
 
 log = structlog.get_logger()
@@ -187,6 +192,96 @@ async def send_attachment(
         raise SendFailed(str(exc), reason=_send_failure_reason(exc)) from exc
 
 
+async def fetch_customer_profile(
+    credentials: SendCredentials, customer_id: str
+) -> CustomerProfile | None:
+    """The customer's name and username from Instagram, with the shop's token. None when it
+    isn't available (another channel, or Instagram refused); the failure is only logged."""
+    if credentials.channel != "instagram":
+        return None
+    try:
+        data = await instagram.fetch_user_profile(
+            api_version=get_settings().graph_api_version,
+            token=credentials.access_token,
+            user_id=customer_id,
+        )
+    except instagram.InstagramAPIError as exc:
+        log.warning("channels.customer_profile_failed", status=exc.status, code=exc.code)
+        return None
+    name = str(data.get("name") or "").strip()[:150] or None
+    username = str(data.get("username") or "").strip().lstrip("@")[:60] or None
+    return CustomerProfile(name=name, username=username)
+
+
+class InvalidSignedRequest(ValueError):
+    """A Meta signed_request that is malformed or not signed with our app secret."""
+
+
+# Meta sends the deletion callback when the person asks; an older one is a replay.
+DATA_DELETION_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def data_deletion_user_id(signed_request: str) -> str:
+    """The user id in Meta's data-deletion callback, after checking its HMAC-SHA256 signature
+    with the Instagram app secret (or the Meta app secret, as for webhooks)."""
+    encoded_signature, _, payload = signed_request.strip().partition(".")
+    if not encoded_signature or not payload:
+        raise InvalidSignedRequest("signed_request is malformed")
+    try:
+        signature = _b64url_decode(encoded_signature)
+        data = json.loads(_b64url_decode(payload))
+    except (ValueError, TypeError) as exc:
+        raise InvalidSignedRequest("signed_request is malformed") from exc
+    if not isinstance(data, dict):
+        raise InvalidSignedRequest("signed_request is malformed")
+    claims: dict[str, Any] = data  # pyright: ignore[reportUnknownVariableType]
+    if str(claims.get("algorithm", "")).upper() != "HMAC-SHA256":
+        raise InvalidSignedRequest("signed_request uses an unexpected algorithm")
+    settings = get_settings()
+    secrets_to_try = [s for s in (settings.instagram_app_secret, settings.meta_app_secret) if s]
+    if not any(
+        hmac.compare_digest(
+            hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest(), signature
+        )
+        for secret in secrets_to_try
+    ):
+        raise InvalidSignedRequest("signed_request signature doesn't match")
+    try:
+        issued_at = int(claims.get("issued_at") or 0)
+    except (TypeError, ValueError) as exc:
+        raise InvalidSignedRequest("signed_request has no issued_at") from exc
+    age = time.time() - issued_at
+    if age > DATA_DELETION_MAX_AGE_SECONDS or age < -300:
+        # Meta calls at once: an old request replayed later must not delete a re-created shop.
+        raise InvalidSignedRequest("signed_request is too old")
+    user_id = str(claims.get("user_id") or "").strip()
+    if not user_id:
+        raise InvalidSignedRequest("signed_request has no user_id")
+    return user_id
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+async def merchant_for_instagram_account(
+    session: AsyncSession, account_id: str
+) -> uuid.UUID | None:
+    """The shop whose connected Instagram account this is, if any (active or not), by either of
+    its ids: the professional account id or the app-scoped user id Meta's callbacks use."""
+    return await session.scalar(
+        select(ChannelConnection.merchant_id)
+        .where(
+            ChannelConnection.channel == "instagram",
+            or_(
+                ChannelConnection.external_account_id == account_id,
+                ChannelConnection.app_user_id == account_id,
+            ),
+        )
+        .limit(1)
+    )
+
+
 def _simulated_id() -> str:
     """The simulator's messages are stored by the outbox but go nowhere."""
     return f"web-{uuid.uuid4().hex[:16]}"
@@ -327,6 +422,7 @@ async def complete_instagram_oauth(
     )
     now = datetime.now(UTC)
     connection.username = account.username
+    connection.app_user_id = account.app_user_id or connection.app_user_id
     connection.access_token_encrypted = crypto.encrypt(grant.access_token)
     connection.token_expires_at = _expiry(now, grant.expires_in)
     connection.token_refreshed_at = now

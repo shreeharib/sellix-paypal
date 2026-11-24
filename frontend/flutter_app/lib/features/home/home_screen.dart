@@ -4,6 +4,7 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -330,7 +331,7 @@ class _StockAnchor extends StatelessWidget {
             Text('What’s in stock today?', style: SxText.titleL.copyWith(color: p.onAnchor)),
             const SizedBox(height: SxSpace.s8),
             Text(
-              'Say it in any language. sellix makes the list. Chats wait until you confirm.',
+              'Say it in any language. sellix makes the list, and you check it.',
               style: SxText.caption.copyWith(color: p.onAnchorSecondary),
             ),
             const SizedBox(height: 18),
@@ -351,8 +352,8 @@ class _StockAnchor extends StatelessWidget {
               spacing: SxSpace.s8,
               runSpacing: SxSpace.s8,
               children: [
-                // BACKEND GAP: no endpoint copies yesterday's stock list, so this stays off.
-                if (!data.newShop)
+                // BACKEND GAP: no endpoint copies yesterday's stock list, so it is hidden.
+                if (kShowComingSoon && !data.newShop)
                   const SxButton(
                     label: 'Same as yesterday',
                     icon: TablerIcons.copy,
@@ -367,7 +368,7 @@ class _StockAnchor extends StatelessWidget {
                 ),
               ],
             ),
-            if (!data.newShop)
+            if (kShowComingSoon && !data.newShop)
               Padding(
                 padding: const EdgeInsets.only(top: SxSpace.s8),
                 child: Text(
@@ -421,18 +422,20 @@ Future<void> _agentSheet(BuildContext context, SxAgentState state) async {
         children: switch (state) {
           SxAgentState.live => [
             // BACKEND GAP: `agent_enabled` is on or off, with no pause-until time.
-            const SxChoiceCard(
-              title: 'For 1 hour',
-              subtitle: 'Timed pause isn’t ready yet',
-              icon: TablerIcons.clock,
-              onTap: null,
-            ),
-            const SxChoiceCard(
-              title: 'Until tomorrow morning',
-              subtitle: 'Timed pause isn’t ready yet',
-              icon: TablerIcons.moon,
-              onTap: null,
-            ),
+            if (kShowComingSoon) ...const [
+              SxChoiceCard(
+                title: 'For 1 hour',
+                subtitle: 'Timed pause isn’t ready yet',
+                icon: TablerIcons.clock,
+                onTap: null,
+              ),
+              SxChoiceCard(
+                title: 'Until tomorrow morning',
+                subtitle: 'Timed pause isn’t ready yet',
+                icon: TablerIcons.moon,
+                onTap: null,
+              ),
+            ],
             SxChoiceCard(
               title: 'Until you turn it on',
               subtitle: 'You answer every chat yourself',

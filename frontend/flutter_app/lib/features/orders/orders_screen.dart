@@ -142,9 +142,9 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen> {
               value: orders,
               onRetry: () => ref.invalidate(ordersProvider),
               loading: const SxSkeletonList(topHeight: 160),
-              builder: (context, list) {
-                _pushBadge(ordersToAct(list).length);
-                return _body(list, handles, businessDate);
+              builder: (context, first) {
+                _pushBadge(ordersToAct(first).length);
+                return _body(first, handles, businessDate);
               },
             ),
           ),
@@ -153,11 +153,14 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen> {
     );
   }
 
-  Widget _body(List<Order> list, Map<String, String> handles, DateTime businessDate) {
+  Widget _body(List<Order> first, Map<String, String> handles, DateTime businessDate) {
     final query = _search.text.trim().toLowerCase().replaceFirst(RegExp('^#'), '');
+    final older = ref.watch(olderOrdersProvider);
+    final list = withOlder(first, older);
     return SxScrollList(
       onRefresh: _reload,
-      children: query.isNotEmpty
+      children: [
+        ...query.isNotEmpty
           ? _searchResults(list, handles, query)
           : [
               _Anchor(
@@ -176,6 +179,16 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen> {
               const SizedBox(height: SxSpace.s8),
               ..._tabList(list, handles, businessDate),
             ],
+        if (mayHaveOlder(first, older))
+          SxLoadMore(
+            label: 'Load older orders',
+            loading: older.loading,
+            error: older.error,
+            onTap: () => ref
+                .read(olderOrdersProvider.notifier)
+                .loadMore(list.map((o) => o.createdAt).reduce((a, b) => a.isBefore(b) ? a : b)),
+          ),
+      ],
     );
   }
 

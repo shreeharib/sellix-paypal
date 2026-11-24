@@ -34,3 +34,11 @@ class IncomingMessage:
     is_echo: bool = False  # sent by the shop (from the Instagram app, or by sellix itself)
     # A tapped quick reply, e.g. "CONFIRM:<quote id>": proof of what the customer chose.
     quick_reply_payload: str | None = None
+
+
+@dataclass(frozen=True)
+class CustomerProfile:
+    """A customer's public name and username on the channel (either may be missing)."""
+
+    name: str | None
+    username: str | None

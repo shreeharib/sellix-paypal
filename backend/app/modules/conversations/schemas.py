@@ -49,6 +49,11 @@ class ConversationSummary:
     last_message_sender: str | None
     last_message_body: str | None
     last_message_at: datetime | None
+    agent_paused_until: datetime | None = None  # an owner's reply paused the assistant until
+
+
+class WindowClosed(Exception):
+    """Instagram's reply window for this customer is closed: the message can't be sent."""
 
 
 @dataclass(frozen=True)

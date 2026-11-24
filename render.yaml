@@ -1,4 +1,4 @@
-# Render blueprint for the dev environment. Draft: check it on the first deploy.
+# Render blueprint for production (APP_ENV=prod). Draft: check it on the first deploy.
 # Secrets marked `sync: false` are entered in the Render dashboard, never here.
 services:
   - type: web
@@ -14,13 +14,23 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.10"
+      # prod: missing secrets stop the start, /docs and /simulator are off, no payment simulator,
+      # no shared Razorpay account, no long-lived operator tokens.
       - key: APP_ENV
-        value: dev
+        value: prod
       # The worker below runs the jobs; otherwise every API process would run its own worker.
       - key: RUN_WORKER_IN_PROCESS
         value: "false"
+      # Whose X-Forwarded-For uvicorn believes (the per-IP rate limits key on the result).
+      # Never "*": uvicorn then takes the left-most entry, which the client writes itself, so
+      # anyone could spoof their address and slip past the per-IP limits on sign-in and
+      # webhooks. Render's proxy connects from its private network and appends the real
+      # client address, so trust only private ranges: uvicorn then takes the right-most
+      # address that isn't one of them, the real client. Check on the first deploy that the
+      # logs show real client addresses (if every request shows one private address, Render's
+      # proxy is outside these ranges: add its range here).
       - key: FORWARDED_ALLOW_IPS
-        value: "*"  # Render's proxy sets X-Forwarded-For; the API is only reachable through it
+        value: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.1"
       - key: DB_POOL_SIZE
         value: "8"
       - key: DB_MAX_OVERFLOW
@@ -40,11 +50,14 @@ services:
         sync: false
       - key: WEB_APP_ORIGINS
         sync: false
-      - key: PAYPAL_CLIENT_ID
+      # Optional: a shared Razorpay account for shops that haven't connected their own (only
+      # used in prod with RAZORPAY_SHARED_ACCOUNT_IN_PROD=true, for a one-shop server). Each
+      # shop normally connects its own account in the app.
+      - key: RAZORPAY_KEY_ID
         sync: false
-      - key: PAYPAL_CLIENT_SECRET
+      - key: RAZORPAY_KEY_SECRET
         sync: false
-      - key: PAYPAL_WEBHOOK_ID
+      - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
       - key: INSTAGRAM_APP_ID
         sync: false
@@ -62,9 +75,9 @@ services:
         sync: false
       - key: LLM_REASONING_EFFORT
         value: low
-      # On while we capture real payloads (test accounts only); turn off afterwards.
+      # Payloads contain customers' messages: never logged in production.
       - key: LOG_WEBHOOK_PAYLOADS
-        value: "true"
+        value: "false"
 
   # The job worker as its own service: webhooks, agent turns, payments and expiry run here, so a
   # burst of customer messages can't slow the merchant app, and API deploys don't stop jobs.
@@ -79,7 +92,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.10"
       - key: APP_ENV
-        value: dev
+        value: prod
       - key: WORKER_CONCURRENCY
         value: "4"
       - key: DB_POOL_SIZE
@@ -95,11 +108,14 @@ services:
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
-      - key: PAYPAL_CLIENT_ID
+      # Optional: a shared Razorpay account for shops that haven't connected their own (only
+      # used in prod with RAZORPAY_SHARED_ACCOUNT_IN_PROD=true, for a one-shop server). Each
+      # shop normally connects its own account in the app.
+      - key: RAZORPAY_KEY_ID
         sync: false
-      - key: PAYPAL_CLIENT_SECRET
+      - key: RAZORPAY_KEY_SECRET
         sync: false
-      - key: PAYPAL_WEBHOOK_ID
+      - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
       - key: INSTAGRAM_APP_ID
         sync: false

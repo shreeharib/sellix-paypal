@@ -1,5 +1,10 @@
 import 'package:flutter/foundation.dart';
 
+/// Shows controls for features that don't work yet (other sign-in methods, timed pause, app
+/// languages, phone-only reminders and automations). Off in the product: a dead button only
+/// confuses. Turn on to see the prototype's full screens while building them.
+const bool kShowComingSoon = false;
+
 /// Build-time configuration, passed with `--dart-define`.
 abstract final class AppConfig {
   /// Base URL of the sellix API.

@@ -2,6 +2,13 @@
 
 Every change is one conditional UPDATE on the variant's row for the day, so concurrent orders
 can never take stock below zero (the table's check constraint is the last line of defence).
+
+How an item is counted is its stock mode (shop_types.yaml lists the four):
+- `daily`: a fresh count each day (a row per day; leftovers carry only if the merchant says so).
+- `inventory`: kept until sold. The first read of a new day carries the latest earlier day's
+  remainder forward (`carry_forward`), so a closed day loses nothing.
+- `made_to_order` and `unlimited`: no count. Always on sale, up to NO_COUNT_LINE_LIMIT a line,
+  with no row needed, no hold and no daily_stock change when ordered.
 """
 
 import re
@@ -9,10 +16,12 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import ColumnElement, select, text, update
+from sqlalchemy import ColumnElement, Date, exists, literal, select, text, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.modules.catalog import service as catalog
 from app.modules.inventory.models import DailyStock, StockHold
@@ -23,17 +32,27 @@ from app.modules.inventory.schemas import (
     StockItem,
     YesterdayLeftover,
 )
+from app.modules.merchants import service as merchants
+
+KEPT_MODE = "inventory"
+NO_COUNT_MODES = ("made_to_order", "unlimited")
+# The most of a no-count item one order line can take; also its `available` in every list.
+NO_COUNT_LINE_LIMIT = 99
 
 
 class StockConflict(ValueError):
     """The change would make stock negative (more promised than made)."""
 
 
-async def day_ledger(
+def is_counted(stock_mode: str) -> bool:
+    """Whether orders hold and sell this mode's stock from the daily ledger."""
+    return stock_mode not in NO_COUNT_MODES
+
+
+async def _rows(
     session: AsyncSession, merchant_id: uuid.UUID, business_date: date
-) -> list[LedgerRow]:
-    """Every variant's stock for the day: opening, restocked, held, sold, counter, left."""
-    stocks = {
+) -> dict[uuid.UUID, DailyStock]:
+    return {
         s.variant_id: s
         for s in await session.scalars(
             select(DailyStock).where(
@@ -42,27 +61,92 @@ async def day_ledger(
             )
         )
     }
-    variants = await catalog.list_variants_by_ids(
-        session, merchant_id, stocks.keys(), active_only=False
-    )
-    return [
-        LedgerRow(
-            variant_id=v.variant_id,
-            product=v.product_name,
-            variant=v.variant_name,
-            price_minor=v.price_minor,
-            currency=v.currency,
-            opening=stocks[v.variant_id].opening,
-            restocked=stocks[v.variant_id].restocked,
-            held=stocks[v.variant_id].held,
-            sold=stocks[v.variant_id].sold,
-            counter_sales=stocks[v.variant_id].counter_sales,
-            available=stocks[v.variant_id].available,
-            stock_mode=v.effective_stock_mode,
-            shelf_life_days=v.effective_shelf_life_days,
+
+
+async def carry_forward(session: AsyncSession, merchant_id: uuid.UUID, business_date: date) -> int:
+    """Start each kept-until-sold item's day with what its latest earlier day had left.
+
+    Only for the shop's current day (a coming day would count the same units twice), and only
+    for items with no row yet that day: the merchant's own count wins, and later reads do
+    nothing. Two first reads at once carry once: each item gets one row a day (the unique
+    (variant, day) key; the second insert waits for the first, then does nothing).
+    Returns how many items were carried.
+    """
+    merchant = await merchants.get_merchant(session, merchant_id)
+    if business_date != merchants.business_date(merchant):
+        return 0
+    kept = [
+        v.variant_id
+        for v in await catalog.list_variants_by_ids(
+            session, merchant_id, (), active_only=True, also_modes=(KEPT_MODE,)
         )
-        for v in variants
     ]
+    if not kept:
+        return 0
+    that_day = aliased(DailyStock)
+    latest = (
+        select(
+            DailyStock.merchant_id,
+            DailyStock.variant_id,
+            literal(business_date, Date),
+            DailyStock.available,
+        )
+        .where(
+            DailyStock.merchant_id == merchant_id,
+            DailyStock.variant_id.in_(kept),
+            DailyStock.business_date < business_date,
+            ~exists().where(
+                that_day.variant_id == DailyStock.variant_id,
+                that_day.business_date == business_date,
+            ),
+        )
+        .ext(distinct_on(DailyStock.variant_id))
+        .order_by(DailyStock.variant_id, DailyStock.business_date.desc())
+    )
+    carried = await session.scalars(
+        pg_insert(DailyStock)
+        .from_select(["merchant_id", "variant_id", "business_date", "opening"], latest)
+        .on_conflict_do_nothing(index_elements=[DailyStock.variant_id, DailyStock.business_date])
+        .returning(DailyStock.id)
+    )
+    return len(list(carried))
+
+
+async def day_ledger(
+    session: AsyncSession, merchant_id: uuid.UUID, business_date: date
+) -> list[LedgerRow]:
+    """Every active item's stock for the day: opening, restocked, held, sold, counter, left.
+
+    No-count items are listed every day, `available` NO_COUNT_LINE_LIMIT (their `stock_mode`
+    says they aren't counted). Removed products are left out.
+    """
+    await carry_forward(session, merchant_id, business_date)
+    stocks = await _rows(session, merchant_id, business_date)
+    variants = await catalog.list_variants_by_ids(
+        session, merchant_id, stocks.keys(), active_only=True, also_modes=NO_COUNT_MODES
+    )
+    ledger: list[LedgerRow] = []
+    for v in variants:
+        row = stocks.get(v.variant_id)
+        counted = is_counted(v.effective_stock_mode)
+        ledger.append(
+            LedgerRow(
+                variant_id=v.variant_id,
+                product=v.product_name,
+                variant=v.variant_name,
+                price_minor=v.price_minor,
+                currency=v.currency,
+                opening=row.opening if row else 0,
+                restocked=row.restocked if row else 0,
+                held=row.held if row else 0,
+                sold=row.sold if row else 0,
+                counter_sales=row.counter_sales if row else 0,
+                available=(row.available if row else 0) if counted else NO_COUNT_LINE_LIMIT,
+                stock_mode=v.effective_stock_mode,
+                shelf_life_days=v.effective_shelf_life_days,
+            )
+        )
+    return ledger
 
 
 async def today_stock(
@@ -72,44 +156,60 @@ async def today_stock(
     *,
     ordering_today: date | None = None,
 ) -> list[StockItem]:
-    """The day's stock with something left to list.
+    """What can be sold on the day: counted items with stock set for it, and every no-count
+    item (`available` NO_COUNT_LINE_LIMIT). Kept-until-sold stock is carried forward first.
 
     `ordering_today`: for customers' menus, the shop's local date now. Items customers can't
     order for `business_date` (sold on another day, or past their last order date) are left out;
     leave it None for the merchant's own views.
     """
-    stocks = {
-        s.variant_id: s
-        for s in await session.scalars(
-            select(DailyStock).where(
-                DailyStock.merchant_id == merchant_id,
-                DailyStock.business_date == business_date,
-            )
-        )
-    }
+    await carry_forward(session, merchant_id, business_date)
+    return await _day_items(
+        session, merchant_id, business_date, ordering_today=ordering_today, every_no_count=True
+    )
+
+
+async def _day_items(
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    business_date: date,
+    *,
+    ordering_today: date | None,
+    every_no_count: bool,
+) -> list[StockItem]:
+    """The day's items; no-count items only if they have a row that day, or `every_no_count`."""
+    stocks = await _rows(session, merchant_id, business_date)
     variants = await catalog.list_variants_by_ids(
-        session, merchant_id, stocks.keys(), active_only=True
+        session,
+        merchant_id,
+        stocks.keys(),
+        active_only=True,
+        also_modes=NO_COUNT_MODES if every_no_count else (),
     )
     if ordering_today is not None:
         variants = [
             v for v in variants if v.ordering_problem(business_date, ordering_today) is None
         ]
-    return [
-        StockItem(
-            product=v.product_name,
-            variant=v.variant_name,
-            price_minor=v.price_minor,
-            currency=v.currency,
-            available=stocks[v.variant_id].available,
-            variant_id=v.variant_id,
-            opening=stocks[v.variant_id].opening,
-            stock_mode=v.effective_stock_mode,
-            shelf_life_days=v.effective_shelf_life_days,
-            available_on=v.available_on,
-            order_by_date=v.order_by_date,
+    items: list[StockItem] = []
+    for v in variants:
+        row = stocks.get(v.variant_id)
+        counted = is_counted(v.effective_stock_mode)
+        items.append(
+            StockItem(
+                product=v.product_name,
+                variant=v.variant_name,
+                price_minor=v.price_minor,
+                currency=v.currency,
+                available=(row.available if row else 0) if counted else NO_COUNT_LINE_LIMIT,
+                variant_id=v.variant_id,
+                opening=row.opening if row and counted else 0,
+                stock_mode=v.effective_stock_mode,
+                shelf_life_days=v.effective_shelf_life_days,
+                available_on=v.available_on,
+                order_by_date=v.order_by_date,
+            )
         )
-        for v in variants
-    ]
+    return items
 
 
 async def upcoming_stock(
@@ -122,6 +222,8 @@ async def upcoming_stock(
 ) -> dict[date, list[StockItem]]:
     """Stock the merchant has set for the days after `after` (pre-orders), by day.
 
+    Only what was set for each day: no-count items appear on a day they have a row for (as
+    available), not on every coming day. Nothing is carried forward into coming days.
     `ordering_today`: as in `today_stock`; days left with no orderable item are dropped.
     """
     dates = await session.scalars(
@@ -135,7 +237,9 @@ async def upcoming_stock(
         .order_by(DailyStock.business_date)
     )
     by_day = {
-        day: await today_stock(session, merchant_id, day, ordering_today=ordering_today)
+        day: await _day_items(
+            session, merchant_id, day, ordering_today=ordering_today, every_no_count=False
+        )
         for day in list(dates)
     }
     return {day: items for day, items in by_day.items() if items or ordering_today is None}
@@ -235,6 +339,8 @@ async def release(
         condition=DailyStock.held >= quantity,
         held=DailyStock.held - quantity,
     )
+    if applied:
+        await _onto_todays_shelf(session, variant_id, business_date, quantity)
     if applied and order_id is not None:
         await session.execute(
             update(StockHold)
@@ -283,10 +389,13 @@ async def release_expired_holds(
     *,
     now: datetime | None = None,
     business_date: date | None = None,
-) -> list[uuid.UUID]:
-    """Sweep stock_holds for expired records, decrement daily_stock.held, and mark status='expired'.
+) -> int:
+    """Give back expired holds that belong to no order, and mark them 'expired'. Returns how many.
 
-    Returns the list of affected order_ids.
+    An order's holds are released with the order (orders.expire_due, cancel, payment), under
+    the order's row lock. Sweeping them here as well released them twice when an order was
+    locked by a payment, or past expire_due's batch, and locked rows crosswise with another
+    copy of the expiry job (a deadlock). Rows are taken in variant order.
     """
     cutoff = now or datetime.now(UTC)
     expired_holds = list(
@@ -295,11 +404,12 @@ async def release_expired_holds(
             .where(
                 StockHold.status == "held",
                 StockHold.expires_at < cutoff,
+                StockHold.order_id.is_(None),
             )
+            .order_by(StockHold.variant_id, StockHold.id)
             .with_for_update(skip_locked=True)
         )
     )
-    affected_order_ids: list[uuid.UUID] = []
     b_date = business_date or cutoff.date()
     for hold_rec in expired_holds:
         await _apply(
@@ -310,9 +420,55 @@ async def release_expired_holds(
             held=DailyStock.held - hold_rec.quantity,
         )
         hold_rec.status = "expired"
-        if hold_rec.order_id is not None:
-            affected_order_ids.append(hold_rec.order_id)
-    return affected_order_ids
+    return len(expired_holds)
+
+
+async def unsell(
+    session: AsyncSession, *, variant_id: uuid.UUID, business_date: date, quantity: int
+) -> bool:
+    """Put sold stock back on sale (a paid order was refunded with its items restocked)."""
+    applied = await _apply(
+        session,
+        variant_id,
+        business_date,
+        condition=DailyStock.sold >= quantity,
+        sold=DailyStock.sold - quantity,
+    )
+    if applied:
+        await _onto_todays_shelf(session, variant_id, business_date, quantity)
+    return applied
+
+
+async def _onto_todays_shelf(
+    session: AsyncSession, variant_id: uuid.UUID, business_date: date, quantity: int
+) -> None:
+    """Kept-until-sold units given back on an earlier day's row belong on today's shelf.
+
+    Today's row was carried from the earlier day's remainder when it was first read, so units
+    released there afterwards (a hold that ran out after midnight, a refund days later) would
+    never be on sale again. They are added to today's row as restocked. If today has no row yet,
+    the carry will count them, so nothing is moved. (The earlier day's row keeps them too; no
+    carry reads it again once a later row exists.)
+    """
+    old = await session.scalar(
+        select(DailyStock).where(
+            DailyStock.variant_id == variant_id, DailyStock.business_date == business_date
+        )
+    )
+    if old is None:
+        return
+    merchant = await merchants.get_merchant(session, old.merchant_id)
+    today = merchants.business_date(merchant)
+    if business_date >= today:
+        return
+    found = await catalog.list_variants_by_ids(session, old.merchant_id, (variant_id,))
+    if not found or found[0].effective_stock_mode != KEPT_MODE:
+        return
+    await session.execute(
+        update(DailyStock)
+        .where(DailyStock.variant_id == variant_id, DailyStock.business_date == today)
+        .values(restocked=DailyStock.restocked + quantity)
+    )
 
 
 async def sell_unheld(
@@ -328,38 +484,43 @@ async def sell_unheld(
     )
 
 
+async def _row_or_missing(
+    session: AsyncSession, merchant_id: uuid.UUID, variant_id: uuid.UUID, business_date: date
+) -> DailyStock:
+    """The shop's row for the item and day; LookupError if it has none (or the id is another
+    shop's: every merchant write is scoped to the merchant, never to the id alone)."""
+    stock = await session.scalar(
+        select(DailyStock).where(
+            DailyStock.merchant_id == merchant_id,
+            DailyStock.variant_id == variant_id,
+            DailyStock.business_date == business_date,
+        )
+    )
+    if stock is None:
+        raise LookupError(f"No stock record found for variant {variant_id} on {business_date}")
+    return stock
+
+
 async def restock(
     session: AsyncSession,
     *,
+    merchant_id: uuid.UUID,
     variant_id: uuid.UUID,
     business_date: date,
     quantity: int,
 ) -> bool:
-    """Add extra inventory for an item during the day (e.g. fresh afternoon bake).
+    """Add extra stock for one of the shop's items during the day (a fresh afternoon batch).
 
-    Increments `DailyStock.restocked` by `quantity`. In the daily stock formula:
-        available = opening + restocked - held - sold - counter_sales
-    this immediately increases available stock for customer orders.
-
-    Args:
-        session: Active asynchronous database session.
-        variant_id: ID of the product variant being restocked.
-        business_date: The merchant's current business date.
-        quantity: Number of new units to add to stock (must be > 0).
-
-    Returns:
-        True if the stock record was updated.
-
-    Raises:
-        ValueError: If quantity <= 0.
-        LookupError: If no daily stock record exists for the variant on this business date.
+    Raises ValueError if `quantity` isn't positive, LookupError if the shop has no stock row
+    for the item that day (another shop's item counts as missing).
     """
     if quantity <= 0:
         raise ValueError(f"Restock quantity must be positive, got {quantity}")
-
+    await carry_forward(session, merchant_id, business_date)
     updated = await session.scalar(
         update(DailyStock)
         .where(
+            DailyStock.merchant_id == merchant_id,
             DailyStock.variant_id == variant_id,
             DailyStock.business_date == business_date,
         )
@@ -368,55 +529,30 @@ async def restock(
     )
     if updated is not None:
         return True
-
-    # If 0 rows updated, verify whether the record exists
-    stock = await session.scalar(
-        select(DailyStock.id).where(
-            DailyStock.variant_id == variant_id,
-            DailyStock.business_date == business_date,
-        )
-    )
-    if stock is None:
-        raise LookupError(f"No stock record found for variant {variant_id} on {business_date}")
+    await _row_or_missing(session, merchant_id, variant_id, business_date)
     return False
 
 
 async def record_counter_sale(
     session: AsyncSession,
     *,
+    merchant_id: uuid.UUID,
     variant_id: uuid.UUID,
     business_date: date,
     quantity: int,
 ) -> int:
-    """Record an in-person, walk-in counter sale on the daily stock ledger.
+    """Record a walk-in sale of one of the shop's items, so it isn't sold online twice.
 
-    Atomically increments counter_sales if available >= quantity, returning
-    the new remaining available count.
-
-    This reflects the database procedure `record_counter_sale(p_variant_id, p_quantity)`:
-    deducts stock from online AI availability so home bakers and boutique shops never double-sell
-    items sold over the physical shop counter.
-
-    Args:
-        session: Active asynchronous database session.
-        variant_id: ID of the product variant sold at the counter.
-        business_date: The merchant's current business date.
-        quantity: Number of units sold (must be > 0).
-
-    Returns:
-        The updated remaining available count.
-
-    Raises:
-        ValueError: If quantity <= 0.
-        LookupError: If no daily stock record exists for the variant on this business date.
-        StockConflict: If requested quantity exceeds currently available units.
+    Returns what is left. Raises ValueError if `quantity` isn't positive, LookupError if the
+    shop has no stock row for the item that day, StockConflict if fewer are left.
     """
     if quantity <= 0:
         raise ValueError(f"Counter sale quantity must be positive, got {quantity}")
-
+    await carry_forward(session, merchant_id, business_date)
     new_available = await session.scalar(
         update(DailyStock)
         .where(
+            DailyStock.merchant_id == merchant_id,
             DailyStock.variant_id == variant_id,
             DailyStock.business_date == business_date,
             DailyStock.available >= quantity,
@@ -426,16 +562,7 @@ async def record_counter_sale(
     )
     if new_available is not None:
         return new_available
-
-    # Condition failed or row doesn't exist; inspect state to return clear error
-    stock = await session.scalar(
-        select(DailyStock).where(
-            DailyStock.variant_id == variant_id,
-            DailyStock.business_date == business_date,
-        )
-    )
-    if stock is None:
-        raise LookupError(f"No stock record found for variant {variant_id} on {business_date}")
+    stock = await _row_or_missing(session, merchant_id, variant_id, business_date)
     raise StockConflict(
         f"Cannot record counter sale of {quantity}: only {stock.available} available"
     )
@@ -444,30 +571,21 @@ async def record_counter_sale(
 async def mark_sold_out(
     session: AsyncSession,
     *,
+    merchant_id: uuid.UUID,
     variant_id: uuid.UUID,
     business_date: date,
 ) -> bool:
-    """Mark a variant as sold out for the day.
+    """Mark one of the shop's items sold out for the day: what's left moves into counter sales
+    (held and sold stay as they are). True also when it was already sold out.
 
-    Absorbs any remaining available stock into counter_sales so available becomes 0,
-    leaving held and sold orders untouched.
-
-    Args:
-        session: Active asynchronous database session.
-        variant_id: ID of the product variant to mark sold out.
-        business_date: The merchant's current business date.
-
-    Returns:
-        True if the variant is marked sold out (or was already sold out).
-
-    Raises:
-        LookupError: If no daily stock record exists for the variant on this business date.
+    Raises LookupError if the shop has no stock row for the item that day.
     """
-    # Atomically set counter_sales = opening + restocked - held - sold where available > 0
-    # In PostgreSQL's generated column, this exactly produces available = 0
+    await carry_forward(session, merchant_id, business_date)
+    # counter_sales = opening + restocked - held - sold makes the generated `available` 0.
     updated = await session.scalar(
         update(DailyStock)
         .where(
+            DailyStock.merchant_id == merchant_id,
             DailyStock.variant_id == variant_id,
             DailyStock.business_date == business_date,
             DailyStock.available > 0,
@@ -480,18 +598,8 @@ async def mark_sold_out(
         )
         .returning(DailyStock.id)
     )
-    if updated is not None:
-        return True
-
-    # If 0 rows updated, verify whether the record exists or was already 0 available
-    stock = await session.scalar(
-        select(DailyStock.id).where(
-            DailyStock.variant_id == variant_id,
-            DailyStock.business_date == business_date,
-        )
-    )
-    if stock is None:
-        raise LookupError(f"No stock record found for variant {variant_id} on {business_date}")
+    if updated is None:
+        await _row_or_missing(session, merchant_id, variant_id, business_date)
     return True
 
 
@@ -662,7 +770,11 @@ async def _apply(
 async def get_yesterday_leftovers(
     session: AsyncSession, merchant_id: uuid.UUID, business_date: date
 ) -> list[YesterdayLeftover]:
-    """Retrieve unsold stock from yesterday (available > 0) with stock_mode and shelf life."""
+    """Yesterday's unsold daily batches (available > 0), with stock mode and shelf life.
+
+    Kept-until-sold items aren't offered: they carry over by themselves (`carry_forward`), and
+    carrying them again would count them twice. No-count items have nothing to carry.
+    """
     yesterday = business_date - timedelta(days=1)
     stocks = {
         s.variant_id: s
@@ -689,6 +801,7 @@ async def get_yesterday_leftovers(
             shelf_life_days=v.effective_shelf_life_days,
         )
         for v in variants
+        if v.effective_stock_mode not in (KEPT_MODE, *NO_COUNT_MODES)
     ]
 
 
@@ -699,12 +812,26 @@ async def apply_rollover_selection(
     business_date: date,
     selections: list[RolloverItemSelection],
 ) -> int:
-    """Apply customized rollover: add chosen leftover quantities to today's opening stock."""
+    """Add the merchant's chosen leftovers of yesterday's daily batches to today's opening stock.
+
+    Raises LookupError for an item that isn't this shop's. Kept-until-sold and no-count items
+    are skipped (they carry by themselves, or have no count), so an older app can't count them
+    twice.
+    """
     yesterday = business_date - timedelta(days=1)
     applied_count = 0
+    modes = {
+        v.variant_id: v.effective_stock_mode
+        for v in await catalog.list_variants_by_ids(
+            session, merchant_id, [item.variant_id for item in selections]
+        )
+    }
+    for item in selections:
+        if item.variant_id not in modes:
+            raise LookupError(f"No product {item.variant_id} in this shop")
 
     for item in selections:
-        if item.rollover_quantity <= 0:
+        if item.rollover_quantity <= 0 or modes[item.variant_id] in (KEPT_MODE, *NO_COUNT_MODES):
             continue
 
         # Validate that leftover actually had at least rollover_quantity available yesterday

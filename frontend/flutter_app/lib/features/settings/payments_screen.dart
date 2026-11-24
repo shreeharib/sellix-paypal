@@ -6,10 +6,8 @@ import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
+import 'razorpay_card.dart';
 import 'settings_providers.dart';
-
-/// PayPal's currencies on the backend (`modules/payments/paypal.py`). The API does not list them.
-const _payPalCurrencies = ['USD', 'SGD', 'GBP', 'EUR', 'AUD', 'CAD', 'NZD'];
 
 /// `payment_hold_minutes` in the backend's config.
 const _holdMinutes = 15;
@@ -17,6 +15,7 @@ const _holdMinutes = 15;
 /// The same rule as onboarding's UPI step.
 final _upiPattern = RegExp(r'^[\w.-]{2,}@[a-z0-9.-]{2,}$', caseSensitive: false);
 
+/// Razorpay first; the UPI ID is the fallback when Razorpay isn't connected.
 class PaymentsScreen extends ConsumerStatefulWidget {
   const PaymentsScreen({super.key});
 
@@ -66,16 +65,33 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
     await finishSave(context, 'Payment settings saved.', fallback: Routes.profile);
   }
 
+  void _retry() {
+    ref
+      ..invalidate(onboardingProvider)
+      ..invalidate(paymentAccountProvider)
+      ..invalidate(meProvider);
+  }
+
   @override
   Widget build(BuildContext context) {
     final onboarding = ref.watch(onboardingProvider);
+    final account = ref.watch(paymentAccountProvider);
     final data = onboarding.value;
     if (data != null) _upi ??= TextEditingController(text: data.answers.upiId ?? '');
+    // Both must load: the UPI card's wording depends on whether Razorpay is connected.
+    final o = onboarding.value;
+    final a = account.value;
+    final failed = onboarding.hasError ? onboarding : (account.hasError ? account : null);
+    final AsyncValue<(Onboarding, PaymentAccount)> both = o != null && a != null
+        ? AsyncData((o, a))
+        : failed != null
+        ? AsyncError(failed.error!, failed.stackTrace ?? StackTrace.current)
+        : const AsyncLoading();
     return SxScaffold(
       floating: data == null
           ? null
           : SxBottomCta(
-              label: _done ? 'Saved' : 'Save',
+              label: _done ? 'Saved' : 'Save UPI ID',
               icon: TablerIcons.check,
               loading: _saving,
               done: _done,
@@ -85,11 +101,11 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
         children: [
           const SxDetailHeader(title: 'Payments', meta: 'How customers pay you', fallback: Routes.profile),
           Expanded(
-            child: SxAsyncView<Onboarding>(
-              value: onboarding,
-              onRetry: () => ref.invalidate(onboardingProvider),
+            child: SxAsyncView<(Onboarding, PaymentAccount)>(
+              value: both,
+              onRetry: _retry,
               loading: const SxSkeletonList(count: 4, itemHeight: 120),
-              builder: (context, data) => _list(context, data),
+              builder: (context, loaded) => _list(context, loaded.$1, loaded.$2),
             ),
           ),
         ],
@@ -97,8 +113,10 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
     );
   }
 
-  Widget _list(BuildContext context, Onboarding data) {
+  Widget _list(BuildContext context, Onboarding data, PaymentAccount account) {
     final p = context.sx;
+    // Staff see the account, but only the owner changes it. Until `me` loads, nothing is offered.
+    final owner = ref.watch(meProvider).value?.isOwner ?? false;
     Widget titles(String title, String subtitle) => Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -107,39 +125,17 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
       ],
     );
     return SxScrollList(
+      onRefresh: () async {
+        _retry();
+        await ref.read(paymentAccountProvider.future);
+      },
       children: [
         Mx(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             spacing: SxSpace.s8,
             children: [
-              SxFadeUp(
-                child: SxCard(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    spacing: SxSpace.s12,
-                    children: [
-                      Row(
-                        spacing: SxSpace.s12,
-                        children: [
-                          const SxIconTile(child: SxBrandIcon(SxBrand.paypal)),
-                          Expanded(child: titles('PayPal', 'For customers abroad')),
-                          if (data.paymentsReady)
-                            const SxChip(label: 'Ready', tone: SxChipTone.positive, icon: TablerIcons.check)
-                          else
-                            const SxChip(label: 'Not ready'),
-                        ],
-                      ),
-                      Wrap(
-                        spacing: SxSpace.s4,
-                        runSpacing: SxSpace.s4,
-                        children: [for (final c in _payPalCurrencies) SxChip(label: c)],
-                      ),
-                      const SxAiNote('An order is paid only when PayPal confirms. A screenshot never counts.'),
-                    ],
-                  ),
-                ),
-              ),
+              SxFadeUp(child: RazorpayCard(account: account, owner: owner)),
               SxFadeUp(
                 index: 1,
                 child: SxCard(
@@ -151,7 +147,7 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
                         spacing: SxSpace.s12,
                         children: [
                           const SxIconTile(child: SxBrandIcon(SxBrand.upi)),
-                          Expanded(child: titles('UPI', 'For customers in India')),
+                          Expanded(child: titles('UPI ID', 'When Razorpay isn’t connected')),
                         ],
                       ),
                       SxField(
@@ -165,17 +161,13 @@ class _PaymentsScreenState extends ConsumerState<PaymentsScreen> {
                           if (_error != null) setState(() => _error = null);
                         },
                       ),
-                      Row(
-                        spacing: SxSpace.s12,
-                        children: [
-                          Expanded(child: titles('You confirm each payment', 'sellix cannot see UPI payments')),
-                          // Fixed on: with no way to see UPI money, a merchant confirmation is the only path.
-                          const SxToggle(
-                            value: true,
-                            onChanged: null,
-                            semanticLabel: 'You confirm each UPI payment',
-                          ),
-                        ],
+                      Text(
+                        account.connected
+                            ? 'Used only if you disconnect Razorpay. Then customers pay this UPI ID, '
+                                  'and you confirm each payment by hand when the money arrives.'
+                            : 'Used while Razorpay isn’t connected. Customers pay this UPI ID, and you '
+                                  'confirm each payment by hand when the money arrives. sellix can’t see UPI payments.',
+                        style: SxText.caption.copyWith(color: p.textSecondary),
                       ),
                     ],
                   ),

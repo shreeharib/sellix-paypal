@@ -16,24 +16,28 @@ import 'order_logic.dart';
 import 'order_row.dart';
 import 'orders_providers.dart';
 
-/// One order. [orderId] comes from the route.
-///
-/// BACKEND GAP: there is no `GET /orders/{id}`, so the order is found in the latest 200.
+/// One order. [orderId] comes from the route; the order is fetched by id, so any order opens.
 class OrderScreen extends ConsumerWidget {
   const OrderScreen(this.orderId, {super.key});
 
   final String orderId;
 
   Future<void> _reload(WidgetRef ref) {
-    ref.invalidate(orderTimelineProvider(orderId));
-    ref.invalidate(conversationsProvider);
-    return ref.refresh(ordersProvider.future);
+    ref
+      ..invalidate(orderTimelineProvider(orderId))
+      ..invalidate(orderPaymentsProvider(orderId))
+      ..invalidate(conversationsProvider)
+      ..invalidate(ordersProvider);
+    return ref.refresh(orderProvider(orderId).future);
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final orders = ref.watch(ordersProvider);
-    final order = orders.value?.where((o) => o.id == orderId).firstOrNull;
+    final value = ref.watch(orderProvider(orderId));
+    final order = value.value;
+    // The latest orders only count this customer's paid orders; the order itself never waits on them.
+    final recent = ref.watch(ordersProvider).value;
+    final payments = ref.watch(orderPaymentsProvider(orderId)).value;
     final handles = handlesById(ref.watch(conversationsProvider).value ?? const []);
     final name = order == null ? unknownCustomer : customerNameOf(order, handles);
     final cta = order == null ? null : orderCtaOf(order);
@@ -66,25 +70,26 @@ class OrderScreen extends ConsumerWidget {
                       order,
                       name,
                       lastChange: events.value?.lastOrNull?.createdAt,
+                      payments: payments,
                     ),
                   ),
           ),
           Expanded(
-            child: SxAsyncView<List<Order>>(
-              value: orders,
-              onRetry: () => ref.invalidate(ordersProvider),
+            child: SxAsyncView<Order?>(
+              value: value,
+              onRetry: () => ref.invalidate(orderProvider(orderId)),
               loading: const SxSkeletonList(topHeight: 160),
-              builder: (context, _) => SxScrollList(
+              isEmpty: (o) => o == null,
+              empty: const SxEmptyState(
+                icon: TablerIcons.receipt_off,
+                title: 'Order not found',
+                body: 'It may have been deleted, or it belongs to another shop.',
+              ),
+              builder: (context, found) => SxScrollList(
                 onRefresh: () => _reload(ref),
-                children: order == null
-                    ? const [
-                        SxEmptyState(
-                          icon: TablerIcons.receipt_off,
-                          title: 'Order not found',
-                          body: 'It is not in your latest $ordersWindow orders.',
-                        ),
-                      ]
-                    : [_OrderBody(order: order, name: name, orderCount: _paidCount(orders.value!, order))],
+                children: [
+                  _OrderBody(order: found!, name: name, orderCount: _paidCount(recent ?? [found], found)),
+                ],
               ),
             ),
           ),
@@ -430,7 +435,7 @@ class _ItemsCard extends StatelessWidget {
   }
 }
 
-class _PayCard extends StatelessWidget {
+class _PayCard extends ConsumerWidget {
   const _PayCard({required this.order, required this.name});
 
   final Order order;
@@ -446,7 +451,6 @@ class _PayCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // BACKEND GAP: the order doesn't say how it was paid (UPI, PayPal, cash).
               Text('Payment', style: SxText.bodyStrong.copyWith(color: p.textPrimary)),
               Text(sub, style: SxText.caption.copyWith(color: p.textSecondary)),
             ],
@@ -457,33 +461,122 @@ class _PayCard extends StatelessWidget {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _status(BuildContext context) {
     final amount = money(order.totalMinor, order.currency);
     if (isRefundDue(order)) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: SxSpace.s12,
-        children: [
-          _head(
-            context,
-            'This order is cancelled, but $amount has not gone back to $name.',
-            const SxChip(label: 'Not refunded', tone: SxChipTone.attention),
-          ),
-        ],
+      return _head(
+        context,
+        'This order is cancelled, but $amount has not gone back to $name.',
+        const SxChip(label: 'Not refunded', tone: SxChipTone.attention),
       );
     }
     if (canMarkPaid(order)) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        spacing: SxSpace.s12,
-        children: [
-          _head(
-            context,
-            'You start on it after it is paid.',
-            const SxChip(label: 'Waiting', icon: TablerIcons.clock),
+      return _head(
+        context,
+        'You start on it after it is paid.',
+        const SxChip(label: 'Waiting', icon: TablerIcons.clock),
+      );
+    }
+    return switch (order.status) {
+      OrderStatus.expired => _head(context, 'Not paid in time. Stock went back.', const SxChip(label: 'Not paid')),
+      OrderStatus.cancelled => _head(context, 'No money was taken.', const SxChip(label: 'Not paid')),
+      OrderStatus.refunded => _head(
+        context,
+        '$amount went back to $name.',
+        const SxChip(label: 'Refunded', icon: TablerIcons.arrow_back_up),
+      ),
+      _ when !isPaid(order) => _head(context, 'Not paid yet.', const SxChip(label: 'Not paid')),
+      _ => _head(
+        context,
+        order.paidAt == null ? 'Paid.' : 'Paid ${formatDateTime(order.paidAt!)}.',
+        payChipOf(order),
+      ),
+    };
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.sx;
+    final value = ref.watch(orderPaymentsProvider(order.id));
+    final payments = value.value;
+    final paid = payments?.paid;
+    final link = isPaid(order) ? null : payments?.openLink;
+    final refund = payments?.refund;
+    final amount = money(order.totalMinor, order.currency);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: SxSpace.s12,
+      children: [
+        _status(context),
+        if (canMarkPaid(order) && order.holdExpiresAt != null) _HoldNote(expires: order.holdExpiresAt!),
+        if (paid != null)
+          Column(
+            children: [
+              SxKeyValue(
+                label: 'Paid by',
+                valueWidget: Wrap(
+                  spacing: SxSpace.s8,
+                  runSpacing: SxSpace.s4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    Text(paymentMethodLabel(paid), style: SxText.bodyS.copyWith(color: p.textPrimary)),
+                    if (paid.testMode) const _TestChip(),
+                  ],
+                ),
+              ),
+              if (paid.testMode)
+                SxKeyValue(label: 'Money', value: 'Test payment: no real money moved', divider: true),
+              if (paid.providerPaymentId case final id? when id.isNotEmpty)
+                SxKeyValue(
+                  label: paid.provider == 'razorpay' ? 'Razorpay payment ID' : 'Reference',
+                  divider: true,
+                  valueWidget: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: SxSpace.s4,
+                    children: [
+                      Flexible(
+                        child: SelectableText(id, style: SxText.bodyS.copyWith(color: p.textPrimary)),
+                      ),
+                      SxIconButton(
+                        icon: TablerIcons.copy,
+                        semanticLabel: 'Copy payment ID',
+                        ghost: true,
+                        onTap: () => copyText(context, id, 'Payment ID'),
+                      ),
+                    ],
+                  ),
+                ),
+              if (paid.paidAt != null)
+                SxKeyValue(label: 'Paid at', value: formatDateTime(paid.paidAt!), divider: true),
+              if (paid.feeMinor > 0)
+                SxKeyValue(label: 'Razorpay fee', value: money(paid.feeMinor, paid.currency), divider: true),
+              if (confirmedByHand(paid))
+                SxKeyValue(label: 'Confirmed', value: 'By you, by hand', divider: true),
+            ],
           ),
-          if (order.holdExpiresAt != null) _HoldNote(expires: order.holdExpiresAt!),
+        if (link != null) ...[
+          if (link.testMode) const Align(alignment: AlignmentDirectional.centerStart, child: _TestChip()),
+          _OpenLink(link: link.link!),
+        ],
+        if (refund != null) _RefundLine(refund: refund, currency: order.currency, name: name),
+        if (value.hasError && payments == null)
+          Row(
+            spacing: SxSpace.s8,
+            children: [
+              Expanded(
+                child: Text(
+                  'Payment details did not load.',
+                  style: SxText.caption.copyWith(color: p.textSecondary),
+                ),
+              ),
+              SxLinkButton(
+                label: 'Try again',
+                onTap: () => ref.invalidate(orderPaymentsProvider(order.id)),
+              ),
+            ],
+          ),
+        if (canMarkPaid(order))
           SxButtonRow(
             children: [
               SxButton(
@@ -499,33 +592,113 @@ class _PayCard extends StatelessWidget {
                 onTap: () => showCancelSheet(context, order, name),
               ),
             ],
+          )
+        else if ((payments?.refundable ?? false) && !isRefundDue(order) && refund?.status != 'pending')
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SxButton(
+              label: 'Refund $amount',
+              icon: TablerIcons.arrow_back_up,
+              kind: SxButtonKind.secondary,
+              onTap: () => showRefundSheet(context, order, name),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Marks a Razorpay test-mode payment or link: no real money.
+class _TestChip extends StatelessWidget {
+  const _TestChip();
+
+  @override
+  Widget build(BuildContext context) =>
+      const SxChip(label: 'Test payment', tone: SxChipTone.attention, icon: TablerIcons.flask);
+}
+
+/// The open payment link, to copy or share while the order is unpaid.
+class _OpenLink extends ConsumerWidget {
+  const _OpenLink({required this.link});
+
+  final String link;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = context.sx;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(SxSpace.s12, SxSpace.s4, SxSpace.s4, SxSpace.s4),
+      decoration: BoxDecoration(color: p.tile, borderRadius: BorderRadius.circular(SxRadius.tile)),
+      child: Row(
+        spacing: SxSpace.s4,
+        children: [
+          Icon(TablerIcons.link, size: 18, color: p.textSecondary),
+          Expanded(
+            child: Text(
+              link,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: SxText.bodyS.copyWith(color: p.textPrimary),
+            ),
+          ),
+          SxIconButton(
+            icon: TablerIcons.copy,
+            semanticLabel: 'Copy payment link',
+            ghost: true,
+            onTap: () => copyText(context, link, 'Payment link'),
+          ),
+          SxIconButton(
+            icon: TablerIcons.share,
+            semanticLabel: 'Share payment link',
+            ghost: true,
+            onTap: () => shareText(context, link),
           ),
         ],
-      );
-    }
-    return switch (order.status) {
-      OrderStatus.expired => _head(
-        context,
-        'Not paid in time. Stock went back.',
-        const SxChip(label: 'Not paid'),
       ),
-      OrderStatus.cancelled => _head(
-        context,
-        'No money was taken.',
-        const SxChip(label: 'Not paid'),
+    );
+  }
+}
+
+class _RefundLine extends StatelessWidget {
+  const _RefundLine({required this.refund, required this.currency, required this.name});
+
+  final OrderRefund refund;
+  final String currency;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.sx;
+    final amount = money(refund.amountMinor, currency);
+    final (icon, text, color) = switch (refund.status) {
+      'pending' => (
+        TablerIcons.clock,
+        'Refund of $amount started. Razorpay usually takes 5–7 days to send it back to $name.',
+        p.textPrimary,
       ),
-      OrderStatus.refunded => _head(
-        context,
-        '$amount went back to $name.',
-        const SxChip(label: 'Refunded', icon: TablerIcons.arrow_back_up),
-      ),
-      _ when !isPaid(order) => _head(context, 'Not paid yet.', const SxChip(label: 'Not paid')),
-      _ => _head(
-        context,
-        order.paidAt == null ? 'Paid.' : 'Paid ${formatDateTime(order.paidAt!)}.',
-        payChipOf(order),
-      ),
+      'failed' => (TablerIcons.alert_triangle, 'The refund of $amount failed. No money moved.', p.errorText),
+      _ => (TablerIcons.arrow_back_up, '$amount refunded ${formatDateTime(refund.createdAt)}.', p.textPrimary),
     };
+    return Semantics(
+      liveRegion: true,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        spacing: SxSpace.s8,
+        children: [
+          Icon(icon, size: 20, color: color),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(text, style: SxText.bodyS.copyWith(color: color)),
+                if (refund.reason?.trim().isNotEmpty ?? false)
+                  Text('Reason: ${refund.reason!.trim()}', style: SxText.caption.copyWith(color: p.textSecondary)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

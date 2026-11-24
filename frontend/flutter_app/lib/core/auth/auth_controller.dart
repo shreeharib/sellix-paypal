@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
@@ -5,6 +7,7 @@ import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import '../api/api_exception.dart';
 import '../config.dart';
 import '../providers.dart';
+import '../server_config.dart';
 import 'pkce.dart';
 
 enum AuthStatus { signedIn, signedOut }
@@ -87,11 +90,25 @@ class AuthController extends AsyncNotifier<AuthStatus> {
       return;
     }
     try {
-      await ref.read(sellixApiProvider).logout();
+      // A server that doesn't answer must not keep the merchant from signing out.
+      await ref.read(sellixApiProvider).logout().timeout(const Duration(seconds: 5));
     } on ApiException {
       // Already invalid on the server: signing out locally is all that's left.
+    } on TimeoutException {
+      // Offline or unreachable: the session ends here, and the server lets it expire.
     }
     await ref.read(tokenStoreProvider).clear();
+    state = const AsyncData(AuthStatus.signedOut);
+  }
+
+  /// Points the app at another sellix server. A session belongs to the server that issued it, so
+  /// this signs the merchant out first (on the old server), then switches.
+  Future<void> changeServer(String url) async {
+    final current = state.value ?? await future;
+    if (current == AuthStatus.signedIn) await signOut();
+    await ref.read(serverUrlProvider.notifier).set(url);
+    // DEV ONLY: the command-line token belongs to the old server.
+    ref.read(devSignInProvider.notifier).end();
     state = const AsyncData(AuthStatus.signedOut);
   }
 

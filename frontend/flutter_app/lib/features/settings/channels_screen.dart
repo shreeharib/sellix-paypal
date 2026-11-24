@@ -4,6 +4,7 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/auth/instagram_connect.dart';
 import '../../core/format.dart';
 import '../../core/router.dart';
@@ -106,7 +107,8 @@ class _ChannelsScreenState extends ConsumerState<ChannelsScreen> {
                   ),
                 ),
               SxFadeUp(child: _InstagramCard(channel: instagram)),
-              SxFadeUp(index: 1, child: _WhatsAppCard(channel: whatsapp)),
+              // BACKEND GAP: WhatsApp can't be connected yet, so its card shows only once it is.
+              if (kShowComingSoon || channelWorks(whatsapp)) SxFadeUp(index: 1, child: _WhatsAppCard(channel: whatsapp)),
               SxFadeUp(
                 index: 2,
                 child: SxCard(

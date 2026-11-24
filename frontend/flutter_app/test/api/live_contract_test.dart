@@ -111,6 +111,35 @@ void main() {
       }
     }, skip: skip);
 
+    test('orders by id, their payments, and paging (24 Nov)', () async {
+      final orders = await api.orders(limit: 10);
+      for (final order in orders.take(5)) {
+        final one = await api.order(order.id);
+        expect(one.id, order.id);
+        await api.orderPayments(order.id);
+      }
+      if (orders.isNotEmpty) {
+        final older = await api.orders(before: orders.last.createdAt, limit: 10);
+        expect(older.every((o) => !o.createdAt.isAfter(orders.last.createdAt)), isTrue);
+      }
+    }, skip: skip);
+
+    test('payments account (24 Nov)', () async {
+      final account = await api.paymentAccount();
+      expect(account.webhookEvents, isNotEmpty);
+    }, skip: skip);
+
+    test('saved rules (24 Nov)', () async {
+      await api.rules();
+    }, skip: skip);
+
+    test('conversations paging (24 Nov)', () async {
+      final chats = await api.conversations(limit: 5);
+      if (chats.isNotEmpty && chats.last.lastMessageAt != null) {
+        await api.conversations(before: chats.last.lastMessageAt, limit: 5);
+      }
+    }, skip: skip);
+
     test('questions, each status', () async {
       for (final status in ['open', 'answered', 'closed']) {
         await api.questions(status: status);

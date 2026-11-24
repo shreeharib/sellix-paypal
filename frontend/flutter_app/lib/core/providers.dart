@@ -8,9 +8,10 @@ import 'auth/auth_controller.dart';
 import 'auth/auth_interceptor.dart';
 import 'auth/token_store.dart';
 import 'config.dart';
+import 'server_config.dart';
 
-BaseOptions _options() => BaseOptions(
-  baseUrl: AppConfig.apiBaseUrl,
+BaseOptions _options(String baseUrl) => BaseOptions(
+  baseUrl: baseUrl,
   connectTimeout: const Duration(seconds: 10),
   receiveTimeout: const Duration(seconds: 30),
   contentType: Headers.jsonContentType,
@@ -20,8 +21,10 @@ BaseOptions _options() => BaseOptions(
 /// check the exact requests the sign-in sends.
 final httpAdapterProvider = Provider<HttpClientAdapter?>((ref) => null);
 
+/// A client for the server the merchant chose (see [serverUrlProvider]): a new address rebuilds
+/// every client that watches it.
 Dio _dio(Ref ref) {
-  final dio = Dio(_options());
+  final dio = Dio(_options(ref.watch(serverUrlProvider)));
   final adapter = ref.watch(httpAdapterProvider);
   if (adapter != null) dio.httpClientAdapter = adapter;
   return dio;

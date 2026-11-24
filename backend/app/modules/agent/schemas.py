@@ -1,4 +1,6 @@
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -10,6 +12,21 @@ DEFAULT_OWNER_QUESTION = "The assistant needs your help with this customer."
 class ChatMessage:
     role: Literal["system", "user", "assistant"]
     content: str
+
+
+@dataclass(frozen=True)
+class SavedRule:
+    """An answer the merchant chose to have the assistant always give ("Always answer this way")."""
+
+    id: uuid.UUID
+    question: str
+    answer: str
+    created_at: datetime
+
+    @property
+    def text(self) -> str:
+        """How the app lists it: the question, then the saved answer."""
+        return f"{self.question}: {self.answer}" if self.question else self.answer
 
 
 class OrderLineDraft(BaseModel):

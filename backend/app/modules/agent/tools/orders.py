@@ -383,8 +383,8 @@ async def _resend(ctx: TurnContext, order_id: uuid.UUID) -> ToolResult:
         order.total_minor,
         get_settings().payment_hold_minutes,
     )
-    # The link still open (same PayPal order or UPI link), or, after a failed payment and once the
-    # cooldown has passed, a new one: never two live payments for one order.
+    # The link still open (the same Razorpay link or UPI link), or, once a link has ended and the
+    # order may still be paid, a new one: never two live payment links for one order.
     payment, link = await _send_payment(ctx, placed, resend=True)
     ctx.payment_link = link
     if payment == "gave_up":
@@ -420,24 +420,24 @@ async def _own_unpaid_order(ctx: TurnContext, order_ref: str) -> uuid.UUID | Non
 async def _send_payment(
     ctx: TurnContext, placed: PlacedOrder, *, resend: bool = False
 ) -> tuple[str, str | None]:
-    """Queue the payment message: UPI if the shop has a UPI id, PayPal, or details by hand."""
+    """Queue the payment message: a Razorpay link (confirmed by Razorpay itself), else the
+    shop's plain UPI link (the shop confirms it by hand), else the shop shares details."""
     total = format_money(placed.total_minor, placed.currency)
     async with session_scope() as session:
         onboarding = await shop_profile.get_onboarding(session, ctx.merchant.id)
     vpa = (onboarding.answers or {}).get("upi_id") if onboarding else None
     link: str | None = None
-    charge = ""  # what PayPal charges, when that isn't the order's own currency
-    if placed.currency == "INR" and vpa:
-        link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=ctx.merchant.name)
-    elif payments.accepts(placed.currency):
+    if payments.accepts(placed.currency):
         try:
             checkout = await payments.start_checkout(placed, shop_name=ctx.merchant.name)
         except payments.RetryRefused as refused:
             return await _refuse_retry(ctx, placed, refused)
         except payments.PaymentUnavailable as exc:
-            log.error("agent.checkout_failed", order_id=str(placed.order_id), error=str(exc))
+            log.info("agent.no_online_payment", order_id=str(placed.order_id), reason=str(exc))
         else:
-            link, charge = checkout.url, checkout.charge_label
+            link = checkout.url
+    if link is None and placed.currency == "INR" and vpa:
+        link = payments.create_upi_checkout(placed, vpa=vpa, shop_name=ctx.merchant.name)
     values: dict[str, Any] = {"number": f"#{placed.number}", "total": total}
     async with session_scope() as session:
         if link:
@@ -446,7 +446,6 @@ async def _send_payment(
                 ctx.language,
                 link=link,
                 hold_minutes=placed.hold_minutes,
-                charge=charge,
                 **values,
             )
         else:

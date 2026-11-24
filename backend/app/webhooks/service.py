@@ -13,10 +13,19 @@ from app.webhooks.models import WebhookEvent
 
 
 async def record_event(
-    session: AsyncSession, *, source: str, body: bytes, payload: dict[str, Any]
+    session: AsyncSession,
+    *,
+    source: str,
+    body: bytes,
+    payload: dict[str, Any],
+    dedupe_key: str | None = None,
 ) -> uuid.UUID | None:
-    """Store a delivery. Returns its ID while it still needs processing, None once processed."""
-    dedupe_key = hashlib.sha256(body).hexdigest()
+    """Store a delivery. Returns its ID while it still needs processing, None once processed.
+
+    Deliveries are told apart by `dedupe_key` (the provider's event id) or, without one, by a
+    hash of the body.
+    """
+    dedupe_key = dedupe_key or hashlib.sha256(body).hexdigest()
     await session.execute(
         pg_insert(WebhookEvent)
         .values(source=source, dedupe_key=dedupe_key, payload=payload)

@@ -22,3 +22,13 @@ class MerchantInfo:
     never_promise: tuple[str, ...] = ()  # phrases the agent must never promise
     ai_daily_budget_usd: Decimal | None = None  # None: the default from settings
     menu_image_url: str | None = None  # today's menu photo, for send_menu_image
+
+
+@dataclass(frozen=True)
+class DeletionRequest:
+    """What <PUBLIC_BASE_URL>/data-deletion?code=... shows for a confirmation code."""
+
+    code: str
+    source: str  # app | meta
+    status: str  # deleted | no_data
+    requested_at: datetime

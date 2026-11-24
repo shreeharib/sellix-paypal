@@ -37,6 +37,8 @@ class QuoteLine:
     unit_price_minor: int
     currency: str
     quantity: int
+    # False for made-to-order and always-available items: no hold, no daily_stock change.
+    counted: bool = True
 
     @property
     def subtotal_minor(self) -> int:
@@ -94,7 +96,11 @@ class QuoteRefused(ValueError):
         self.code = code
 
 
-PaymentOutcome = Literal["paid", "already_paid", "paid_stock_short", "amount_mismatch"]
+# paid_twice: a payment provider took money for an order that was already paid (the owner
+# refunds one of the two); only the provider paths report it.
+PaymentOutcome = Literal[
+    "paid", "already_paid", "paid_twice", "paid_stock_short", "amount_mismatch"
+]
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,18 @@ class RefundTicket:
     status: str
     reason: str | None
     provider_refund_id: str | None
+
+
+@dataclass(frozen=True)
+class RefundRecord:
+    """A refund request as the order screen shows it."""
+
+    id: uuid.UUID
+    status: str  # pending | completed | failed
+    amount_minor: int
+    reason: str | None
+    provider_refund_id: str | None
+    created_at: datetime
 
 
 @dataclass(frozen=True)

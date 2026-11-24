@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-enum SxBrand { instagram, whatsapp, paypal, upi, messenger, facebook, google, apple }
+enum SxBrand { instagram, whatsapp, upi, messenger, facebook, google, apple }
 
 /// Official coloured brand logo from assets/icons. Only Apple is monochrome and takes [color].
 class SxBrandIcon extends StatelessWidget {

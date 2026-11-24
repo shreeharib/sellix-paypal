@@ -25,6 +25,7 @@ from app.modules.conversations.schemas import (
     ConversationSummary,
     MessageView,
     OrderStage,
+    WindowClosed,
 )
 from app.modules.escalations import service as escalations
 from app.modules.escalations.schemas import EscalationItem
@@ -41,6 +42,14 @@ REPLY_SENDERS = ("customer", "system")
 AGENT_UNAVAILABLE_QUESTION = (
     "The assistant couldn't answer this customer just now. Please reply to them in Instagram."
 )
+# The owner replied (in Instagram or from the app): the assistant steps back for a while.
+MERCHANT_REPLIED = "merchant_replied"
+WINDOW_CLOSED_FOR_MERCHANT = (
+    "Instagram only lets the shop reply within 24 hours of the customer's last message. "
+    "You can message them again when they write to you."
+)
+PROFILE_LOOKUP_ATTEMPTS = 3  # tries to fetch a new customer's name before giving up
+PROFILE_LOOKUP_MAX_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,7 @@ async def handle_incoming(session: AsyncSession, message: IncomingMessage) -> Tu
     if inserted is None:
         return None  # a webhook retry we've already stored
     conversation.last_customer_message_at = datetime.now(UTC)
+    _resume_after_merchant_pause(conversation)
     await _release_waiting(session, conversation)
     if await _in_a_burst(session, conversation.id):
         # Stored for the merchant, but no turn: after the burst, one turn answers the latest
@@ -340,12 +350,149 @@ async def unanswered_conversations(
 
 
 async def set_agent_active(session: AsyncSession, conversation_id: uuid.UUID, active: bool) -> None:
-    """Switch the agent on or off for one chat (the merchant's per-chat switch)."""
-    conversation = await session.get(Conversation, conversation_id)
+    """Switch the agent on or off for one chat (the merchant's per-chat switch). On ends any
+    pause at once; off ("I'll reply myself") has no end time."""
+    conversation = await session.get(Conversation, conversation_id, with_for_update=True)
     if conversation is None:
         raise LookupError(f"No conversation {conversation_id}")
     conversation.agent_active = active
     conversation.agent_paused_reason = None if active else "merchant_switched_off"
+    conversation.agent_paused_until = None
+
+
+def _pause_for_merchant_reply(conversation: Conversation) -> None:
+    """The owner replied: the assistant steps back from this chat for
+    AGENT_RESUME_AFTER_MERCHANT_HOURS (each reply restarts it). A chat the owner switched off,
+    or one handed to them, stays as it is."""
+    if not conversation.agent_active and conversation.agent_paused_reason != MERCHANT_REPLIED:
+        return
+    until = datetime.now(UTC) + timedelta(hours=get_settings().agent_resume_after_merchant_hours)
+    conversation.agent_active = False
+    conversation.agent_paused_reason = MERCHANT_REPLIED
+    conversation.agent_paused_until = until
+    log.info(
+        "conversations.agent_paused", conversation_id=str(conversation.id), until=until.isoformat()
+    )
+
+
+def _resume_after_merchant_pause(conversation: Conversation) -> None:
+    """A customer wrote after an owner's reply pause ended: the assistant answers again."""
+    until = conversation.agent_paused_until
+    if (
+        conversation.agent_active
+        or conversation.agent_paused_reason != MERCHANT_REPLIED
+        or until is None
+        or until > datetime.now(UTC)
+    ):
+        return
+    conversation.agent_active = True
+    conversation.agent_paused_reason = None
+    conversation.agent_paused_until = None
+    log.info("conversations.agent_resumed", conversation_id=str(conversation.id))
+
+
+async def send_merchant_message(
+    session: AsyncSession, merchant_id: uuid.UUID, conversation_id: uuid.UUID, text: str
+) -> MessageView:
+    """The owner's own message from the app, sent through the outbox like the assistant's
+    replies (so Instagram's echo is recognised as ours). It pauses the assistant like a reply
+    typed in Instagram. Raises LookupError (not this shop's chat), WindowClosed (Instagram
+    won't deliver it now) or ValueError (empty text). After the commit, `deliver_soon`."""
+    body = text.strip()
+    if not body:
+        raise ValueError("Write a message first.")
+    conversation = await session.get(Conversation, conversation_id, with_for_update=True)
+    if conversation is None or conversation.merchant_id != merchant_id:
+        raise LookupError(f"No conversation {conversation_id}")
+    current = window.window_at(conversation.last_customer_message_at, datetime.now(UTC))
+    decision = window.decide(
+        current,
+        "human_agent",
+        human_agent_enabled=get_settings().instagram_human_agent_enabled,
+    )
+    if decision not in ("send", "send_tagged"):
+        raise WindowClosed(WINDOW_CLOSED_FOR_MERCHANT)
+    message_id = await outbox.queue_text(
+        session,
+        conversation_id=conversation.id,
+        text=body,
+        key=f"merchant:{uuid.uuid4()}",
+        sender="merchant",
+        # The owner's own words: after the 24 hours they may go with the HUMAN_AGENT tag.
+        window_policy="human_agent",
+        details={"source": "app"},
+    )
+    _pause_for_merchant_reply(conversation)
+    message = await session.get(Message, message_id)
+    if message is None:
+        raise RuntimeError("The queued message wasn't stored")
+    await session.refresh(message, ["created_at"])
+    return MessageView(
+        id=message.id,
+        direction=message.direction,
+        sender=message.sender,
+        body=message.body,
+        status="queued",
+        created_at=message.created_at,
+    )
+
+
+async def deliver_soon(conversation_id: uuid.UUID) -> None:
+    """Have the job worker send this chat's queued messages now."""
+    from app.modules.conversations import tasks
+
+    await tasks.schedule_delivery(conversation_id, datetime.now(UTC))
+
+
+async def fetch_customer_names(limit: int = 25) -> int:
+    """Name new Instagram customers from their profile, so chats, orders and the app show
+    "Priya" rather than a numeric id. Each customer is tried up to PROFILE_LOOKUP_ATTEMPTS
+    times; a failure is logged and changes nothing else. Returns how many were named."""
+    attempts = func.coalesce(
+        Customer.custom_attributes["instagram_profile"]["attempts"].as_integer(), 0
+    )
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Customer.id, Customer.external_id, Conversation.channel_connection_id)
+                .join(Conversation, Conversation.customer_id == Customer.id)
+                .where(
+                    Customer.channel == "instagram",
+                    Customer.display_name.is_(None),
+                    Customer.created_at > func.now() - PROFILE_LOOKUP_MAX_AGE,
+                    attempts < PROFILE_LOOKUP_ATTEMPTS,
+                )
+                .order_by(Customer.created_at)
+                .limit(limit)
+            )
+        ).all()
+    named = 0
+    for customer_id, external_id, connection_id in rows:
+        profile = None
+        try:
+            async with session_scope() as session:
+                credentials = await channels.get_send_credentials(session, connection_id)
+            profile = await channels.fetch_customer_profile(credentials, external_id)
+        except channels.SendFailed as exc:  # the shop's connection isn't active
+            log.warning("conversations.customer_name_unavailable", error=str(exc))
+        async with session_scope() as session:
+            customer = await session.get(Customer, customer_id, with_for_update=True)
+            if customer is None or customer.display_name is not None:
+                continue
+            extra = dict(customer.custom_attributes or {})
+            tried = dict(extra.get("instagram_profile") or {})
+            tried["attempts"] = int(tried.get("attempts") or 0) + 1
+            tried["checked_at"] = datetime.now(UTC).isoformat()
+            extra["instagram_profile"] = tried
+            if profile is not None and (profile.name or profile.username):
+                customer.display_name = profile.name or profile.username
+                if profile.username:
+                    extra["instagram_username"] = profile.username
+                named += 1
+            customer.custom_attributes = extra
+    if rows:
+        log.info("conversations.customer_names", looked_up=len(rows), named=named)
+    return named
 
 
 async def _load_turn(
@@ -492,7 +639,7 @@ async def _record_echo(
         return
 
     # The merchant replied from the Instagram app: record it and step back from this chat.
-    await session.execute(
+    inserted = await session.scalar(
         pg_insert(Message)
         .values(
             merchant_id=conversation.merchant_id,
@@ -508,11 +655,10 @@ async def _record_echo(
             index_elements=[Message.merchant_id, Message.external_id],
             index_where=Message.external_id.is_not(None),
         )
+        .returning(Message.id)
     )
-    if conversation.agent_active:
-        conversation.agent_active = False
-        conversation.agent_paused_reason = "merchant_replied"
-        log.info("conversations.agent_paused", conversation_id=str(conversation.id))
+    if inserted is not None:
+        _pause_for_merchant_reply(conversation)
 
 
 async def _recent_messages(
@@ -815,9 +961,14 @@ async def engine_for(session: AsyncSession, conversation_id: uuid.UUID) -> str:
 
 
 async def list_conversations(
-    session: AsyncSession, merchant_id: uuid.UUID, *, limit: int = 100
+    session: AsyncSession,
+    merchant_id: uuid.UUID,
+    *,
+    limit: int = 100,
+    before: datetime | None = None,
 ) -> list[ConversationSummary]:
-    """The merchant's chats, most recent activity first."""
+    """The merchant's chats, most recent activity first. `before` (exclusive) pages on: pass
+    the last row's `last_message_at`."""
     latest = (
         select(
             Message.conversation_id,
@@ -831,14 +982,16 @@ async def list_conversations(
         .where(Message.merchant_id == merchant_id, Message.direction != "internal")
         .subquery()
     )
-    rows = await session.execute(
+    activity = func.coalesce(latest.c.created_at, Conversation.created_at)
+    query = (
         select(Conversation, Customer, latest.c.sender, latest.c.body, latest.c.created_at)
         .join(Customer, Customer.id == Conversation.customer_id)
         .outerjoin(latest, (latest.c.conversation_id == Conversation.id) & (latest.c.position == 1))
         .where(Conversation.merchant_id == merchant_id)
-        .order_by(func.coalesce(latest.c.created_at, Conversation.created_at).desc())
-        .limit(limit)
     )
+    if before is not None:
+        query = query.where(activity < before)
+    rows = await session.execute(query.order_by(activity.desc(), Conversation.id).limit(limit))
     return [
         ConversationSummary(
             id=conversation.id,
@@ -850,6 +1003,7 @@ async def list_conversations(
             last_message_sender=sender,
             last_message_body=body,
             last_message_at=created_at,
+            agent_paused_until=conversation.agent_paused_until,
         )
         for conversation, customer, sender, body, created_at in rows
     ]

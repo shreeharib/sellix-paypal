@@ -172,6 +172,34 @@ class Me {
 
   /// False until the merchant finishes the guided setup after their first sign-in.
   final bool onboardingCompleted;
+
+  /// The shop's owner, not staff. Only the owner changes payments or deletes the shop.
+  bool get isOwner => role == 'owner';
+}
+
+/// `DELETE /v1/shop`: the exact shop name, to confirm.
+class DeleteShopRequest {
+  const DeleteShopRequest({required this.confirmName});
+
+  final String confirmName;
+
+  Map<String, dynamic> toJson() => {'confirm_name': confirmName};
+}
+
+/// A saved "always" answer (`GET /v1/rules`), made when the merchant answers a question with
+/// "always answer this way".
+class MerchantRule {
+  const MerchantRule({required this.id, required this.text, required this.createdAt});
+
+  factory MerchantRule.fromJson(Map<String, dynamic> json) => MerchantRule(
+    id: json['id'] as String,
+    text: json['text'] as String,
+    createdAt: _date(json['created_at']),
+  );
+
+  final String id;
+  final String text;
+  final DateTime createdAt;
 }
 
 /// Only the fields that are set are sent; the others stay as they are.
@@ -386,7 +414,8 @@ class Onboarding {
   final bool completed;
   final List<Channel> channels;
 
-  /// Online payment links (PayPal) can be sent. It says nothing about UPI: see [OnboardingAnswers.upiId].
+  /// Online payment links can be sent: the shop's own Razorpay account, or a test setup. It says
+  /// nothing about UPI: see [OnboardingAnswers.upiId].
   final bool paymentsReady;
 }
 
@@ -1045,7 +1074,7 @@ class PaymentLinkResponse {
   final String orderId;
   final int orderNumber;
 
-  /// "upi" or "paypal".
+  /// "razorpay", "upi" or "simulator". See [PaymentMethod].
   final String paymentMethod;
   final String paymentLink;
   final String currency;
@@ -1068,6 +1097,7 @@ class RefundResponse {
     required this.amountMinor,
     required this.currency,
     required this.status,
+    this.mode,
   });
 
   factory RefundResponse.fromJson(Map<String, dynamic> json) => RefundResponse(
@@ -1076,6 +1106,7 @@ class RefundResponse {
     amountMinor: _int(json['amount_minor']),
     currency: json['currency'] as String,
     status: json['status'] as String,
+    mode: json['mode'] as String?,
   );
 
   final String orderId;
@@ -1083,35 +1114,257 @@ class RefundResponse {
   final int amountMinor;
   final String currency;
 
-  /// "pending", "completed" or "failed".
+  /// "pending", "completed" or "failed". Razorpay refunds usually start "pending"; manual and
+  /// simulator ones are "completed" at once.
   final String status;
+
+  /// "razorpay", "manual" or "simulator". See [RefundMode].
+  final String? mode;
 }
 
-class CreateInvoiceRequest {
-  const CreateInvoiceRequest({this.customerName, this.customerEmail});
+// Payments -------------------------------------------------------------------------------------
 
-  final String? customerName;
-  final String? customerEmail;
-
-  Map<String, dynamic> toJson() => {'customer_name': ?customerName, 'customer_email': ?customerEmail};
+/// Values of `PaymentLinkResponse.payment_method`.
+abstract final class PaymentMethod {
+  static const razorpay = 'razorpay';
+  static const upi = 'upi';
+  static const simulator = 'simulator';
 }
 
-class CreateInvoiceResponse {
-  const CreateInvoiceResponse({
-    required this.orderId,
-    required this.invoiceId,
-    required this.payerViewUrl,
+/// Values of `refund_mode` and `RefundResponse.mode`.
+abstract final class RefundMode {
+  /// Razorpay sends the money back to the customer.
+  static const razorpay = 'razorpay';
+
+  /// The merchant returns the money; sellix records the refund.
+  static const manual = 'manual';
+  static const simulator = 'simulator';
+}
+
+/// Values of `PaymentAccount.source`: where new payment links come from.
+abstract final class PaymentSource {
+  /// The shop's own Razorpay account.
+  static const own = 'own';
+
+  /// The server's own Razorpay keys (local testing only).
+  static const shared = 'shared';
+
+  /// The dev Accept/Reject page.
+  static const simulator = 'simulator';
+  static const none = 'none';
+}
+
+/// `GET /v1/payments/account`: how this shop's customers pay online (Settings > Payments).
+class PaymentAccount {
+  const PaymentAccount({
+    this.provider = 'razorpay',
+    required this.source,
+    required this.paymentsReady,
+    required this.connected,
+    this.keyIdHint,
+    this.mode,
+    this.webhookUrl,
+    this.webhookSecret,
+    this.webhookEvents = const [],
+    this.lastWebhookAt,
+    this.connectedAt,
   });
 
-  factory CreateInvoiceResponse.fromJson(Map<String, dynamic> json) => CreateInvoiceResponse(
-    orderId: json['order_id'] as String,
-    invoiceId: json['invoice_id'] as String,
-    payerViewUrl: json['payer_view_url'] as String,
+  factory PaymentAccount.fromJson(Map<String, dynamic> json) => PaymentAccount(
+    provider: json['provider'] as String? ?? 'razorpay',
+    source: json['source'] as String? ?? PaymentSource.none,
+    paymentsReady: json['payments_ready'] as bool? ?? false,
+    connected: json['connected'] as bool? ?? false,
+    keyIdHint: json['key_id_hint'] as String?,
+    mode: json['mode'] as String?,
+    webhookUrl: json['webhook_url'] as String?,
+    webhookSecret: json['webhook_secret'] as String?,
+    webhookEvents: [for (final e in json['webhook_events'] as List<dynamic>? ?? const []) e as String],
+    lastWebhookAt: _dateOrNull(json['last_webhook_at']),
+    connectedAt: _dateOrNull(json['connected_at']),
   );
 
-  final String orderId;
-  final String invoiceId;
-  final String payerViewUrl;
+  final String provider;
+
+  /// "own", "shared", "simulator" or "none". See [PaymentSource].
+  final String source;
+
+  /// False only when [source] is "none".
+  final bool paymentsReady;
+
+  /// The shop's own Razorpay account is connected.
+  final bool connected;
+
+  /// "rzp_test_••••ab12".
+  final String? keyIdHint;
+
+  /// "test", "live" or null.
+  final String? mode;
+
+  /// Null when not connected.
+  final String? webhookUrl;
+
+  /// Null when not connected, and for staff (owner only).
+  final String? webhookSecret;
+  final List<String> webhookEvents;
+
+  /// The last verified webhook delivery. Null: none yet.
+  final DateTime? lastWebhookAt;
+  final DateTime? connectedAt;
+
+  bool get isTestSetup => source == PaymentSource.shared || source == PaymentSource.simulator;
+}
+
+/// `PUT /v1/payments/account`. Both 1 to 64 / 1 to 128 characters; the server checks them with
+/// Razorpay (422 refused or malformed, 502 Razorpay unreachable, 403 staff).
+class PaymentAccountConnect {
+  const PaymentAccountConnect({required this.keyId, required this.keySecret});
+
+  final String keyId;
+  final String keySecret;
+
+  Map<String, dynamic> toJson() => {'key_id': keyId, 'key_secret': keySecret};
+}
+
+/// Values of `OrderPayment.status`.
+abstract final class PaymentStatus {
+  /// The link is open.
+  static const created = 'created';
+  static const completed = 'completed';
+  static const refunded = 'refunded';
+  static const cancelled = 'cancelled';
+  static const expired = 'expired';
+  static const denied = 'denied';
+  static const failed = 'failed';
+}
+
+/// One payment link or payment of an order.
+class OrderPayment {
+  const OrderPayment({
+    required this.id,
+    required this.provider,
+    required this.method,
+    required this.status,
+    required this.amountMinor,
+    required this.currency,
+    this.feeMinor = 0,
+    this.link,
+    this.providerPaymentId,
+    this.paidAt,
+    required this.createdAt,
+    this.testMode = false,
+  });
+
+  factory OrderPayment.fromJson(Map<String, dynamic> json) => OrderPayment(
+    id: json['id'] as String,
+    provider: json['provider'] as String,
+    method: json['method'] as String?,
+    status: json['status'] as String,
+    amountMinor: _int(json['amount_minor']),
+    currency: json['currency'] as String,
+    feeMinor: _intOrNull(json['fee_minor']) ?? 0,
+    link: json['link'] as String?,
+    providerPaymentId: json['provider_payment_id'] as String?,
+    paidAt: _dateOrNull(json['paid_at']),
+    createdAt: _date(json['created_at']),
+    testMode: json['test_mode'] as bool? ?? false,
+  );
+
+  final String id;
+
+  /// "razorpay", "simulator", "upi_manual", "cash" or "manual".
+  final String provider;
+
+  /// "upi", "card", "netbanking", "wallet", "emi", "cardless_emi", "paylater", "bank_transfer",
+  /// "other", "cash", "simulator", or null until paid.
+  final String? method;
+
+  /// See [PaymentStatus].
+  final String status;
+  final int amountMinor;
+  final String currency;
+
+  /// Razorpay's fee when known, else 0.
+  final int feeMinor;
+
+  /// The payment link while [status] is "created".
+  final String? link;
+
+  /// Razorpay's payment id (`pay_...`), or the reference typed in on Mark paid.
+  final String? providerPaymentId;
+  final DateTime? paidAt;
+  final DateTime createdAt;
+
+  /// Made with Razorpay test keys: no real money moved. False when the server leaves it out.
+  final bool testMode;
+}
+
+/// An order's refund.
+class OrderRefund {
+  const OrderRefund({
+    required this.status,
+    required this.amountMinor,
+    this.reason,
+    this.providerRefundId,
+    required this.createdAt,
+  });
+
+  factory OrderRefund.fromJson(Map<String, dynamic> json) => OrderRefund(
+    status: json['status'] as String,
+    amountMinor: _int(json['amount_minor']),
+    reason: json['reason'] as String?,
+    providerRefundId: json['provider_refund_id'] as String?,
+    createdAt: _date(json['created_at']),
+  );
+
+  /// "pending", "completed" or "failed".
+  final String status;
+  final int amountMinor;
+  final String? reason;
+  final String? providerRefundId;
+  final DateTime createdAt;
+}
+
+/// `GET /v1/orders/{id}/payments`.
+class OrderPayments {
+  const OrderPayments({
+    this.payments = const [],
+    this.refund,
+    this.refundable = false,
+    this.refundMode,
+  });
+
+  factory OrderPayments.fromJson(Map<String, dynamic> json) => OrderPayments(
+    payments: _list(json['payments'], OrderPayment.fromJson),
+    refund: json['refund'] == null ? null : OrderRefund.fromJson(json['refund'] as _Json),
+    refundable: json['refundable'] as bool? ?? false,
+    refundMode: json['refund_mode'] as String?,
+  );
+
+  final List<OrderPayment> payments;
+  final OrderRefund? refund;
+  final bool refundable;
+
+  /// How a refund of this order would work: see [RefundMode]. Null when there's nothing to refund.
+  final String? refundMode;
+
+  /// The payment that took the money, if any.
+  OrderPayment? get paid {
+    for (final p in payments) {
+      if (p.status == PaymentStatus.completed || p.status == PaymentStatus.refunded) return p;
+    }
+    return null;
+  }
+
+  /// The newest open payment link, if any.
+  OrderPayment? get openLink {
+    OrderPayment? best;
+    for (final p in payments) {
+      if (p.status != PaymentStatus.created || p.link == null) continue;
+      if (best == null || p.createdAt.isAfter(best.createdAt)) best = p;
+    }
+    return best;
+  }
 }
 
 // Ask me ---------------------------------------------------------------------------------------
@@ -1210,6 +1463,7 @@ class Conversation {
     required this.lastMessageSender,
     required this.lastMessageBody,
     required this.lastMessageAt,
+    this.agentPausedUntil,
   });
 
   factory Conversation.fromJson(Map<String, dynamic> json) => Conversation(
@@ -1221,6 +1475,7 @@ class Conversation {
     lastMessageSender: json['last_message_sender'] as String?,
     lastMessageBody: json['last_message_body'] as String?,
     lastMessageAt: _dateOrNull(json['last_message_at']),
+    agentPausedUntil: _dateOrNull(json['agent_paused_until']),
   );
 
   final String id;
@@ -1229,10 +1484,49 @@ class Conversation {
   /// The customer's name if known, otherwise their channel id.
   final String customerHandle;
   final bool agentActive;
+
+  /// Why the assistant is off in this chat, e.g. "merchant_replied" (see [AgentPausedReason]).
   final String? agentPausedReason;
   final String? lastMessageSender;
   final String? lastMessageBody;
   final DateTime? lastMessageAt;
+
+  /// When a `merchant_replied` pause ends: it is lifted on the customer's next message after this.
+  final DateTime? agentPausedUntil;
+}
+
+/// Values of `Conversation.agent_paused_reason` the app words specially.
+abstract final class AgentPausedReason {
+  /// The merchant replied (in Instagram or from the app), so the assistant stepped back.
+  static const merchantReplied = 'merchant_replied';
+}
+
+/// `POST /v1/conversations/{id}/messages`: 1 to 1000 characters.
+class SendMessageRequest {
+  const SendMessageRequest({required this.text});
+
+  final String text;
+
+  Map<String, dynamic> toJson() => {'text': text};
+}
+
+/// The merchant's message, queued in the outbox.
+class SentMessage {
+  const SentMessage({required this.id, required this.text, required this.status, required this.createdAt});
+
+  factory SentMessage.fromJson(Map<String, dynamic> json) => SentMessage(
+    id: json['id'] as String,
+    text: json['text'] as String,
+    status: json['status'] as String? ?? 'queued',
+    createdAt: _date(json['created_at']),
+  );
+
+  final String id;
+  final String text;
+
+  /// "queued" when it is accepted.
+  final String status;
+  final DateTime createdAt;
 }
 
 class ChatMessage {
@@ -1406,6 +1700,9 @@ class ProductDetail {
 }
 
 /// Only the fields that are set are sent; the others stay as they are.
+///
+/// [availableOn] and [orderByDate] can also be cleared: pass [clearAvailableOn] or
+/// [clearOrderByDate] to send null.
 class ProductUpdate {
   const ProductUpdate({
     this.name,
@@ -1414,6 +1711,11 @@ class ProductUpdate {
     this.category,
     this.baseImageUrl,
     this.attributes,
+    this.isActive,
+    this.availableOn,
+    this.orderByDate,
+    this.clearAvailableOn = false,
+    this.clearOrderByDate = false,
   });
 
   final String? name;
@@ -1423,6 +1725,16 @@ class ProductUpdate {
   final String? baseImageUrl;
   final Map<String, dynamic>? attributes;
 
+  /// False removes the product: it leaves stock lists, menus and the assistant; past orders keep
+  /// it. True brings it back.
+  final bool? isActive;
+
+  /// A one-day (pre-order) item's day, and the last day to order it.
+  final DateTime? availableOn;
+  final DateTime? orderByDate;
+  final bool clearAvailableOn;
+  final bool clearOrderByDate;
+
   Map<String, dynamic> toJson() => {
     'name': ?name,
     'title': ?title,
@@ -1430,6 +1742,9 @@ class ProductUpdate {
     'category': ?category,
     'base_image_url': ?baseImageUrl,
     'attributes': ?attributes,
+    'is_active': ?isActive,
+    if (clearAvailableOn) 'available_on': null else if (availableOn != null) 'available_on': _day(availableOn!),
+    if (clearOrderByDate) 'order_by_date': null else if (orderByDate != null) 'order_by_date': _day(orderByDate!),
   };
 }
 

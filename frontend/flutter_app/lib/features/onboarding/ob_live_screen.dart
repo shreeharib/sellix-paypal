@@ -7,6 +7,7 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/api/models.dart';
+import '../../core/notifications/local_notifier.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
@@ -36,6 +37,8 @@ class _ObLiveScreenState extends ConsumerState<ObLiveScreen> {
     if (_leaving) return;
     setState(() => _leaving = true);
     try {
+      // Android 13+ asks once here, so new questions and paid orders can reach the merchant.
+      if (ref.read(notificationsEnabledProvider)) await ref.read(localNotifierProvider).requestPermission();
       final done = await ref.refresh(onboardingCompletedProvider.future);
       if (!mounted) return;
       if (done) {
@@ -90,14 +93,17 @@ class _LiveBodyState extends State<_LiveBody> {
     HapticFeedback.heavyImpact();
   }
 
+  /// Finishing onboarding switches the assistant on (the server does it), stock or not.
+  String get _title => !widget.today.agentEnabled ? 'sellix is off' : (_hasStock ? 'sellix is live' : 'sellix is on');
+
   String get _headline {
-    if (!_hasStock) return 'Customer messages wait until you set today’s stock.';
     if (!widget.today.agentEnabled) return 'sellix is switched off. Turn it on from Home.';
     final instagram = _channelOn('instagram');
     final whatsapp = _channelOn('whatsapp');
     if (!instagram && !whatsapp) return 'It starts answering once Instagram is connected.';
     final names = [if (instagram) 'Instagram', if (whatsapp) 'WhatsApp'];
-    return 'It is answering your ${names.join(' and ')} DMs now.';
+    final answering = 'It is answering your ${names.join(' and ')} DMs now.';
+    return _hasStock ? answering : '$answering Set today’s stock so it can take orders.';
   }
 
   @override
@@ -113,7 +119,7 @@ class _LiveBodyState extends State<_LiveBody> {
             const SizedBox(height: SxSpace.s24),
             SxFadeUp(
               child: Text(
-                live ? 'sellix is live' : (_hasStock ? 'sellix is off' : 'sellix is waiting for stock'),
+                _title,
                 textAlign: TextAlign.center,
                 style: SxText.titleL.copyWith(color: p.textPrimary),
               ),

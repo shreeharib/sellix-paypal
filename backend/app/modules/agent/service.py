@@ -9,7 +9,7 @@ import structlog
 from app.core.db import session_scope
 from app.modules.agent import customer_agent, llm, prompt_store
 from app.modules.agent.models import AiUsage
-from app.modules.agent.schemas import ChatMessage, CustomerReply
+from app.modules.agent.schemas import ChatMessage, CustomerReply, SavedRule
 from app.modules.inventory import service as inventory
 from app.modules.merchants import service as merchants
 from app.modules.shop_profile import service as shop_profile
@@ -108,6 +108,22 @@ async def save_rule(
             answer=answer,
             source_escalation_id=source_escalation_id,
         )
+
+
+async def saved_rules(merchant_id: uuid.UUID) -> list[SavedRule]:
+    """The shop's saved "always" answers, newest first."""
+    from app.modules.agent import memory
+
+    async with session_scope() as session:
+        return await memory.saved_rules(session, merchant_id)
+
+
+async def delete_rule(merchant_id: uuid.UUID, rule_id: uuid.UUID) -> bool:
+    """Forget a saved answer. False if this shop has no such rule."""
+    from app.modules.agent import memory
+
+    async with session_scope() as session:
+        return await memory.delete_rule(session, merchant_id, rule_id)
 
 
 async def summarise_long_conversations() -> int:

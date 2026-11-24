@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sellix_merchant/core/api/api_exception.dart';
@@ -7,6 +8,7 @@ import 'package:sellix_merchant/core/api/models.dart';
 import 'package:sellix_merchant/core/auth/auth_controller.dart';
 import 'package:sellix_merchant/core/providers.dart';
 import 'package:sellix_merchant/core/router.dart';
+import 'package:sellix_merchant/core/server_config.dart';
 import 'package:sellix_merchant/design/design.dart';
 import 'package:sellix_merchant/design/widgets/sx_snack.dart' show SxSnackNavigatorObserver;
 import 'package:sellix_merchant/features/signin/auth_screen.dart';
@@ -59,6 +61,7 @@ Future<_Harness> _pump(
   String? error,
   bool completed = false,
   ThemeData? theme,
+  List<Override> overrides = const [],
 }) async {
   tester.view.physicalSize = const Size(390 * 3, 844 * 3);
   tester.view.devicePixelRatio = 3;
@@ -87,6 +90,7 @@ Future<_Harness> _pump(
           return completed;
         }),
         signInFlowProvider.overrideWith(() => _SeededFlow(SignInFlowState(requested: requested, error: error))),
+        ...overrides,
       ],
       child: MaterialApp.router(routerConfig: router, theme: theme ?? sellixLight),
     ),
@@ -123,14 +127,14 @@ void main() {
   });
 
   group('auth', () {
-    testWidgets('Instagram is the working way in; the others say they are not available', (tester) async {
-      final h = await _pump(tester, const AuthScreen());
+    testWidgets('Instagram is the only way in; no dead buttons for the others', (tester) async {
+      await _pump(tester, const AuthScreen());
       await _settle(tester);
-      expect(find.text('Sign up with Google'), findsOneWidget);
-      expect(find.textContaining('not available yet'), findsOneWidget);
-      await tester.tap(find.text('Sign up with Google'));
-      await _settle(tester);
-      expect(h.router.state.matchedLocation, '/start');
+      expect(find.text('Sign up with Google'), findsNothing);
+      expect(find.text('Sign up with Apple'), findsNothing);
+      expect(find.text('Sign up with email'), findsNothing);
+      expect(find.textContaining('not available yet'), findsNothing);
+      expect(find.textContaining('PayPal'), findsNothing);
 
       await tester.tap(find.text('Sign up with Instagram'));
       await _settle(tester);
@@ -145,6 +149,66 @@ void main() {
       await tester.tap(find.text('Sign in with Instagram'));
       await _settle(tester);
       expect(find.text('at ${Routes.iglogin}'), findsOneWidget);
+    });
+
+    testWidgets('Terms and privacy opens the server’s privacy page', (tester) async {
+      final opened = <Uri>[];
+      final before = openPolicy;
+      openPolicy = (url) async {
+        opened.add(url);
+        return true;
+      };
+      addTearDown(() => openPolicy = before);
+      await _pump(tester, const AuthScreen());
+      await _settle(tester);
+      await tester.ensureVisible(_label('Terms and privacy'));
+      await tester.tap(_label('Terms and privacy'));
+      await _settle(tester);
+      expect(opened, [Uri.parse('http://localhost:8000/privacy')]);
+    });
+
+    testWidgets('Server: checks an address, refuses a bad one, and switches', (tester) async {
+      final checked = <String>[];
+      await _pump(
+        tester,
+        const AuthScreen(),
+        overrides: [
+          serverCheckProvider.overrideWithValue((url) async {
+            checked.add(url);
+            return url.contains('good');
+          }),
+        ],
+      );
+      await _settle(tester);
+      await tester.ensureVisible(_label('Server: localhost:8000'));
+      await tester.tap(_label('Server: localhost:8000'));
+      await _settle(tester);
+      expect(find.text('sellix server'), findsOneWidget);
+      final field = find.widgetWithText(SxField, 'Server address');
+
+      await tester.enterText(find.descendant(of: field, matching: find.byType(TextField)), 'not a url');
+      await tester.tap(_label('Check'));
+      await _settle(tester);
+      expect(find.textContaining('not a web address'), findsOneWidget);
+      expect(checked, isEmpty);
+
+      await tester.enterText(find.descendant(of: field, matching: find.byType(TextField)), 'https://down.example.com');
+      await tester.tap(_label('Check'));
+      await _settle(tester);
+      expect(checked, ['https://down.example.com']);
+      expect(find.text('Can’t reach this address.'), findsOneWidget);
+
+      await tester.enterText(find.descendant(of: field, matching: find.byType(TextField)), 'https://good.example.com/');
+      await tester.tap(_label('Check'));
+      await _settle(tester);
+      expect(find.text('sellix answers at this address.'), findsOneWidget);
+
+      await tester.tap(_label('Use this server'));
+      await _settle(tester);
+      expect(find.text('sellix server'), findsNothing);
+      expect(_label('Server: good.example.com'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await _settle(tester);
     });
 
     testWidgets('lays out in dark, on a small phone', (tester) async {

@@ -574,15 +574,73 @@ void main() {
   });
 
   group('ProductScreen', () {
-    testWidgets('joins the ledger to the catalogue; dead ends are labelled', (tester) async {
+    testWidgets('joins the ledger to the catalogue, with no dead ends', (tester) async {
       final api = _api();
       await _pump(tester, api, const ProductScreen(FakeIds.variantA));
       await _settle(tester);
-      expect(find.text('Item A'), findsOneWidget);
+      expect(find.text('Item A'), findsWidgets);
       expect(find.text('On sale today'), findsWidgets);
-      expect(find.text('Removing products isn’t available yet.'), findsOneWidget);
+      expect(find.text('Removing products isn’t available yet.'), findsNothing);
+      expect(find.bySemanticsLabel('Sharing isn’t available yet'), findsNothing);
       expect(find.text('Edit product'), findsOneWidget);
       expect(find.text('This week'), findsNothing);
+    });
+
+    testWidgets('Remove product asks first, sends is_active false, and Undo brings it back', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const ProductScreen(FakeIds.variantA));
+      await _settle(tester);
+      await _tapLabel(tester, 'Remove product');
+      expect(find.text('Remove Item A?'), findsOneWidget);
+      await _tapLabel(tester, 'Cancel');
+      expect(api.calls, isNot(contains('updateProduct')));
+
+      await _tapLabel(tester, 'Remove product');
+      await _tapLabel(tester, 'Remove');
+      expect(api.lastProductUpdate, {'is_active': false});
+      expect(api.catalog.firstWhere((p) => p.id == 'product-${FakeIds.variantA}').isActive, isFalse);
+      expect(find.text('Stock screen'), findsOneWidget);
+      await tester.tap(find.text('Undo'));
+      await _settle(tester);
+      expect(api.lastProductUpdate, {'is_active': true});
+      expect(api.catalog.firstWhere((p) => p.id == 'product-${FakeIds.variantA}').isActive, isTrue);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('rename sends only the new name', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const ProductScreen(FakeIds.variantA));
+      await _settle(tester);
+      await _tapLabel(tester, 'Name');
+      await tester.enterText(find.widgetWithText(SxField, 'Product name'), '  Item   Alpha ');
+      await _tapLabel(tester, 'Save name');
+      expect(api.lastProductUpdate, {'name': 'Item Alpha'});
+      expect(api.catalog.firstWhere((p) => p.id == 'product-${FakeIds.variantA}').name, 'Item Alpha');
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('a product can become a one-day item, then go back to every day', (tester) async {
+      final api = _api();
+      await _pump(tester, api, const ProductScreen(FakeIds.variantA));
+      await _settle(tester);
+      await _tapLabel(tester, 'Sold every day');
+      await tester.tap(find.text('OK'));
+      await _settle(tester);
+      expect(api.lastProductUpdate, {'available_on': '2026-01-15'});
+      expect(find.text('One-day item'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+
+      await _tapLabel(tester, 'Last day to order');
+      await tester.tap(find.text('OK'));
+      await _settle(tester);
+      expect(api.lastProductUpdate, {'order_by_date': '2026-01-15'});
+      await tester.pump(const Duration(seconds: 5));
+
+      await _tapLabel(tester, 'One-day item');
+      await _tapLabel(tester, 'Sell it every day');
+      expect(api.lastProductUpdate, {'available_on': null, 'order_by_date': null});
+      expect(api.catalog.firstWhere((p) => p.id == 'product-${FakeIds.variantA}').availableOn, isNull);
+      await tester.pump(const Duration(seconds: 5));
     });
 
     testWidgets('taking an item with holds off sale is refused', (tester) async {
@@ -1278,4 +1336,19 @@ void main() {
       expect(const ShelfChoice('custom', 3650).shelfLifeDays, 3650);
     });
   });
+}
+
+/// Taps a label, also a button's rich text with an inline icon. [contains] matches the start.
+Future<void> _tapLabel(WidgetTester tester, String text, {bool contains = false}) async {
+  final found = find
+      .byWidgetPredicate((w) {
+        if (w is! RichText) return false;
+        final plain = w.text.toPlainText().replaceAll('\uFFFC', '').trim();
+        return contains ? plain.startsWith(text) : plain == text;
+      })
+      .last;
+  await tester.ensureVisible(found);
+  await tester.pump();
+  await tester.tap(found);
+  await _settle(tester);
 }

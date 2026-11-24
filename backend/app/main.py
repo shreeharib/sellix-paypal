@@ -1,4 +1,4 @@
-"""API process: Meta and PayPal webhooks, OAuth and payment pages, and the REST API."""
+"""API process: Meta and Razorpay webhooks, OAuth and payment pages, and the REST API."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+from app.api import public
 from app.api.v1 import router as v1_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine
@@ -20,7 +21,7 @@ from app.modules.agent import service as agent
 from app.modules.channels.router import router as channels_router
 from app.modules.payments.router import router as payments_router
 from app.modules.payments.router import simulator_router as payment_simulator_router
-from app.webhooks import meta, paypal
+from app.webhooks import meta, razorpay
 from app.webhooks import simulator as simulator_webhook
 
 log = structlog.get_logger()
@@ -62,7 +63,16 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level, json_logs=settings.app_env != "local")
 
-    app = FastAPI(title="sellix API", version="0.1.0", lifespan=lifespan)
+    prod = settings.app_env == "prod"
+    # In production the API's own documentation isn't published (/docs, /redoc, /openapi.json).
+    app = FastAPI(
+        title="sellix API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None if prod else "/docs",
+        redoc_url=None if prod else "/redoc",
+        openapi_url=None if prod else "/openapi.json",
+    )
     # Added first, so CORS wraps it: a "too many requests" answer still reaches the web app.
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(
@@ -72,17 +82,20 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
     app.include_router(meta.router)
-    app.include_router(paypal.router)
+    app.include_router(razorpay.router)
     app.include_router(channels_router)
     app.include_router(payments_router)
     app.include_router(payment_simulator_router)
     app.include_router(simulator_webhook.router)
+    app.include_router(public.router)
     app.include_router(v1_router)
 
-    @app.get("/simulator", include_in_schema=False)
-    async def simulator() -> HTMLResponse:
-        """The simulator page (it calls /v1/simulator with the merchant's own token)."""
-        return HTMLResponse(SIMULATOR_PAGE.read_text(encoding="utf-8"))
+    if not prod:  # a developer tool: not served in production (404)
+
+        @app.get("/simulator", include_in_schema=False)
+        async def simulator() -> HTMLResponse:
+            """The simulator page (it calls /v1/simulator with the merchant's own token)."""
+            return HTMLResponse(SIMULATOR_PAGE.read_text(encoding="utf-8"))
 
     @app.get("/health", tags=["ops"])
     async def health() -> dict[str, str]:

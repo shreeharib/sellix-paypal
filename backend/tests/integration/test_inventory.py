@@ -82,6 +82,7 @@ async def test_restock_increases_available_stock(shop: ChannelConnection) -> Non
         # Restock 5 additional croissants baked in afternoon
         success = await inventory.restock(
             session,
+            merchant_id=shop.merchant_id,
             variant_id=variant_id,
             business_date=TODAY,
             quantity=5,
@@ -112,6 +113,7 @@ async def test_record_counter_sale_deducts_available_and_prevents_overselling(
         # Walk-in customer buys 3 loaves at counter
         remaining = await inventory.record_counter_sale(
             session,
+            merchant_id=shop.merchant_id,
             variant_id=variant_id,
             business_date=TODAY,
             quantity=3,
@@ -128,6 +130,7 @@ async def test_record_counter_sale_deducts_available_and_prevents_overselling(
         with pytest.raises(inventory.StockConflict):
             await inventory.record_counter_sale(
                 session,
+                merchant_id=shop.merchant_id,
                 variant_id=variant_id,
                 business_date=TODAY,
                 quantity=6,
@@ -151,7 +154,7 @@ async def test_mark_sold_out_brings_available_to_zero(shop: ChannelConnection) -
 
         # Merchant marks remaining cupcakes sold out
         sold_out = await inventory.mark_sold_out(
-            session, variant_id=variant_id, business_date=TODAY
+            session, merchant_id=shop.merchant_id, variant_id=variant_id, business_date=TODAY
         )
         assert sold_out is True
 
@@ -165,7 +168,9 @@ async def test_mark_sold_out_brings_available_to_zero(shop: ChannelConnection) -
 
         # Calling mark_sold_out again is an idempotent no-op
         assert (
-            await inventory.mark_sold_out(session, variant_id=variant_id, business_date=TODAY)
+            await inventory.mark_sold_out(
+                session, merchant_id=shop.merchant_id, variant_id=variant_id, business_date=TODAY
+            )
             is True
         )
 
@@ -180,26 +185,47 @@ async def test_inventory_operations_reject_invalid_inputs_and_missing_variants(
     async with session_scope() as session:
         with pytest.raises(ValueError):
             await inventory.restock(
-                session, variant_id=fake_variant_id, business_date=TODAY, quantity=0
+                session,
+                merchant_id=shop.merchant_id,
+                variant_id=fake_variant_id,
+                business_date=TODAY,
+                quantity=0,
             )
 
         with pytest.raises(ValueError):
             await inventory.record_counter_sale(
-                session, variant_id=fake_variant_id, business_date=TODAY, quantity=-1
+                session,
+                merchant_id=shop.merchant_id,
+                variant_id=fake_variant_id,
+                business_date=TODAY,
+                quantity=-1,
             )
 
         with pytest.raises(LookupError):
             await inventory.restock(
-                session, variant_id=fake_variant_id, business_date=TODAY, quantity=5
+                session,
+                merchant_id=shop.merchant_id,
+                variant_id=fake_variant_id,
+                business_date=TODAY,
+                quantity=5,
             )
 
         with pytest.raises(LookupError):
             await inventory.record_counter_sale(
-                session, variant_id=fake_variant_id, business_date=TODAY, quantity=5
+                session,
+                merchant_id=shop.merchant_id,
+                variant_id=fake_variant_id,
+                business_date=TODAY,
+                quantity=5,
             )
 
         with pytest.raises(LookupError):
-            await inventory.mark_sold_out(session, variant_id=fake_variant_id, business_date=TODAY)
+            await inventory.mark_sold_out(
+                session,
+                merchant_id=shop.merchant_id,
+                variant_id=fake_variant_id,
+                business_date=TODAY,
+            )
 
 
 async def test_nightly_rollover_perpetual_and_multi_day(shop: ChannelConnection) -> None:
@@ -253,10 +279,18 @@ async def test_nightly_rollover_perpetual_and_multi_day(shop: ChannelConnection)
 
         # Counter sale yesterday: 2 dresses sold, 8 cookies sold
         await inventory.record_counter_sale(
-            session, variant_id=dress_var.id, business_date=yesterday, quantity=2
+            session,
+            merchant_id=shop.merchant_id,
+            variant_id=dress_var.id,
+            business_date=yesterday,
+            quantity=2,
         )
         await inventory.record_counter_sale(
-            session, variant_id=cookie_var.id, business_date=yesterday, quantity=8
+            session,
+            merchant_id=shop.merchant_id,
+            variant_id=cookie_var.id,
+            business_date=yesterday,
+            quantity=8,
         )
 
         # Nightly rollover executes from yesterday to today

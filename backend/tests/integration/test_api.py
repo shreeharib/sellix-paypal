@@ -9,7 +9,6 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import AsyncIterator
-from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
 import httpx2
@@ -33,13 +32,16 @@ from app.modules.merchants.models import Merchant
 from app.modules.orders import service as orders
 from app.modules.orders.models import Order
 from app.modules.orders.schemas import OrderLineRequest, OrderRequest
-from app.modules.payments import fx, paypal, simulator
+from app.modules.payments import service as payments
+from app.modules.payments import simulator
 from app.modules.payments.models import Payment
 from app.modules.shop_profile import service as shop_profile
 from app.modules.shop_profile.schemas import OnboardingAnswers
 from app.webhooks.models import WebhookEvent
 from app.webhooks.tasks import process_simulator_event
+from tests.conftest import RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET
 from tests.integration.factories import start_conversation
+from tests.integration.fake_razorpay import FakeRazorpay
 
 pytestmark = pytest.mark.anyio
 
@@ -293,6 +295,11 @@ async def test_refresh_rotates_and_a_reused_token_ends_the_session(
     ).json()
 
     second = await api.post("/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    # Past the 2-minute grace for a lost answer (tests/integration/test_refresh_grace.py).
+    async with session_scope() as session:
+        record = await session.scalar(select(Session))
+        assert record is not None and record.refresh_rotated_at is not None
+        record.refresh_rotated_at -= accounts.REFRESH_REUSE_GRACE * 2
     reused = await api.post("/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
     after_reuse = await api.post(
         "/v1/auth/refresh", json={"refresh_token": second.json()["refresh_token"]}
@@ -606,16 +613,17 @@ async def test_one_shop_cannot_see_or_touch_another_shops_data(
 
 
 async def test_one_shop_cannot_refund_another_shops_order(
-    api: httpx2.AsyncClient, shop: ChannelConnection, monkeypatch: pytest.MonkeyPatch
+    api: httpx2.AsyncClient, shop: ChannelConnection, fake_razorpay: FakeRazorpay
 ) -> None:
-    refunded: list[str] = []
-
-    async def refund_capture(capture_id: str, **_: object) -> paypal.RefundResult:
-        refunded.append(capture_id)
-        return paypal.RefundResult("REFUND-1", "COMPLETED", 30000, "INR")
-
-    monkeypatch.setattr(paypal, "configured", lambda: True)
-    monkeypatch.setattr(paypal, "refund_capture", refund_capture)
+    await payments.connect_account(
+        shop.merchant_id, key_id=RAZORPAY_KEY_ID, key_secret=RAZORPAY_KEY_SECRET
+    )
+    fake_razorpay.payments["pay_TEST00000001"] = {
+        "id": "pay_TEST00000001",
+        "amount": 30000,
+        "currency": "INR",
+        "status": "captured",
+    }
     owner = await sign_in_as(shop.merchant_id)
     await api.put(
         "/v1/today/stock",
@@ -642,15 +650,17 @@ async def test_one_shop_cannot_refund_another_shops_order(
             Payment(
                 merchant_id=shop.merchant_id,
                 order_id=placed.order_id,
-                provider="paypal",
-                provider_capture_id="CAPTURE-1",
+                provider="razorpay",
+                provider_order_id="plink_TEST00000001",
+                provider_capture_id="pay_TEST00000001",
+                provider_account=RAZORPAY_KEY_ID,
                 status="completed",
                 currency="INR",
                 amount_minor=30000,
             )
         )
         await orders.record_payment(
-            session, placed.order_id, amount_minor=30000, currency="INR", actor="paypal"
+            session, placed.order_id, amount_minor=30000, currency="INR", actor="razorpay"
         )
         other = Merchant(name="Other shop")
         session.add(other)
@@ -661,7 +671,7 @@ async def test_one_shop_cannot_refund_another_shops_order(
     response = await api.post(f"/v1/orders/{placed.order_id}/refund", headers=bearer(intruder))
 
     assert response.status_code == 404
-    assert refunded == []
+    assert fake_razorpay.refunds == {}
     async with session_scope() as session:
         order = await orders.get_order(session, placed.order_id, shop.merchant_id)
     assert order is not None
@@ -670,7 +680,7 @@ async def test_one_shop_cannot_refund_another_shops_order(
     own = await api.post(f"/v1/orders/{placed.order_id}/refund", headers=bearer(owner))
 
     assert own.status_code == 200
-    assert refunded == ["CAPTURE-1"]
+    assert [r["payment_id"] for r in fake_razorpay.refunds.values()] == ["pay_TEST00000001"]
 
 
 async def test_how_long_a_shop_can_sell_a_product_is_saved_with_it(
@@ -914,7 +924,7 @@ async def test_simulator_webhooks_need_a_valid_signature_and_never_run_in_produc
     assert (await api.get(f"/payments/simulator/{uuid.uuid4()}")).status_code == 404
 
 
-async def test_payment_link_without_a_upi_id_is_a_paypal_link_charged_in_dollars(
+async def test_payment_link_without_a_upi_id_or_razorpay_is_an_error_not_an_invented_upi_id(
     api: httpx2.AsyncClient,
     shop: ChannelConnection,
     deferred_jobs: InMemoryConnector,
@@ -922,33 +932,6 @@ async def test_payment_link_without_a_upi_id_is_a_paypal_link_charged_in_dollars
 ) -> None:
     token = await sign_in_as(shop.merchant_id)
     order_id = await place_sourdough_order(api, shop, token)
-
-    async def create_order(**kwargs: object) -> paypal.CreatedOrder:
-        return paypal.CreatedOrder("PP-1", "https://paypal.test/approve")
-
-    async def per_dollar(currency: str) -> Decimal:
-        return Decimal("94")
-
-    monkeypatch.setattr(paypal, "configured", lambda: True)
-    monkeypatch.setattr(paypal, "create_order", create_order)
-    monkeypatch.setattr(fx, "per_dollar", per_dollar)
-
-    response = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
-
-    assert response.status_code == 200
-    assert response.json()["payment_method"] == "paypal"
-    assert response.json()["payment_link"] == "https://paypal.test/approve"
-
-
-async def test_payment_link_without_a_upi_id_or_paypal_is_an_error_not_an_invented_upi_id(
-    api: httpx2.AsyncClient,
-    shop: ChannelConnection,
-    deferred_jobs: InMemoryConnector,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    token = await sign_in_as(shop.merchant_id)
-    order_id = await place_sourdough_order(api, shop, token)
-    monkeypatch.setattr(paypal, "configured", lambda: False)
 
     response = await api.get(f"/v1/orders/{order_id}/payment-link", headers=bearer(token))
 

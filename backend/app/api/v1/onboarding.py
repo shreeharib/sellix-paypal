@@ -25,11 +25,18 @@ async def get_onboarding(shop: Shop) -> schemas.Onboarding:
 
 @router.put("")
 async def save_onboarding(shop: Shop, body: schemas.OnboardingUpdate) -> schemas.Onboarding:
-    """Saves the answers (also after each step) and regenerates the shop profile."""
+    """Saves the answers (also after each step) and regenerates the shop profile. Finishing
+    the setup (`complete: true` the first time) switches the assistant on; saving a finished
+    setup again leaves the owner's switch as it is."""
     try:
         async with session_scope() as session:
+            before = await shop_profile.get_onboarding(session, shop.merchant_id)
+            finishing = body.complete and (before is None or before.completed_at is None)
             merchant = await merchants.update_settings(
-                session, shop.merchant_id, name=body.shop_name
+                session,
+                shop.merchant_id,
+                name=body.shop_name,
+                agent_enabled=True if finishing else None,
             )
             await shop_profile.save_onboarding(
                 session,
@@ -52,5 +59,5 @@ async def _onboarding(session: AsyncSession, shop: ShopContext) -> schemas.Onboa
         answers=OnboardingAnswers.model_validate(onboarding.answers if onboarding else {}),
         completed=onboarding is not None and onboarding.completed_at is not None,
         channels=channel_list(connections),
-        payments_ready=payments.configured(),
+        payments_ready=await payments.ready_for(shop.merchant_id),
     )

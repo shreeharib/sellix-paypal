@@ -61,10 +61,13 @@ async def search_catalog(
 async def list_products(
     shop: Shop,
     category: Annotated[str | None, Query(max_length=100)] = None,
+    include_inactive: bool = False,
 ) -> list[schemas.ProductDetail]:
-    """List catalog products with optional category filtering."""
+    """The shop's products (removed ones too with `include_inactive=true`), by category."""
     async with session_scope() as session:
-        prods = await catalog.list_products(session, shop.merchant_id, category=category)
+        prods = await catalog.list_products(
+            session, shop.merchant_id, category=category, include_inactive=include_inactive
+        )
         details: list[schemas.ProductDetail] = []
         for p in prods:
             item = await catalog.get_product_with_variants(session, shop.merchant_id, p.id)
@@ -173,7 +176,8 @@ async def update_product(
     product_id: uuid.UUID,
     payload: schemas.ProductUpdate,
 ) -> schemas.ProductDetail:
-    """Update product metadata, description, category, and dietary/size attributes."""
+    """Update a product's details; rename it (same product, no new item); remove it with
+    `is_active: false` or bring it back with `true`."""
     sent = payload.model_fields_set  # a date sent as null clears it; one left out stays
     async with session_scope() as session:
         merchant = await merchants.get_merchant(session, shop.merchant_id)
@@ -191,9 +195,14 @@ async def update_product(
                 available_on=payload.available_on if "available_on" in sent else catalog.UNSET,
                 order_by_date=payload.order_by_date if "order_by_date" in sent else catalog.UNSET,
                 today=merchants.business_date(merchant),
+                is_active=payload.is_active,
             )
         except catalog.AvailabilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except catalog.ProductNameTaken as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:  # a blank name
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not updated:
             raise HTTPException(status_code=404, detail="Product not found")
 

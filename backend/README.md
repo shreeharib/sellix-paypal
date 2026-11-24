@@ -26,7 +26,7 @@ just dev        # or: uv run uvicorn app.main:app --reload --reload-include .env
 
 - Health check: http://localhost:8000/health · API docs: http://localhost:8000/docs
 - The `--loop` option matters on Windows only: psycopg's async mode needs a selector event loop.
-- Meta and PayPal need a public HTTPS address. Locally, run a tunnel and set `PUBLIC_BASE_URL` to it:
+- Meta and Razorpay webhooks need a public HTTPS address. Locally, run a tunnel and set `PUBLIC_BASE_URL` to it:
   `docker run -d --name sellix-tunnel cloudflare/cloudflared:latest tunnel --no-autoupdate --url http://host.docker.internal:8000`
   (the URL is in `docker logs sellix-tunnel`; it changes every time the tunnel restarts).
 
@@ -37,6 +37,7 @@ just cli create-merchant --name "Sweet Crumbs"
 just cli set-shop-profile --merchant-id <id> --file shop.md
 just cli set-stock --merchant-id <id> --file stock.json        # see `just cli set-stock --help`
 just cli connect-instagram --merchant-id <id>                 # prints the link to open
+just cli set-agent --merchant-id <id> on                      # new shops start with it off (v2)
 ```
 
 Other commands: `set-agent on|off`, `resume-conversation`, `generate-secrets`. See `just cli --help`.
@@ -55,12 +56,12 @@ uv run pytest                # tests; database tests need Postgres on :54322 (sk
 1. `webhooks/meta.py`: verify the signature → store the raw event once (`webhook_events`) → queue a job → answer 200.
 2. `webhooks/tasks.py`: parse it (`channels`) → store customer and message (`conversations`) → queue one agent turn per chat, a few seconds later, so a burst of messages gets one reply.
 3. `conversations.run_turn`: build the history → `agent` (shop profile + today's stock → model → validated JSON) → open an escalation if the owner is needed → send through `channels` → record the result.
-4. Orders: the agent asks the system for a **quote** (exact prices and totals come from code, never the model), then, once the customer agrees, to **place** the order. That holds the stock in one conditional update and creates a PayPal sandbox order. The link goes into the reply.
-5. The order is paid only when PayPal confirms the capture (return page or verified webhook). Held stock becomes sold, and a system note makes the agent thank the customer in their language. Unpaid holds expire after `PAYMENT_HOLD_MINUTES` and the stock goes back on sale.
+4. Orders: the agent asks the system for a **quote** (exact prices and totals come from code, never the model), then, once the customer agrees, to **place** the order. That holds the stock in one conditional update and creates a Razorpay Payment Link on the shop's own Razorpay account (UPI, card, net banking). Code sends the link to the customer.
+5. The order is paid only when Razorpay's own record shows the link paid: the return page (signature checked), a verified webhook, or the settle job that asks Razorpay about open links every minute all end in the same look-up. Held stock becomes sold, and a system note makes the agent thank the customer in their language. Unpaid holds expire after `PAYMENT_HOLD_MINUTES`, the stock goes back on sale, and the link is cancelled at Razorpay.
 6. Echoes of the merchant typing in the Instagram app switch the agent off for that chat.
 7. Every minute, jobs re-queue unanswered chats and expire unpaid orders; every night, one refreshes Instagram tokens.
 
-PayPal is called for real (`api-m.sandbox.paypal.com`); `tests/integration/test_paypal_sandbox.py` runs against the sandbox when `PAYPAL_CLIENT_ID`/`SECRET` are set in `.env`.
+Tests talk to a fake Razorpay at the HTTP level (`tests/integration/fake_razorpay.py`). A shop connects its own Razorpay keys in the app (Settings > Payments); see `docs/razorpay-setup.md`.
 
 ## Layout
 
@@ -71,7 +72,7 @@ app/
   cli.py           operator commands
   core/            settings, database, job queue, encryption, signing, logging, event loop
   api/v1/          REST API routers for the merchant app (thin; call module services only)
-  webhooks/        Meta and PayPal webhooks and the webhook inbox
+  webhooks/        Meta and Razorpay webhooks and the webhook inbox
   modules/         business modules: models.py, schemas.py, service.py (public boundary), tasks.py
 tests/
   unit/            no database (includes AST modular monolith boundary enforcement)

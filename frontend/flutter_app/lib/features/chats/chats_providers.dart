@@ -10,6 +10,15 @@ final conversationsProvider = FutureProvider.autoDispose<List<Conversation>>(
   (ref) => ref.watch(sellixApiProvider).conversations(),
 );
 
+/// The first page of chats plus any older pages loaded from the list, so a chat opened from an
+/// older page still finds itself.
+final chatListConversationsProvider = FutureProvider.autoDispose<List<Conversation>>((ref) async {
+  final older = ref.watch(olderChatsProvider).chats;
+  final first = await ref.watch(conversationsProvider.future);
+  final known = {for (final c in first) c.id};
+  return [...first, for (final c in older) if (!known.contains(c.id)) c];
+});
+
 /// Open questions across the shop. The chat list and the thread both derive state from it.
 final openQuestionsProvider = FutureProvider.autoDispose<List<Question>>(
   (ref) => ref.watch(sellixApiProvider).questions(),
@@ -61,12 +70,70 @@ class ChatListData {
 }
 
 final chatListProvider = FutureProvider.autoDispose<ChatListData>((ref) async {
-  final conversations = ref.watch(conversationsProvider.future);
+  final conversations = ref.watch(chatListConversationsProvider.future);
   final open = ref.watch(openQuestionsProvider.future);
   final orders = ref.watch(ordersProvider.future);
   await Future.wait<Object?>([conversations, open, orders]);
   return ChatListData(conversations: await conversations, open: await open, orders: await orders);
 });
+
+/// Chats per "load more" page.
+const chatsPage = 50;
+
+/// Chats older than the first page, loaded a page at a time from the end of the list.
+class OlderChats {
+  const OlderChats({this.chats = const [], this.done = false, this.loading = false, this.error});
+
+  final List<Conversation> chats;
+  final bool done;
+  final bool loading;
+  final Object? error;
+}
+
+class OlderChatsController extends Notifier<OlderChats> {
+  @override
+  OlderChats build() {
+    // A fresh first page starts the older pages over.
+    ref.watch(conversationsProvider);
+    return const OlderChats();
+  }
+
+  /// Loads the page before [oldest], the latest message time of the oldest chat shown.
+  Future<void> loadMore(DateTime oldest) async {
+    if (state.loading || state.done) return;
+    final had = state.chats;
+    state = OlderChats(chats: had, loading: true);
+    try {
+      final page = await ref.read(sellixApiProvider).conversations(before: oldest, limit: chatsPage);
+      final known = {for (final c in had) c.id};
+      state = OlderChats(
+        chats: [...had, for (final c in page) if (!known.contains(c.id)) c],
+        done: page.length < chatsPage,
+      );
+    } on Object catch (error) {
+      state = OlderChats(chats: had, error: error);
+    }
+  }
+}
+
+final olderChatsProvider = NotifierProvider.autoDispose<OlderChatsController, OlderChats>(
+  OlderChatsController.new,
+);
+
+/// Whether there may be chats older than [data] shows: the first page came back full, or older
+/// pages have loaded and the last one was full.
+bool mayHaveOlderChats(ChatListData data, OlderChats older) =>
+    !older.done && data.conversations.length >= chatsPage && data.conversations.any((c) => c.lastMessageAt != null);
+
+/// The oldest latest-message time in [chats], to page from.
+DateTime? oldestChatTime(List<Conversation> chats) {
+  DateTime? oldest;
+  for (final chat in chats) {
+    final at = chat.lastMessageAt;
+    if (at != null && (oldest == null || at.isBefore(oldest))) oldest = at;
+  }
+  return oldest;
+}
 
 /// Reloads the list. A failure stays on the provider, where the screen reports it.
 Future<void> refreshChatList(WidgetRef ref) async {
@@ -122,8 +189,8 @@ List<Conversation> filterChats(ChatListData data, ChatFilter filter, String quer
   ];
 }
 
-/// Everything one thread shows. [conversation] is null when the chat isn't in the latest 100 the
-/// backend lists.
+/// Everything one thread shows. [conversation] is null when the chat isn't in the chats loaded so
+/// far (the first page and any older pages).
 // BACKEND GAP: no GET /v1/conversations/{id}, so an older chat can't be opened from a link.
 class ChatThread {
   const ChatThread({
@@ -152,7 +219,7 @@ class ChatThread {
 }
 
 final chatThreadProvider = FutureProvider.autoDispose.family<ChatThread, String>((ref, id) async {
-  final conversations = ref.watch(conversationsProvider.future);
+  final conversations = ref.watch(chatListConversationsProvider.future);
   final messages = ref.watch(chatMessagesProvider(id).future);
   final drafts = ref.watch(chatDraftsProvider(id).future);
   final open = ref.watch(openQuestionsProvider.future);

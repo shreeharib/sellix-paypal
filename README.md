@@ -2,11 +2,11 @@
 
 **sellix** is an omnichannel enterprise AI sales and commerce platform designed for D2C brands, makers, cloud kitchens, and merchants selling across **Instagram DMs, WhatsApp Cloud API, and Counter POS**.
 
-Powered by autonomous multi-lingual AI sales agents, sellix answers customers in their natural language mix (Tamil + English, Hinglish, Tanglish, and more), references a multi-mode inventory ledger (daily perishable, perpetual inventory, made-to-order, unlimited, serialized), manages stock reservations with sub-second concurrency, settles payments across dual rails (PayPal and direct UPI), and escalates exceptions to merchant management apps.
+Powered by autonomous multi-lingual AI sales agents, sellix answers customers in their natural language mix (Tamil + English, Hinglish, Tanglish, and more), references a multi-mode inventory ledger (daily perishable, perpetual inventory, made-to-order, unlimited, serialized), manages stock reservations with sub-second concurrency, takes payments through each shop's own Razorpay account (UPI, cards, net banking) or direct UPI, and escalates exceptions to merchant management apps.
 
 > **Architecture Standard:** **Omnichannel Enterprise SaaS**. The platform is designed from the ground up for multi-channel commerce, multi-category catalogs, multi-tenant horizontal scaling (PostgreSQL with Citus-ready sharding), and an orthogonal triple-status order lifecycle (`status`, `payment_status`, `fulfilment_status`).
 >
-> **Status:** Active development for the [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/) and production deployment. Judge instructions, the hosted demo, and video walkthrough are linked here.
+> **Status:** Started for the PayPal AI Hackathon 2026; now being prepared for a real launch with Razorpay payments (Nov 2026). See [docs/HANDOFF.md](docs/HANDOFF.md).
 
 
 ## Repository layout

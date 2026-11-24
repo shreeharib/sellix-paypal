@@ -20,6 +20,7 @@ from app.modules.agent import items, llm, prompt_store
 from app.modules.agent.guardrails import inbound
 from app.modules.agent.tools.registry import TurnContext
 from app.modules.conversations.schemas import ChatLine
+from app.modules.inventory.schemas import StockItem
 from app.modules.orders.schemas import SavedQuote
 
 SHOP_EVENT = "shop_event"
@@ -179,6 +180,7 @@ def build(
                         "name": item.label,
                         "id": items.ref(item.variant_id),
                         "available": item.available,
+                        "availability": _availability(item),
                     }
                     for item in ctx.stock
                     if item.variant_id
@@ -294,11 +296,19 @@ def _coming_up(ctx: TurnContext) -> list[dict[str, object]]:
                 },
             )
             entry["days"].append(  # pyright: ignore[reportAttributeAccessIssue]
-                f"{_day_text(day)}: {item.available} left"
-                if item.available
-                else f"{_day_text(day)}: sold out"
+                f"{_day_text(day)}: {_availability(item)}"
             )
     return list(by_item.values())
+
+
+def _availability(item: StockItem) -> str:
+    """What the model is told about an item's stock. Made-to-order and always-available items
+    have no count (the server allows up to 99 a line): saying "99 left" would be made up."""
+    if item.stock_mode == "made_to_order":
+        return "made to order"
+    if item.stock_mode == "unlimited":
+        return "available"
+    return f"{item.available} left" if item.available > 0 else "sold out"
 
 
 def _draft_date(draft: dict[str, object]) -> date | None:

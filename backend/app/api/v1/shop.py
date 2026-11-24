@@ -1,10 +1,14 @@
-"""The signed-in merchant, their shop settings and shop profile."""
+"""The signed-in merchant, their shop settings, shop profile and saved rules, and deleting
+the shop."""
 
-from fastapi import APIRouter, HTTPException
+import uuid
+
+from fastapi import APIRouter, HTTPException, Response
 
 from app.api.v1 import schemas
 from app.api.v1.deps import Shop
 from app.core.db import session_scope
+from app.modules.agent import service as agent
 from app.modules.channels import service as channels
 from app.modules.channels.schemas import ChannelConnectionInfo
 from app.modules.merchants import service as merchants
@@ -69,6 +73,45 @@ async def save_shop_profile(shop: Shop, body: schemas.ShopProfileUpdate) -> sche
     return schemas.ShopProfile(
         version=profile.version, content_md=profile.content_md, created_at=profile.created_at
     )
+
+
+@router.get("/rules")
+async def list_rules(shop: Shop) -> list[schemas.Rule]:
+    """The saved "always" answers the assistant gives, newest first."""
+    return [
+        schemas.Rule(
+            id=rule.id,
+            text=rule.text,
+            question=rule.question,
+            answer=rule.answer,
+            created_at=rule.created_at,
+        )
+        for rule in await agent.saved_rules(shop.merchant_id)
+    ]
+
+
+@router.delete("/rules/{rule_id}", status_code=204)
+async def delete_rule(shop: Shop, rule_id: uuid.UUID) -> Response:
+    if not await agent.delete_rule(shop.merchant_id, rule_id):
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return Response(status_code=204)
+
+
+@router.delete("/shop", status_code=204)
+async def delete_shop(shop: Shop, body: schemas.ShopDeletion) -> Response:
+    """Delete the shop and all its data, and sign everyone out (owner only). The body repeats
+    the shop's exact name, so it can't happen by accident."""
+    if shop.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the shop's owner can delete the shop.")
+    async with session_scope() as session:
+        merchant = await merchants.get_merchant(session, shop.merchant_id)
+        if body.confirm_name.strip() != merchant.name.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="That isn't the shop's name. Type it exactly as it is to delete the shop.",
+            )
+        await merchants.delete_shop(session, shop.merchant_id, source="app")
+    return Response(status_code=204)
 
 
 def channel_list(connections: list[ChannelConnectionInfo]) -> list[schemas.Channel]:

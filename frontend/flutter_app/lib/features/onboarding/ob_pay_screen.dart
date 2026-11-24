@@ -4,8 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/config.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
+import '../settings/razorpay_card.dart';
+import '../settings/settings_providers.dart';
 import 'ob_answers_text.dart';
 import 'ob_common.dart';
 
@@ -36,6 +39,12 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
 
   void _continue() {
     final v = _upi.text.trim();
+    // With Razorpay connected, the UPI ID is only a fallback: it may stay empty.
+    final razorpay = ref.read(paymentAccountProvider).value?.connected ?? false;
+    if (v.isEmpty && razorpay) {
+      context.push(Routes.obTest);
+      return;
+    }
     if (!obUpiPattern.hasMatch(v)) {
       HapticFeedback.heavyImpact();
       setState(() {
@@ -53,14 +62,16 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
     _load();
     final p = context.sx;
     final draft = ref.watch(onboardingDraftProvider).value;
-    final paypalReady = draft?.paymentsReady ?? false;
+    final account = ref.watch(paymentAccountProvider);
+    final owner = ref.watch(meProvider).value?.isOwner ?? true;
+    final razorpay = account.value?.connected ?? false;
     final whatsappOn = draft?.channels.any((c) => c.channel == 'whatsapp' && c.status == 'active') ?? false;
     return ObStepFrame(
       step: 2,
       fraction: 0.5,
       fallback: Routes.obHours,
       title: 'How do customers pay?',
-      why: 'sellix sends the right payment option and marks the order paid.',
+      why: 'sellix sends a payment link and marks the order paid when the money comes.',
       saving: saving,
       onContinue: _ready ? _continue : null,
       onSkip: () => context.push(Routes.obTest),
@@ -68,25 +79,16 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
         const SizedBox(height: SxSpace.s20),
         SxFadeUp(
           index: 2,
-          child: SxCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    const SxIconTile(child: SxBrandIcon(SxBrand.paypal)),
-                    const SizedBox(width: SxSpace.s12),
-                    Expanded(child: _Titled('PayPal', 'For customers abroad')),
-                    paypalReady
-                        ? const SxChip(label: 'Ready', tone: SxChipTone.positive, icon: TablerIcons.check)
-                        : const SxChip(label: 'Not set up yet'),
-                  ],
-                ),
-                const SizedBox(height: SxSpace.s12),
-                const SxAiNote('I send a payment link. The order is paid only when PayPal confirms. A screenshot never counts.'),
-              ],
+          child: switch (account) {
+            AsyncValue(value: final loaded?) => RazorpayCard(account: loaded, owner: owner),
+            AsyncValue(hasError: true) => SxCard(
+              child: SxErrorState(
+                error: account.error,
+                onRetry: () => ref.invalidate(paymentAccountProvider),
+              ),
             ),
-          ),
+            _ => const SxSkeleton(height: 220, radius: SxRadius.card),
+          },
         ),
         const SizedBox(height: SxSpace.s8),
         SxFadeUp(
@@ -99,7 +101,9 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
                   children: [
                     const SxIconTile(child: SxBrandIcon(SxBrand.upi)),
                     const SizedBox(width: SxSpace.s12),
-                    Expanded(child: _Titled('UPI', 'For customers in India')),
+                    Expanded(
+                      child: _Titled('UPI ID', razorpay ? 'Optional: used if Razorpay is off' : 'When Razorpay isn’t connected'),
+                    ),
                   ],
                 ),
                 const SizedBox(height: SxSpace.s12),
@@ -118,7 +122,8 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: SxSpace.s4),
                   child: Text(
-                    'Your own UPI ID, from your bank or UPI app. You confirm payments in one tap when the money arrives.',
+                    'Your own UPI ID, from your bank or UPI app. Customers pay it only while Razorpay isn’t '
+                    'connected, and you confirm those payments by hand when the money arrives.',
                     style: SxText.caption.copyWith(color: p.textSecondary),
                   ),
                 ),
@@ -126,6 +131,8 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
             ),
           ),
         ),
+        // BACKEND GAP: no endpoint connects WhatsApp Business, so the card is hidden.
+        if (kShowComingSoon) ...[
         const SizedBox(height: 28),
         Text('Add WhatsApp', style: SxText.titleM.copyWith(color: p.textPrimary)),
         const SizedBox(height: SxSpace.s12),
@@ -162,6 +169,7 @@ class _ObPayScreenState extends ConsumerState<ObPayScreen> with ObSaving {
             ),
           ),
         ),
+        ],
       ],
     );
   }

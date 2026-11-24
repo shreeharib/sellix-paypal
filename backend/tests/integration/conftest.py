@@ -74,9 +74,12 @@ def deferred_jobs() -> Iterator[InMemoryConnector]:
 
 @pytest.fixture
 async def shop(db: None) -> ChannelConnection:
-    """A merchant with a connected Instagram account."""
+    """A merchant with a connected Instagram account, set up and answering on the v1 engine.
+
+    New shops start with the assistant off on v2 (merchants' column defaults); the tests' shop
+    is one that has finished its onboarding, so it says so explicitly."""
     async with session_scope() as session:
-        merchant = Merchant(name="Sweet Crumbs")
+        merchant = Merchant(name="Sweet Crumbs", agent_enabled=True, agent_engine="v1")
         session.add(merchant)
         await session.flush()
         connection = ChannelConnection(

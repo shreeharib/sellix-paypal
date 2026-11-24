@@ -6,15 +6,19 @@ import 'package:go_router/go_router.dart';
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
 import '../../core/auth/auth_controller.dart';
+import '../../core/config.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
+import '../../core/server_config.dart';
 import '../../core/theme_mode.dart';
 import '../../design/design.dart';
 import '../orders/orders_providers.dart';
 import '../stock/stock_providers.dart';
 import 'automations_store.dart';
+import 'delete_shop_sheet.dart';
 import 'hours_codec.dart';
 import 'saved_rules.dart';
+import 'server_sheet.dart';
 import 'settings_providers.dart';
 import 'shop_type.dart';
 
@@ -33,6 +37,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   void _invalidateAll() => ref
     ..invalidate(onboardingProvider)
     ..invalidate(shopProfileProvider)
+    ..invalidate(paymentAccountProvider)
+    ..invalidate(merchantRulesProvider)
     ..invalidate(ordersProvider)
     ..invalidate(meProvider);
 
@@ -66,7 +72,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final yes = await showSxConfirm(
       context,
       title: 'Sign out?',
-      body: 'sellix keeps answering your customers. You stop getting notifications on this phone.',
+      body:
+          'sellix keeps answering your customers. This phone stops showing new questions and paid '
+          'orders until you sign in again.',
       confirmLabel: 'Sign out',
       cancelLabel: 'Stay',
     );
@@ -186,7 +194,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final onboarding = ref.watch(onboardingProvider).value;
     final shopTypes = ref.watch(shopTypesProvider).value ?? builtInShopTypes;
     final profile = ref.watch(shopProfileProvider);
-    final automations = ref.watch(automationsProvider).value;
+    final automations = kShowComingSoon ? ref.watch(automationsProvider).value : null;
+    final account = ref.watch(paymentAccountProvider).value;
+    final alwaysRules = ref.watch(merchantRulesProvider).value;
+    final server = ref.watch(serverUrlProvider);
     final orders = ref.watch(ordersProvider).value;
     final alerts = _alerts(me.merchant.id);
     final themeMode = ref.watch(themeModeProvider);
@@ -203,7 +214,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     }).length;
 
     final paymentNames = [
-      if (onboarding?.paymentsReady ?? false) 'PayPal',
+      if (account?.connected ?? false)
+        account!.mode == 'live' ? 'Razorpay' : 'Razorpay (test)'
+      else if (account?.isTestSetup ?? false)
+        'Test payments',
       if (blankToNull(onboarding?.answers.upiId ?? '') != null) 'UPI',
     ];
     final knowsValue = profile.value == null
@@ -308,17 +322,21 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   signal: true,
                   onChanged: _agentPending == null ? _setAgent : null,
                 ),
-                SxListRow(
-                  icon: TablerIcons.bolt,
-                  title: 'Automations',
-                  subtitle: automationLocalNote,
-                  value: automations == null ? null : '${chosenAutomations(automations)} saved',
-                  onTap: () => context.push(Routes.automations),
-                ),
+                // Automations are saved on the phone only and run nothing yet, so they stay hidden.
+                if (kShowComingSoon)
+                  SxListRow(
+                    icon: TablerIcons.bolt,
+                    title: 'Automations',
+                    subtitle: automationLocalNote,
+                    value: automations == null ? null : '${chosenAutomations(automations)} saved',
+                    onTap: () => context.push(Routes.automations),
+                  ),
                 SxListRow(
                   icon: TablerIcons.bookmark,
                   title: 'Saved rules',
-                  value: profile.hasValue ? '${parseSavedRules(profile.value?.contentMd).length}' : null,
+                  value: profile.hasValue && alwaysRules != null
+                      ? '${parseSavedRules(profile.value?.contentMd).length + alwaysRules.length}'
+                      : null,
                   onTap: () => context.push(Routes.rules),
                 ),
                 SxListRow(
@@ -362,12 +380,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         ),
                   onTap: () => context.push(Routes.channels),
                 ),
-                SxListRow(
-                  leading: _BrandTile(SxBrand.whatsapp),
-                  title: 'WhatsApp',
-                  value: channelWorks(whatsapp) ? 'Connected' : 'Not available yet',
-                  onTap: () => context.push(Routes.channels),
-                ),
+                if (kShowComingSoon || channelWorks(whatsapp))
+                  SxListRow(
+                    leading: _BrandTile(SxBrand.whatsapp),
+                    title: 'WhatsApp',
+                    value: channelWorks(whatsapp) ? 'Connected' : 'Not available yet',
+                    onTap: () => context.push(Routes.channels),
+                  ),
                 SxListRow(
                   icon: TablerIcons.credit_card,
                   title: 'Payments',
@@ -410,25 +429,34 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   ),
                 ),
                 SxListRow(
-                  icon: TablerIcons.language,
-                  title: 'App language',
-                  value: 'English',
-                  onTap: _pickLanguage,
+                  icon: TablerIcons.server,
+                  title: 'Server',
+                  value: serverHost(server),
+                  onTap: () => showServerSheet(context),
                 ),
-                SxListRow(
-                  icon: TablerIcons.bell,
-                  title: 'Morning reminder',
-                  subtitle: automationLocalNote,
-                  value: alerts.morning,
-                  onTap: () => _pickMorning(alerts),
-                ),
-                SxListRow(
-                  icon: TablerIcons.moon,
-                  title: 'Quiet hours',
-                  subtitle: automationLocalNote,
-                  value: alerts.quietWords,
-                  onTap: () => _pickQuiet(alerts),
-                ),
+                // No translations, reminders or quiet hours run yet: hidden rather than shown dead.
+                if (kShowComingSoon) ...[
+                  SxListRow(
+                    icon: TablerIcons.language,
+                    title: 'App language',
+                    value: 'English',
+                    onTap: _pickLanguage,
+                  ),
+                  SxListRow(
+                    icon: TablerIcons.bell,
+                    title: 'Morning reminder',
+                    subtitle: automationLocalNote,
+                    value: alerts.morning,
+                    onTap: () => _pickMorning(alerts),
+                  ),
+                  SxListRow(
+                    icon: TablerIcons.moon,
+                    title: 'Quiet hours',
+                    subtitle: automationLocalNote,
+                    value: alerts.quietWords,
+                    onTap: () => _pickQuiet(alerts),
+                  ),
+                ],
               ],
             ),
           ),
@@ -445,6 +473,26 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             ),
           ),
         ),
+        if (me.isOwner) ...[
+          const SettingsGroupLabel('Shop'),
+          Mx(
+            child: SxFadeUp(
+              index: 5,
+              child: SxGroup(
+                children: [
+                  SxListRow(
+                    icon: TablerIcons.trash,
+                    title: 'Delete my shop',
+                    subtitle: 'Removes the shop and its data from sellix',
+                    danger: true,
+                    chevron: false,
+                    onTap: () => showDeleteShopSheet(context, me.merchant.name),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
         Padding(
           padding: const EdgeInsets.only(top: SxSpace.s20),
           child: Text(

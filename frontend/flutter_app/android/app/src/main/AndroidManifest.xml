@@ -1,7 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Android 13+: local notifications for new questions and paid orders. Asked at the end of
+         onboarding. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Release builds talk https only: cleartext stays off (Android's default since API 28) and
+         only debug builds allow it (src/debug/AndroidManifest.xml). Setting it here too would clash
+         with the debug manifest when they merge. -->
     <application
-        android:label="sellix_merchant"
+        android:label="sellix"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -28,7 +34,8 @@
         </activity>
         <activity
             android:name="com.linusu.flutter_web_auth_2.CallbackActivity"
-            android:exported="true">
+            android:exported="true"
+            android:taskAffinity="">
             <intent-filter android:label="flutter_web_auth_2">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

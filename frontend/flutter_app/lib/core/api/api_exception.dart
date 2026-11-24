@@ -5,6 +5,9 @@ class ApiException implements Exception {
   const ApiException(this.message, {this.statusCode});
 
   factory ApiException.from(DioException error) {
+    // Raised by the sign-in interceptor with the refresh call's own failure: keep its words.
+    final cause = error.error;
+    if (cause is ApiException) return cause;
     final data = error.response?.data;
     final detail = data is Map<String, dynamic> ? data['detail'] : null;
     return ApiException(
@@ -17,6 +20,9 @@ class ApiException implements Exception {
   final int? statusCode;
 
   bool get isUnauthorized => statusCode == 401;
+
+  /// No answer from the server at all (offline, timed out, wrong address): never a sign-out.
+  bool get isNetwork => statusCode == null;
 
   /// FastAPI's request validation error: `{"detail": [{"loc": [...], "msg": "...", ...}]}`.
   /// Routers raise `{"detail": "..."}`, which is written for the merchant; this form isn't, so it
@@ -35,7 +41,7 @@ class ApiException implements Exception {
   static String _fallback(DioException error) => switch (error.type) {
         DioExceptionType.connectionError ||
         DioExceptionType.connectionTimeout =>
-          "Can't reach sellix. Check your internet connection.",
+          "Can't reach sellix. Check your connection.",
         DioExceptionType.receiveTimeout => 'sellix took too long to answer. Please try again.',
         _ => 'Something went wrong. Please try again.',
       };

@@ -454,3 +454,30 @@ Map<String, String> handlesById(List<Conversation> conversations) => {
 /// Customer label for an order: `customer_handle` joined on `conversation_id`.
 String customerNameOf(Order order, Map<String, String> handles) =>
     handles[order.conversationId] ?? unknownCustomer;
+
+/// How a payment was made, in the merchant's words.
+String paymentMethodLabel(OrderPayment payment) {
+  final method = switch (payment.method) {
+    'upi' => 'UPI',
+    'card' => 'Card',
+    'netbanking' => 'Net banking',
+    'wallet' => 'Wallet',
+    'emi' => 'EMI',
+    'cardless_emi' => 'Cardless EMI',
+    'paylater' => 'Pay later',
+    'bank_transfer' => 'Bank transfer',
+    'cash' => 'Cash',
+    'simulator' => 'Test payment',
+    _ => switch (payment.provider) {
+      'upi_manual' => 'UPI',
+      'cash' => 'Cash',
+      'simulator' => 'Test payment',
+      _ => 'Other',
+    },
+  };
+  return payment.provider == 'razorpay' ? '$method, on Razorpay' : method;
+}
+
+/// The merchant confirmed this payment by hand (Mark as paid), rather than Razorpay.
+bool confirmedByHand(OrderPayment payment) =>
+    payment.provider == 'upi_manual' || payment.provider == 'cash' || payment.provider == 'manual';

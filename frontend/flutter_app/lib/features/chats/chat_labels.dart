@@ -120,3 +120,10 @@ String answeredEvent(Question question) {
     _ => line,
   };
 }
+
+/// When a "you replied" pause ends, for "Back on …": `today at 9:30 PM`, `tomorrow at 9:30 AM`.
+String pauseEndWords(DateTime until, {DateTime? now}) {
+  final day = dayLabel(until, now: now);
+  final when = day == 'Today' || day == 'Tomorrow' ? day.toLowerCase() : day;
+  return '$when at ${formatTime(until)}';
+}

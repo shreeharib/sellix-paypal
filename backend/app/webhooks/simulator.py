@@ -1,6 +1,6 @@
 """Webhooks from the payment simulator (payments/simulator.py): signed, stored, applied by a job.
 
-Same road as PayPal's: the delivery goes into the inbox first and a job applies it, so a crash
+Same road as Razorpay's: the delivery goes into the inbox first and a job applies it, so a crash
 between the two loses nothing and a repeated delivery is harmless.
 """
 

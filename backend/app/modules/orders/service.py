@@ -37,6 +37,7 @@ from app.modules.orders.schemas import (
     Quote,
     QuoteLine,
     QuoteRefused,
+    RefundRecord,
     RefundStatus,
     RefundTicket,
     SavedQuote,
@@ -102,7 +103,12 @@ async def quote(
     lines: list[QuoteLine] = []
     for variant_id, quantity in wanted.items():
         item = items[variant_id]
-        if item.available < quantity:
+        counted = inventory.is_counted(item.stock_mode)
+        if not counted and quantity > inventory.NO_COUNT_LINE_LIMIT:
+            # Made to order or always available: no stock to run out of, only a sane limit.
+            problems.append(f"{item.label}: at most {inventory.NO_COUNT_LINE_LIMIT} in one order")
+            continue
+        if counted and item.available < quantity:
             problems.append(
                 f"{item.label}: only {item.available} left"
                 if item.available
@@ -118,6 +124,7 @@ async def quote(
                 unit_price_minor=item.price_minor,
                 currency=item.currency,
                 quantity=quantity,
+                counted=counted,
             )
         )
 
@@ -190,6 +197,8 @@ async def place_order(
     await session.flush()
 
     for line in sorted(offer.lines, key=lambda line: line.variant_id):
+        if not line.counted:
+            continue  # made to order or always available: nothing to hold
         held = await inventory.hold(
             session,
             variant_id=line.variant_id,
@@ -213,6 +222,7 @@ async def place_order(
             line_total_minor=line.unit_price_minor * line.quantity,
             quantity=line.quantity,
             fulfilment_status="unfulfilled",
+            stock_counted=line.counted,
         )
         for line in offer.lines
     )
@@ -417,6 +427,12 @@ async def confirm_quote(
     if record.status == "expired" or record.expires_at <= now:
         record.status = "expired"
         raise QuoteRefused("expired", "This quote has expired: make a new quote")
+    merchant = await merchants.get_merchant(session, record.merchant_id)
+    if record.business_date < merchants.business_date(merchant, now):
+        # Quoted before midnight, confirmed after: holding stock on yesterday's row would leave
+        # today's count (kept items carry over) counting the same units twice.
+        record.status = "expired"
+        raise QuoteRefused("expired", "This quote was for an earlier day: make a new quote")
     if record.shown_message_id is None:
         raise QuoteRefused(
             "not_shown", "The customer hasn't received the quote card, so it can't be confirmed"
@@ -530,7 +546,11 @@ async def record_payment(
         return result("amount_mismatch")
 
     previous = order.status
-    items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
+    items = [
+        item
+        for item in await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id))
+        if item.stock_counted  # made-to-order lines have no stock to sell
+    ]
     outcome: PaymentOutcome = "paid"
     if previous == "awaiting_payment":
         for item in sorted(items, key=lambda item: item.variant_id):
@@ -647,10 +667,21 @@ async def settle_refund(
     if order is None or order.status == "refunded":
         return
     previous = order.status
-    if request.is_restocked and previous in ("paid", "completed", "confirmed"):
+    if request.is_restocked and previous in (
+        "paid",
+        "completed",
+        "confirmed",
+        "ready",
+        "delivered",
+    ):
+        # A paid order's items are sold, not held: put them back on sale. (Releasing them as
+        # holds took the units out of another customer's hold.) Made-to-order lines never
+        # counted stock.
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
         for item in sorted(items, key=lambda item: item.variant_id):
-            await inventory.release(
+            if not item.stock_counted:
+                continue
+            await inventory.unsell(
                 session,
                 variant_id=item.variant_id,
                 business_date=order.business_date,
@@ -687,6 +718,26 @@ async def pending_refunds(
     if order_id is not None:
         query = query.where(RefundRequest.order_id == order_id)
     return [_refund_ticket(request) for request in await session.scalars(query)]
+
+
+async def latest_refund(session: AsyncSession, order_id: uuid.UUID) -> RefundRecord | None:
+    """The order's most recent refund request, whatever its state (for the order screen)."""
+    request = await session.scalar(
+        select(RefundRequest)
+        .where(RefundRequest.order_id == order_id)
+        .order_by(RefundRequest.created_at.desc())
+        .limit(1)
+    )
+    if request is None:
+        return None
+    return RefundRecord(
+        id=request.id,
+        status=request.status,
+        amount_minor=request.amount_minor,
+        reason=request.reason,
+        provider_refund_id=request.provider_refund_id,
+        created_at=request.created_at,
+    )
 
 
 def _refund_ticket(request: RefundRequest) -> RefundTicket:
@@ -865,6 +916,8 @@ async def cancel_order(
         # Release the held stock back to available inventory
         items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
         for item in sorted(items, key=lambda item: item.variant_id):
+            if not item.stock_counted:
+                continue
             await inventory.release(
                 session,
                 variant_id=item.variant_id,
@@ -890,7 +943,12 @@ async def cancel_order(
 
 
 async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> list[ExpiredOrder]:
-    """Release the stock of unpaid orders whose hold has run out."""
+    """Release the stock of unpaid orders whose hold has run out.
+
+    The whole batch's stock rows are released in one order, by (variant, day): two batches at
+    once (copies of the job after the laptop slept) then can't lock the same rows crosswise
+    and deadlock. The job also lets only one copy run at a time (orders/tasks.py).
+    """
     cutoff = now or datetime.now(UTC)
     due = list(
         await session.scalars(
@@ -904,24 +962,38 @@ async def expire_due(session: AsyncSession, *, now: datetime | None = None) -> l
             .with_for_update(skip_locked=True)
         )
     )
+    by_id = {order.id: order for order in due}
+    lines = (
+        list(
+            await session.scalars(
+                select(OrderItem).where(
+                    OrderItem.order_id.in_(list(by_id)), OrderItem.stock_counted.is_(True)
+                )
+            )
+        )
+        if due
+        else []
+    )
+    for item in sorted(
+        lines,
+        key=lambda item: (item.variant_id, by_id[item.order_id].business_date, item.order_id),
+    ):
+        await inventory.release(
+            session,
+            variant_id=item.variant_id,
+            business_date=by_id[item.order_id].business_date,
+            quantity=item.quantity,
+            order_id=item.order_id,
+            status="expired",
+        )
     expired: list[ExpiredOrder] = []
     for order in due:
-        items = list(await session.scalars(select(OrderItem).where(OrderItem.order_id == order.id)))
-        for item in sorted(items, key=lambda item: item.variant_id):
-            await inventory.release(
-                session,
-                variant_id=item.variant_id,
-                business_date=order.business_date,
-                quantity=item.quantity,
-                order_id=order.id,
-                status="expired",
-            )
         order.status = "expired"
         order.hold_expires_at = None
         _log(session, order, "expired", "awaiting_payment", "expired", "system")
         expired.append(ExpiredOrder(order.id, order.number, order.conversation_id))
 
-    # Also release any standalone / unlinked holds in stock_holds table
+    # Holds that belong to no order (an order's holds were released with it, above).
     await inventory.release_expired_holds(session, now=cutoff)
     return expired
 
@@ -959,14 +1031,20 @@ async def list_orders(
     statuses: tuple[str, ...] | None = None,
     payment_statuses: tuple[str, ...] | None = None,
     limit: int = 50,
+    before: datetime | None = None,
 ) -> list[OrderSummary]:
-    """Newest first, with their items."""
+    """Newest first, with their items. `before` (exclusive) pages on: the last row's
+    `created_at`."""
     query = select(Order).where(Order.merchant_id == merchant_id)
+    if before is not None:
+        query = query.where(Order.created_at < before)
     if statuses:
         query = query.where(Order.status.in_(statuses))
     if payment_statuses:
         query = query.where(Order.payment_status.in_(payment_statuses))
-    found = list(await session.scalars(query.order_by(Order.created_at.desc()).limit(limit)))
+    found = list(
+        await session.scalars(query.order_by(Order.created_at.desc(), Order.id).limit(limit))
+    )
     items: dict[uuid.UUID, list[OrderItemSummary]] = defaultdict(list)
     if found:
         for item in await session.scalars(

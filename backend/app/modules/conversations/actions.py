@@ -80,6 +80,21 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
         )
 
     total = format_money(placed.total_minor, placed.currency)
+    if payments.accepts(placed.currency):
+        try:
+            link = await payments.create_checkout(placed, shop_name=context.shop_name)
+        except (payments.PaymentUnavailable, payments.RetryRefused) as exc:
+            log.info(
+                "conversations.no_online_payment", order_id=str(placed.order_id), reason=str(exc)
+            )
+        else:
+            return ActionOutcome(
+                note=_placed_note(placed, total, "razorpay"),
+                payment_link=link,
+                order_id=placed.order_id,
+                fallback_text=_fallback(placed, total, link),
+            )
+
     if placed.currency == "INR":
         async with session_scope() as session:
             onboarding = await shop_profile.get_onboarding(session, context.merchant_id)
@@ -91,21 +106,6 @@ async def _place(context: TurnContext, request: OrderRequest) -> ActionOutcome:
                 payment_link=upi_link,
                 order_id=placed.order_id,
                 fallback_text=_fallback(placed, total, upi_link),
-            )
-
-    if payments.accepts(placed.currency):
-        try:
-            link = await payments.create_checkout(placed, shop_name=context.shop_name)
-        except payments.PaymentUnavailable as exc:
-            log.error(
-                "conversations.checkout_failed", order_id=str(placed.order_id), error=str(exc)
-            )
-        else:
-            return ActionOutcome(
-                note=_placed_note(placed, total, "paypal"),
-                payment_link=link,
-                order_id=placed.order_id,
-                fallback_text=_fallback(placed, total, link),
             )
 
     # No online payment for this order: the merchant shares payment details.

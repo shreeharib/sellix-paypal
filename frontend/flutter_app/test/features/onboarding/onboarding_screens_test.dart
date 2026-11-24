@@ -269,12 +269,17 @@ void main() {
       final fake = FakeSellixApi.empty();
       await _pump(tester, fake, const ObPayScreen());
       await _settle(tester);
-      expect(_label('Not set up yet'), findsOneWidget);
-      expect(find.textContaining('WhatsApp is not available yet'), findsOneWidget);
+      expect(_label('Not connected'), findsOneWidget);
+      expect(find.text('Key ID'), findsOneWidget);
+      expect(_label('Open Razorpay sign-up'), findsOneWidget);
+      expect(find.textContaining('sellix never sees your bank details'), findsOneWidget);
+      expect(find.textContaining('PayPal'), findsNothing);
+      // Unfinished features stay out of sight.
+      expect(find.textContaining('WhatsApp'), findsNothing);
 
       await _tapText(tester, 'Continue');
       expect(find.textContaining('Enter your UPI ID'), findsOneWidget);
-      await tester.enterText(find.byType(SxField), 'nope');
+      await tester.enterText(find.byType(SxField).last, 'nope');
       await _tapText(tester, 'Continue');
       expect(find.textContaining('That is not a UPI ID'), findsOneWidget);
       expect(fake.calls, isNot(contains('saveOnboarding')));
@@ -284,14 +289,41 @@ void main() {
       expect(find.text('at ${Routes.obTest}'), findsOneWidget);
     });
 
-    testWidgets('saves a good UPI ID; PayPal says Ready only when it is', (tester) async {
-      final fake = FakeSellixApi.empty()..paymentsReady = true;
+    testWidgets('saves a good UPI ID', (tester) async {
+      final fake = FakeSellixApi.empty();
       await _pump(tester, fake, const ObPayScreen());
       await _settle(tester);
-      expect(_label('Ready'), findsOneWidget);
-      await tester.enterText(find.byType(SxField), 'shop@okbank');
+      await tester.enterText(find.byType(SxField).last, 'shop@okbank');
       await _tapText(tester, 'Continue');
       expect(fake.answers.upiId, 'shop@okbank');
+    });
+
+    testWidgets('connects Razorpay; then the UPI ID may stay empty', (tester) async {
+      final fake = FakeSellixApi.empty()
+        ..connectFailure = const ApiException('Razorpay did not accept these keys.', statusCode: 422);
+      await _pump(tester, fake, const ObPayScreen());
+      await _settle(tester);
+      await _tapText(tester, 'Connect Razorpay');
+      expect(find.text('Paste your Key ID.'), findsOneWidget);
+      expect(fake.calls, isNot(contains('connectPaymentAccount')));
+
+      await tester.enterText(find.byType(SxField).at(0), 'rzp_test_abcd1234');
+      await tester.enterText(find.byType(SxField).at(1), 'secretsecret12');
+      await _tapText(tester, 'Connect Razorpay');
+      await _settle(tester);
+      expect(find.text('Razorpay did not accept these keys.'), findsOneWidget);
+
+      fake.connectFailure = null;
+      await _tapText(tester, 'Connect Razorpay');
+      await _settle(tester);
+      expect(fake.calls, contains('connectPaymentAccount'));
+      expect(_label('Test mode'), findsOneWidget);
+      expect(find.text('rzp_test_••••1234'), findsOneWidget);
+
+      await _tapText(tester, 'Continue');
+      expect(fake.calls, isNot(contains('saveOnboarding')));
+      expect(find.text('at ${Routes.obTest}'), findsOneWidget);
+      await _snackGone(tester);
     });
   });
 
@@ -425,7 +457,7 @@ void main() {
       final fake = FakeSellixApi.empty()..answers = typed;
       await _pump(tester, fake, const ObPayScreen());
       await _settle(tester);
-      await tester.enterText(find.byType(SxField), 'shop@okbank');
+      await tester.enterText(find.byType(SxField).last, 'shop@okbank');
       await _tapText(tester, 'Continue');
       expect(fake.answers.upiId, 'shop@okbank');
       expect(fake.answers.shopType, 'dress_shop');
@@ -626,7 +658,7 @@ void main() {
   });
 
   group('live step', () {
-    testWidgets('completes on the server, says it is waiting without stock, updates the redirect', (tester) async {
+    testWidgets('completes on the server, says it is on and asks for stock, updates the redirect', (tester) async {
       final fake = FakeSellixApi.empty();
       await _pump(
         tester,
@@ -638,8 +670,9 @@ void main() {
       );
       await _settle(tester);
       expect(fake.onboardingCompleted, isTrue);
-      expect(find.text('sellix is waiting for stock'), findsOneWidget);
+      expect(find.text('sellix is on'), findsOneWidget);
       expect(find.text('sellix is live'), findsNothing);
+      expect(find.textContaining('wait until you set'), findsNothing);
 
       final before = fake.calls.where((c) => c == 'onboarding').length;
       await _tapText(tester, 'Open home');

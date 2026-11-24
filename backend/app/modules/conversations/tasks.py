@@ -113,6 +113,13 @@ async def reconcile_unanswered(timestamp: int) -> None:
         log.info("conversations.reconciled", count=len(conversation_ids), stalled=len(stalled))
 
 
+@jobs.periodic(cron="* * * * *")
+@jobs.task(name="fetch_customer_names", queue="maintenance", lock="fetch_customer_names")
+async def fetch_customer_names(timestamp: int) -> None:
+    """Every minute: look up the Instagram name of customers who wrote for the first time."""
+    await service.fetch_customer_names()
+
+
 async def inform_customer(
     conversation_id: uuid.UUID | None, note: str, *, event: dict[str, Any] | None = None
 ) -> None:
@@ -154,8 +161,15 @@ async def after_payment(result: PaymentResult | PaymentFailed) -> None:
     elif result.outcome == "amount_mismatch":
         await _ask_merchant(
             result,
-            f"The PayPal payment for order #{result.number} doesn't match the order total "
-            f"({total}). Please check it in PayPal.",
+            f"The Razorpay payment for order #{result.number} doesn't match the order total "
+            f"({total}). Please check it in your Razorpay dashboard.",
+        )
+    elif result.outcome == "paid_twice":
+        await _ask_merchant(
+            result,
+            f"Order #{result.number} ({total}) was paid twice: another payment came in after it "
+            "was already paid. Refund the extra one from your Razorpay dashboard (the order's "
+            "Payments section lists both).",
         )
 
 
@@ -167,6 +181,15 @@ async def _payment_failed(result: PaymentFailed) -> None:
     items released.
     """
     if result.conversation_id is None:
+        return
+    if result.link:
+        # The same link still takes payments, and most people retry on the payment page at once:
+        # tell the customer only if it is still unpaid a little later.
+        with suppress(AlreadyEnqueued):
+            await notify_failed_payment.configure(
+                queueing_lock=f"failed_payment:{result.order_id}",
+                schedule_in={"seconds": get_settings().payment_failed_notice_seconds},
+            ).defer_async(order_id=str(result.order_id))
         return
     status = await payments.retry_status(result.order_id)
     if status.reason == "not_payable":
@@ -223,6 +246,31 @@ async def _payment_failed(result: PaymentFailed) -> None:
         state = await service.load_state(session, result.conversation_id, lock=True)
         if state is not None and state.stage == "payment_pending":
             await service.set_stage(session, result.conversation_id, "browsing")
+
+
+@jobs.task(name="notify_failed_payment", queue="payments")
+async def notify_failed_payment(order_id: str) -> None:
+    """A payment try failed a little while ago: if the link is still open and unpaid, say so once,
+    with the same link. Code, not the model, answers: this is about money."""
+    link = await payments.open_link(uuid.UUID(order_id))
+    if link is None:
+        return  # paid meanwhile, or the order has ended
+    async with session_scope() as session:
+        order = await orders.get_order(session, uuid.UUID(order_id))
+        if order is None or order.conversation_id is None or order.status != "awaiting_payment":
+            return
+        conversation_id = order.conversation_id
+        language = await service.customer_language(session, conversation_id)
+        await service.queue_message(
+            session,
+            conversation_id=conversation_id,
+            text=agent.fixed_text(
+                "payment_try_again", language, number=f"#{order.number}", link=link
+            ),
+            key=f"order:{order.id}:try_again",
+            details={"order_id": str(order.id), "kind": "payment_try_again", "language": language},
+        )
+    await schedule_delivery(conversation_id, datetime.now(UTC))
 
 
 async def after_expiry(order: ExpiredOrder) -> None:

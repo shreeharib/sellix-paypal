@@ -1,6 +1,7 @@
 """The Orders screen."""
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Literal
 
 import structlog
@@ -40,7 +41,12 @@ async def list_orders(
     status: Annotated[list[OrderStatus] | None, Query()] = None,
     payment_status: Annotated[list[PaymentStatus] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[
+        datetime | None,
+        Query(description="Paging: the last row's created_at; older orders come next"),
+    ] = None,
 ) -> list[schemas.Order]:
+    """Newest first."""
     async with session_scope() as session:
         found = await orders.list_orders(
             session,
@@ -48,8 +54,16 @@ async def list_orders(
             statuses=tuple(status) if status else None,
             payment_statuses=tuple(payment_status) if payment_status else None,
             limit=limit,
+            before=before,
         )
     return [_to_order_schema(order) for order in found]
+
+
+@router.get("/{order_id}", response_model=schemas.Order)
+async def get_order(shop: Shop, order_id: uuid.UUID) -> schemas.Order:
+    """One order, the same object as a list item. 404 if it isn't this shop's."""
+    async with session_scope() as session:
+        return await _order_response(session, order_id, shop.merchant_id)
 
 
 class RefundRequest(schemas.BaseModel):
@@ -62,7 +76,10 @@ class RefundResponse(schemas.BaseModel):
     refund_id: str
     amount_minor: int
     currency: str
-    status: str
+    status: Literal["pending", "completed", "failed"]
+    # razorpay: Razorpay sends the money back (pending until it confirms); manual: you return
+    # the money yourself and sellix records the refund; simulator: dev payments.
+    mode: Literal["razorpay", "manual", "simulator"]
 
 
 @router.post("/{order_id}/refund", response_model=RefundResponse)
@@ -87,53 +104,22 @@ async def refund_order(
         amount_minor=outcome.amount_minor,
         currency=outcome.currency,
         status=outcome.status,
+        mode=outcome.mode,
     )
 
 
-class CreateInvoiceRequest(schemas.BaseModel):
-    customer_name: str | None = None
-    customer_email: str | None = None
-
-
-class CreateInvoiceResponse(schemas.BaseModel):
-    order_id: str
-    invoice_id: str
-    payer_view_url: str
-
-
-@router.post("/{order_id}/invoice", response_model=CreateInvoiceResponse)
-async def create_order_invoice(
-    shop: Shop,
-    order_id: uuid.UUID,
-    payload: CreateInvoiceRequest | None = None,
-) -> CreateInvoiceResponse:
-    """Generate and send a PayPal invoice for an order, returning the invoice payment link."""
-    cust_name = payload.customer_name if payload else None
-    cust_email = payload.customer_email if payload else None
-    if not cust_name:
-        async with session_scope() as session:
-            order = await orders.get_order(session, order_id, shop.merchant_id)
-            if order is not None:
-                cust_name = await conversations.get_customer_display_name(
-                    session, order.customer_id
-                )
-
+@router.get("/{order_id}/payments", response_model=schemas.OrderPayments)
+async def get_order_payments(shop: Shop, order_id: uuid.UUID) -> schemas.OrderPayments:
+    """Every payment link and payment of an order, its refund, and whether it can be refunded."""
     try:
-        created = await payments.create_order_invoice(
-            order_id,
-            merchant_id=shop.merchant_id,
-            customer_name=cust_name,
-            customer_email=cust_email,
-        )
+        found = await payments.order_payments(order_id, merchant_id=shop.merchant_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Order not found") from exc
-    except (ValueError, payments.PaymentUnavailable) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return CreateInvoiceResponse(
-        order_id=str(order_id),
-        invoice_id=created.invoice_id,
-        payer_view_url=created.payer_view_url,
+    return schemas.OrderPayments(
+        payments=[schemas.OrderPayment(**vars(view)) for view in found.payments],
+        refund=schemas.OrderRefund(**vars(found.refund)) if found.refund else None,
+        refundable=found.refundable,
+        refund_mode=found.refund_mode,
     )
 
 
@@ -206,7 +192,7 @@ async def cancel_order(
 
 @router.get("/{order_id}/payment-link", response_model=schemas.PaymentLinkResponse)
 async def get_payment_link(shop: Shop, order_id: uuid.UUID) -> schemas.PaymentLinkResponse:
-    """Get the payment link for an order: dynamic UPI link for INR, PayPal for cross-border."""
+    """The order's payment link to share: Razorpay when the shop has an account, else UPI."""
     try:
         outcome = await payments.get_order_payment_link(order_id, merchant_id=shop.merchant_id)
     except LookupError as exc:

@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -307,8 +308,10 @@ class _ObStockScreenState extends ConsumerState<ObStockScreen> {
               selected: false,
               onTap: _typeIt,
             ),
-            const SxFilterChip(label: 'Photo', icon: TablerIcons.camera, selected: false, onTap: null),
-            Text('Photo is not available yet.', style: SxText.caption.copyWith(color: p.textSecondary)),
+            if (kShowComingSoon) ...[
+              const SxFilterChip(label: 'Photo', icon: TablerIcons.camera, selected: false, onTap: null),
+              Text('Photo is not available yet.', style: SxText.caption.copyWith(color: p.textSecondary)),
+            ],
           ],
         ),
       ),

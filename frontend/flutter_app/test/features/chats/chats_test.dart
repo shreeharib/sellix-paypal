@@ -8,6 +8,7 @@ import 'package:sellix_merchant/core/nav_badges.dart';
 import 'package:sellix_merchant/core/providers.dart';
 import 'package:sellix_merchant/core/router.dart';
 import 'package:sellix_merchant/design/design.dart';
+import 'package:sellix_merchant/features/chats/chat_labels.dart';
 import 'package:sellix_merchant/features/chats/chat_screen.dart';
 import 'package:sellix_merchant/features/chats/chats_providers.dart';
 import 'package:sellix_merchant/features/chats/chats_screen.dart';
@@ -131,6 +132,8 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 }
 
 void main() {
+  group('paging', chatPagingTests);
+
   group('chat state', () {
     final chat = _conversation('c', 'x');
     Order order(String status) => Order(
@@ -415,15 +418,70 @@ void main() {
       await _clearSnack(tester);
     });
 
-    testWidgets('the composer is off and can not send', (tester) async {
+    testWidgets('sending a message says sellix steps back, then shows why it paused', (tester) async {
       final fake = seeded();
       await _pump(tester, fake, start: start);
       await _settle(tester);
-      final composer = tester.widget<SxComposer>(find.byType(SxComposer));
-      expect(composer.enabled, isFalse);
-      expect(composer.onSend, isNull);
-      expect(find.text('Reply in Instagram for now'), findsOneWidget);
-      expect(find.text('You can’t send messages from this app yet. Reply in Instagram.'), findsOneWidget);
+      expect(find.textContaining('sellix steps back from this chat'), findsOneWidget);
+      final box = find.descendant(of: find.byType(SxComposer), matching: find.byType(TextField));
+      // Set directly: enterText doesn't reach the floating composer in this harness.
+      tester.widget<TextField>(box).controller!.text = '  On my way  ';
+      await _tap(tester, find.descendant(of: find.byType(SxComposer), matching: find.byType(SxPressable)).last);
+      expect(fake.calls, contains('sendMessage'));
+      expect(fake.sentMessages.single.text, 'On my way');
+      expect(find.textContaining('sellix is paused in this chat'), findsWidgets);
+      expect(find.text('On my way'), findsOneWidget);
+      expect(find.textContaining('Paused because you replied. Back on'), findsOneWidget);
+      expect(tester.widget<TextField>(box).controller!.text, isEmpty);
+      await _clearSnack(tester);
+
+      await _tapText(tester, 'Turn back on');
+      expect(fake.calls, contains('switchAgent'));
+      expect(fake.conversationList.single.agentActive, isTrue);
+      expect(find.textContaining('Paused because you replied'), findsNothing);
+      await _clearSnack(tester);
+    });
+
+    testWidgets('a closed reply window shows the server’s words and keeps the text', (tester) async {
+      final fake = seeded()
+        ..sendFailure = const ApiException('Instagram’s 24-hour reply window is closed.', statusCode: 409);
+      await _pump(tester, fake, start: start);
+      await _settle(tester);
+      final box = find.descendant(of: find.byType(SxComposer), matching: find.byType(TextField));
+      tester.widget<TextField>(box).controller!.text = 'Hello again';
+      await _tap(tester, find.descendant(of: find.byType(SxComposer), matching: find.byType(SxPressable)).last);
+      expect(find.text('Instagram’s 24-hour reply window is closed.'), findsOneWidget);
+      expect(tester.widget<TextField>(box).controller!.text, 'Hello again');
+      expect(fake.sentMessages, isEmpty);
+      await _clearSnack(tester);
+    });
+
+    testWidgets('a merchant_replied pause names the time it ends', (tester) async {
+      final until = DateTime.now().add(const Duration(hours: 2));
+      final fake = seeded()
+        ..conversationList = [
+          Conversation(
+            id: FakeIds.conversationA,
+            channel: 'instagram',
+            customerHandle: 'customer.one',
+            agentActive: false,
+            agentPausedReason: AgentPausedReason.merchantReplied,
+            lastMessageSender: 'merchant',
+            lastMessageBody: 'I can do that',
+            lastMessageAt: FakeSellixApi.now,
+            agentPausedUntil: until,
+          ),
+        ];
+      await _pump(tester, fake, start: start);
+      await _settle(tester);
+      expect(find.text('Paused because you replied. Back on ${pauseEndWords(until)}.'), findsOneWidget);
+      expect(find.textContaining('sellix steps back'), findsNothing);
+    });
+
+    test('pause end words', () {
+      final now = DateTime(2026, 11, 24, 10);
+      expect(pauseEndWords(DateTime(2026, 11, 24, 22), now: now), startsWith('today at '));
+      expect(pauseEndWords(DateTime(2026, 11, 25, 9, 30), now: now), startsWith('tomorrow at '));
     });
 
     testWidgets('a held draft is shown apart, and sends after confirming', (tester) async {
@@ -455,10 +513,54 @@ void main() {
       await _settle(tester);
       expect(find.text('1 paid order · ₹200 spent'), findsOneWidget);
       expect(find.text('Open in Instagram'), findsOneWidget);
-      expect(find.text('Not available yet. sellix takes orders in the chat.'), findsOneWidget);
+      expect(find.text('Not available yet. sellix takes orders in the chat.'), findsNothing);
 
       await _tapText(tester, 'View customer');
       expect(find.text('customer ${FakeIds.conversationA}'), findsOneWidget);
     });
+  });
+}
+
+/// Records the `before` of each chats call.
+class _PagingChats extends FakeSellixApi {
+  final befores = <DateTime?>[];
+
+  @override
+  Future<List<Conversation>> conversations({DateTime? before, int? limit}) {
+    befores.add(before);
+    return super.conversations(before: before, limit: limit);
+  }
+}
+
+void chatPagingTests() {
+  testWidgets('a full first page offers older chats, and loads them', (tester) async {
+    final fake = _PagingChats()
+      ..draftsByConversation = {}
+      ..questionList = []
+      ..conversationList = [
+        for (var i = 0; i < 60; i++)
+          Conversation(
+            id: 'c$i',
+            channel: 'instagram',
+            customerHandle: 'customer$i',
+            agentActive: true,
+            agentPausedReason: null,
+            lastMessageSender: 'customer',
+            lastMessageBody: 'Hi',
+            lastMessageAt: FakeSellixApi.now.subtract(Duration(minutes: i)),
+          ),
+      ];
+    await _pump(tester, fake);
+    await _settle(tester);
+    expect(fake.befores, [null]);
+    final more = find.byType(SxLoadMore);
+    // The list builds lazily: scroll to its end.
+    await tester.scrollUntilVisible(more, 600, scrollable: find.byType(Scrollable).first);
+    await tester.pump();
+    await tester.tap(find.descendant(of: more, matching: find.byType(SxPressable)));
+    await _settle(tester);
+    expect(fake.befores.last, FakeSellixApi.now.subtract(const Duration(minutes: 49)));
+    expect(find.byType(SxLoadMore, skipOffstage: false), findsNothing);
+    expect(_container.read(chatListProvider).value!.conversations, hasLength(60));
   });
 }

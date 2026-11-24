@@ -57,7 +57,7 @@ async def _apply_payment_event(event_id: str, handle: PaymentEventHandler, sourc
     if payload is None:
         return
     try:
-        # May call PayPal, so it runs outside any transaction; applying it twice is harmless.
+        # May call Razorpay, so it runs outside any transaction; applying it twice is harmless.
         result = await handle(payload)
     except Exception as exc:
         async with session_scope() as session:
@@ -70,9 +70,9 @@ async def _apply_payment_event(event_id: str, handle: PaymentEventHandler, sourc
         await conversations.after_payment(result)
 
 
-@jobs.task(name="process_paypal_event", queue="webhooks", retry=_RETRY)
-async def process_paypal_event(event_id: str) -> None:
-    await _apply_payment_event(event_id, payments.handle_webhook, "paypal")
+@jobs.task(name="process_razorpay_event", queue="webhooks", retry=_RETRY)
+async def process_razorpay_event(event_id: str) -> None:
+    await _apply_payment_event(event_id, payments.handle_razorpay_event, "razorpay")
 
 
 @jobs.task(name="process_simulator_event", queue="webhooks", retry=_RETRY)
@@ -95,8 +95,8 @@ async def enqueue_simulator_event(event_id: uuid.UUID) -> None:
         ).defer_async(event_id=str(event_id))
 
 
-async def enqueue_paypal_event(event_id: uuid.UUID) -> None:
+async def enqueue_razorpay_event(event_id: uuid.UUID) -> None:
     with suppress(AlreadyEnqueued):
-        await process_paypal_event.configure(
-            queueing_lock=f"paypal_event:{event_id}", lock=f"paypal_event:{event_id}"
+        await process_razorpay_event.configure(
+            queueing_lock=f"razorpay_event:{event_id}", lock=f"razorpay_event:{event_id}"
         ).defer_async(event_id=str(event_id))

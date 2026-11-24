@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sellix_merchant/core/api/api_exception.dart';
@@ -13,6 +14,7 @@ import 'package:sellix_merchant/features/settings/hours_screen.dart';
 import 'package:sellix_merchant/features/settings/newauto_screen.dart';
 import 'package:sellix_merchant/features/settings/payments_screen.dart';
 import 'package:sellix_merchant/features/settings/profile_screen.dart';
+import 'package:sellix_merchant/features/settings/razorpay_card.dart';
 import 'package:sellix_merchant/features/settings/rules_screen.dart';
 import 'package:sellix_merchant/features/settings/settings_providers.dart';
 import 'package:sellix_merchant/features/settings/shopprofile_screen.dart';
@@ -87,7 +89,8 @@ void main() {
       expect(find.text('Test category'), findsOneWidget);
       expect(find.text('Every day'), findsOneWidget);
       expect(find.textContaining('Connected', findRichText: true), findsOneWidget);
-      expect(find.text('Not available yet'), findsOneWidget);
+      // WhatsApp can't be connected yet, so its row is hidden rather than dead.
+      expect(find.text('Not available yet'), findsNothing);
       expect(find.text('Free plan'), findsNothing);
       await drain(tester);
     });
@@ -256,14 +259,58 @@ void main() {
       expect(schema.stockModes.map((m) => m.id), isNot(contains(StockMode.daily)));
     });
 
-    testWidgets('morning reminder is local and says so', (tester) async {
-      final prefs = await pumpScreen(tester, const ProfileScreen(), FakeSellixApi());
+    testWidgets('phone-only features are hidden; Server and Razorpay show', (tester) async {
+      final fake = FakeSellixApi()..account = FakeSellixApi.connectedAccount();
+      await pumpScreen(tester, const ProfileScreen(), fake);
       await settle(tester);
-      expect(find.text('Saved on this phone only, not active yet'), findsWidgets);
-      await tapText(tester, 'Morning reminder');
-      await tapText(tester, '7:00 AM');
-      expect(prefs.getString('alerts.${FakeIds.merchant}.morning'), '7:00 AM');
-      expect(find.text('7:00 AM'), findsOneWidget);
+      for (final hidden in ['Morning reminder', 'Quiet hours', 'App language', 'Automations']) {
+        expect(find.text(hidden), findsNothing, reason: hidden);
+      }
+      expect(find.text('Saved on this phone only, not active yet'), findsNothing);
+      expect(find.text('Server'), findsOneWidget);
+      expect(find.text('localhost:8000'), findsOneWidget);
+      expect(find.text('Razorpay (test)'), findsOneWidget);
+      expect(find.textContaining('PayPal'), findsNothing);
+      await drain(tester);
+    });
+
+    testWidgets('sign out says what really stops', (tester) async {
+      await pumpScreen(tester, const ProfileScreen(), FakeSellixApi());
+      await settle(tester);
+      await tester.ensureVisible(find.text('Sign out'));
+      await tapText(tester, 'Sign out');
+      expect(find.textContaining('You stop getting notifications'), findsNothing);
+      expect(find.textContaining('This phone stops showing new questions and paid orders'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('Delete my shop: owner only, and only with the exact name', (tester) async {
+      final auth = FakeAuth();
+      final fake = FakeSellixApi();
+      await pumpScreen(tester, const ProfileScreen(), fake, auth: auth);
+      await settle(tester);
+      await tester.ensureVisible(find.text('Delete my shop'));
+      await tapText(tester, 'Delete my shop');
+      expect(find.text('Delete your shop?'), findsOneWidget);
+      final field = find.descendant(of: find.byType(SxField), matching: find.byType(TextField)).last;
+
+      await tester.enterText(field, 'Test');
+      await settle(tester);
+      await _tapLabel(tester, 'Delete shop');
+      expect(fake.calls, isNot(contains('deleteShop')));
+
+      await tester.enterText(field, 'Test Shop');
+      await settle(tester);
+      await _tapLabel(tester, 'Delete shop');
+      expect(fake.deletedShopName, 'Test Shop');
+      expect(auth.signOuts, 1);
+      await drain(tester);
+    });
+
+    testWidgets('staff are not offered Delete my shop', (tester) async {
+      await pumpScreen(tester, const ProfileScreen(), FakeSellixApi()..role = 'staff');
+      await settle(tester);
+      expect(find.text('Delete my shop'), findsNothing);
       await drain(tester);
     });
 
@@ -282,9 +329,9 @@ void main() {
       await settle(tester);
 
       fake.answers = fake.answers.copyWith(faqs: 'changed elsewhere');
-      await tester.enterText(find.byType(TextField), 'shop@okbank');
+      await tester.enterText(find.byType(TextField).last, 'shop@okbank');
       await tester.pump();
-      await tapText(tester, 'Save');
+      await tapText(tester, 'Save UPI ID');
       await settle(tester, 10);
 
       expect(fake.answers.upiId, 'shop@okbank');
@@ -303,9 +350,9 @@ void main() {
       fake.answers = fake.answers.copyWith(shopType: 'dress_shop');
       await pumpScreen(tester, const PaymentsScreen(), fake);
       await settle(tester);
-      await tester.enterText(find.byType(TextField), 'shop@okbank');
+      await tester.enterText(find.byType(TextField).last, 'shop@okbank');
       await tester.pump();
-      await tapText(tester, 'Save');
+      await tapText(tester, 'Save UPI ID');
       await settle(tester, 10);
       expect(fake.answers.upiId, 'shop@okbank');
       expect(fake.answers.shopType, 'dress_shop');
@@ -324,9 +371,9 @@ void main() {
       final fake = _SpyApi()..onboardingCompleted = false;
       await pumpScreen(tester, const PaymentsScreen(), fake);
       await settle(tester);
-      await tester.enterText(find.byType(TextField), 'shop@okbank');
+      await tester.enterText(find.byType(TextField).last, 'shop@okbank');
       await tester.pump();
-      await tapText(tester, 'Save');
+      await tapText(tester, 'Save UPI ID');
       await settle(tester, 10);
       expect(fake.onboardingCompleted, isFalse);
       await drain(tester);
@@ -334,16 +381,179 @@ void main() {
   });
 
   group('Payments', () {
-    testWidgets('error then retry, and PayPal shows its real state', (tester) async {
+    testWidgets('error then retry; not connected offers the Razorpay keys', (tester) async {
       final fake = FakeSellixApi()..failure = _failure;
       await pumpScreen(tester, const PaymentsScreen(), fake);
       await settle(tester);
       expect(find.text('Server is down'), findsOneWidget);
       fake.failure = null;
       await tapText(tester, 'Try again');
-      expect(find.text('PayPal'), findsOneWidget);
-      expect(find.textContaining('Not ready', findRichText: true), findsOneWidget);
-      expect(find.textContaining('Ready', findRichText: true), findsNothing);
+      expect(find.text('Razorpay'), findsOneWidget);
+      expect(find.textContaining('Not connected', findRichText: true), findsOneWidget);
+      expect(find.text('Key ID'), findsOneWidget);
+      expect(find.text('Key Secret'), findsOneWidget);
+      expect(find.textContaining('Account & Settings, then API Keys'), findsOneWidget);
+      expect(find.textContaining('move no real money'), findsOneWidget);
+      expect(find.textContaining('rzp_test_'), findsWidgets);
+      expect(find.textContaining('PayPal'), findsNothing);
+      expect(find.textContaining('Used while Razorpay isn’t connected'), findsOneWidget);
+      expect(find.textContaining('confirm each payment by hand'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('walks a new owner through getting keys, and opens Razorpay sign-up', (tester) async {
+      final opened = <Uri>[];
+      final before = openExternal;
+      openExternal = (url) async {
+        opened.add(url);
+        return true;
+      };
+      addTearDown(() => openExternal = before);
+      await pumpScreen(tester, const PaymentsScreen(), FakeSellixApi());
+      await settle(tester);
+      expect(find.text('Create your free Razorpay account.'), findsOneWidget);
+      expect(find.textContaining('business and bank details'), findsOneWidget);
+      expect(find.textContaining('Test mode works before that'), findsOneWidget);
+      expect(find.text('In Razorpay, open Account & Settings, then API Keys, then Generate key.'), findsOneWidget);
+      expect(find.textContaining('Copy the Key ID and Key Secret'), findsOneWidget);
+      expect(find.textContaining('sellix never sees your bank details'), findsOneWidget);
+      expect(find.textContaining('straight from Razorpay to your bank'), findsOneWidget);
+      await _tapLabel(tester, 'Open Razorpay sign-up');
+      expect(opened, [Uri.parse('https://dashboard.razorpay.com/signup')]);
+      await drain(tester);
+    });
+
+    testWidgets('faster confirmations start folded away', (tester) async {
+      final fake = FakeSellixApi()..account = FakeSellixApi.connectedAccount();
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      expect(find.text('Faster confirmations (optional)'), findsOneWidget);
+      expect(find.text('https://api.example.com/webhooks/razorpay/tok123'), findsNothing);
+      await tapText(tester, 'Faster confirmations (optional)');
+      expect(find.text('https://api.example.com/webhooks/razorpay/tok123'), findsOneWidget);
+      await tapText(tester, 'Faster confirmations (optional)');
+      expect(find.text('https://api.example.com/webhooks/razorpay/tok123'), findsNothing);
+      await drain(tester);
+    });
+
+    testWidgets('connect shows the server’s reason under the fields, then the webhook steps', (tester) async {
+      final fake = FakeSellixApi()
+        ..connectFailure = const ApiException('Razorpay could not be reached. Try again.', statusCode: 502);
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      await tester.enterText(find.byType(TextField).at(0), 'pk_wrong');
+      await tester.enterText(find.byType(TextField).at(1), 'secretsecret12');
+      await _tapLabel(tester, 'Connect Razorpay');
+      expect(find.text('A Key ID starts with rzp_test_ or rzp_live_.'), findsOneWidget);
+      expect(fake.calls, isNot(contains('connectPaymentAccount')));
+
+      await tester.enterText(find.byType(TextField).at(0), 'rzp_live_abcd9876');
+      await _tapLabel(tester, 'Connect Razorpay');
+      expect(find.text('Razorpay could not be reached. Try again.'), findsOneWidget);
+
+      fake.connectFailure = null;
+      await _tapLabel(tester, 'Connect Razorpay');
+      await settle(tester);
+      expect(find.textContaining('Live', findRichText: true), findsWidgets);
+      expect(find.text('rzp_live_••••9876'), findsOneWidget);
+      expect(find.text('No webhook received yet'), findsOneWidget);
+      expect(find.textContaining('payments still confirm within a minute without it'), findsOneWidget);
+      await tapText(tester, 'Faster confirmations (optional)');
+      expect(find.text('https://api.example.com/webhooks/razorpay/tok123'), findsOneWidget);
+      expect(find.text('whsec_test_1'), findsOneWidget);
+      expect(find.textContaining('payment_link.paid'), findsOneWidget);
+      expect(find.textContaining('Used only if you disconnect Razorpay'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('copy buttons copy the address, the secret and the events', (tester) async {
+      final copied = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied.add((call.arguments as Map)['text'] as String);
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+      final fake = FakeSellixApi()
+        ..account = FakeSellixApi.connectedAccount(lastWebhookAt: FakeSellixApi.now);
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      expect(find.textContaining('Webhooks working, last at'), findsOneWidget);
+      await tapText(tester, 'Faster confirmations (optional)');
+      for (final label in ['Copy webhook address', 'Copy webhook secret', 'Copy event list']) {
+        await tester.tap(find.bySemanticsLabel(label));
+        await settle(tester);
+      }
+      expect(copied, [
+        'https://api.example.com/webhooks/razorpay/tok123',
+        'whsec_test_1',
+        FakeSellixApi.webhookEvents.join(', '),
+      ]);
+      await drain(tester);
+    });
+
+    testWidgets('a new secret and disconnecting both ask first', (tester) async {
+      final fake = FakeSellixApi()
+        ..account = FakeSellixApi.connectedAccount()
+        ..answers = const OnboardingAnswers(upiId: 'shop@okbank');
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+
+      await _tapLabel(tester, 'New webhook secret');
+      expect(find.text('Make a new webhook secret?'), findsOneWidget);
+      await _tapLabel(tester, 'Cancel');
+      expect(fake.calls, isNot(contains('rotateWebhookSecret')));
+      await _tapLabel(tester, 'New webhook secret');
+      await _tapLabel(tester, 'New secret');
+      await settle(tester);
+      expect(fake.calls, contains('rotateWebhookSecret'));
+      await tapText(tester, 'Faster confirmations (optional)');
+      expect(find.text('whsec_test_13'), findsOneWidget);
+      await drain(tester);
+
+      await _tapLabel(tester, 'Disconnect');
+      expect(find.text('Disconnect Razorpay?'), findsOneWidget);
+      expect(find.textContaining('fall back to your UPI ID (shop@okbank)'), findsOneWidget);
+      await _tapLabel(tester, 'Cancel');
+      expect(fake.calls, isNot(contains('disconnectPaymentAccount')));
+      await _tapLabel(tester, 'Disconnect');
+      await tester.tap(
+        find.byWidgetPredicate((w) => w is RichText && w.text.toPlainText().replaceAll('\uFFFC', '').trim() == 'Disconnect').last,
+      );
+      await settle(tester);
+      expect(fake.calls, contains('disconnectPaymentAccount'));
+      expect(find.text('Key ID'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('staff see the account but change nothing', (tester) async {
+      final fake = FakeSellixApi()
+        ..role = 'staff'
+        ..account = FakeSellixApi.connectedAccount();
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      expect(find.text('rzp_test_••••1234'), findsOneWidget);
+      expect(find.text('whsec_test_1'), findsNothing);
+      expect(find.text('New webhook secret'), findsNothing);
+      expect(find.text('Disconnect'), findsNothing);
+      expect(find.text('Only the shop’s owner can change this.'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('staff can’t connect keys either', (tester) async {
+      final fake = FakeSellixApi()..role = 'staff';
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      expect(find.text('Key Secret'), findsNothing);
+      expect(find.text('Only the shop’s owner can connect Razorpay.'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('a shared or simulator setup says it is a test setup', (tester) async {
+      final fake = FakeSellixApi()
+        ..account = const PaymentAccount(source: PaymentSource.simulator, paymentsReady: true, connected: false);
+      await pumpScreen(tester, const PaymentsScreen(), fake);
+      await settle(tester);
+      expect(find.textContaining('This is a test setup'), findsOneWidget);
       await drain(tester);
     });
 
@@ -351,18 +561,18 @@ void main() {
       final fake = FakeSellixApi();
       await pumpScreen(tester, const PaymentsScreen(), fake);
       await settle(tester);
-      await tester.enterText(find.byType(TextField), 'not a upi id');
+      await tester.enterText(find.byType(TextField).last, 'not a upi id');
       await tester.pump();
-      await tapText(tester, 'Save');
+      await tapText(tester, 'Save UPI ID');
       expect(find.text('Check the UPI ID. It looks like yourname@bank.'), findsOneWidget);
       expect(fake.calls, isNot(contains('saveOnboarding')));
 
-      await tester.enterText(find.byType(TextField), 'ab@bank');
+      await tester.enterText(find.byType(TextField).last, 'ab@bank');
       await tester.pump();
       fake.failure = _failure;
-      await tapText(tester, 'Save');
+      await tapText(tester, 'Save UPI ID');
       expect(find.text('Server is down'), findsWidgets);
-      expect(find.text('PayPal'), findsOneWidget);
+      expect(find.text('Razorpay'), findsOneWidget);
       await drain(tester);
     });
   });
@@ -421,9 +631,35 @@ void main() {
       );
 
     testWidgets('empty state', (tester) async {
-      await pumpScreen(tester, const RulesScreen(), FakeSellixApi());
+      await pumpScreen(tester, const RulesScreen(), FakeSellixApi()..ruleList = []);
       await settle(tester);
       expect(find.text('No rules yet'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('answers saved from chats are listed, and delete asks first', (tester) async {
+      final fake = FakeSellixApi();
+      await pumpScreen(tester, const RulesScreen(), fake);
+      await settle(tester);
+      expect(find.text('Saved from chats'), findsOneWidget);
+      expect(find.text('Bulk orders: ask the owner first.'), findsOneWidget);
+      expect(find.textContaining('do not show here yet'), findsNothing);
+
+      await tester.tap(find.byWidgetPredicate((w) => w is SxIconButton && w.semanticLabel == 'Delete saved answer'));
+      await settle(tester);
+      expect(find.text('Delete this answer?'), findsOneWidget);
+      await _tapLabel(tester, 'Cancel');
+      expect(fake.calls, isNot(contains('deleteRule')));
+
+      await tester.tap(find.byWidgetPredicate((w) => w is SxIconButton && w.semanticLabel == 'Delete saved answer'));
+      await settle(tester);
+      await tester.tap(
+        find.byWidgetPredicate((w) => w is RichText && w.text.toPlainText().replaceAll('\uFFFC', '').trim() == 'Delete').last,
+      );
+      await settle(tester);
+      expect(fake.calls, contains('deleteRule'));
+      expect(fake.ruleList, isEmpty);
+      expect(find.text('Bulk orders: ask the owner first.'), findsNothing);
       await drain(tester);
     });
 
@@ -460,7 +696,7 @@ void main() {
     });
 
     testWidgets('delete with Undo', (tester) async {
-      final fake = withRules();
+      final fake = withRules()..ruleList = [];
       await pumpScreen(tester, const RulesScreen(), fake);
       await settle(tester);
       await tester.tap(find.bySemanticsLabel('Delete rule'));
@@ -539,16 +775,15 @@ void main() {
   });
 
   group('Channels', () {
-    testWidgets('shows real status, and WhatsApp connect is disabled with a label', (tester) async {
+    testWidgets('shows real status, and no dead WhatsApp connect', (tester) async {
       await pumpScreen(tester, const ChannelsScreen(), FakeSellixApi());
       await settle(tester);
       expect(find.textContaining('@test.shop'), findsOneWidget);
       expect(find.textContaining('Connected', findRichText: true), findsOneWidget);
       expect(find.text('Reconnect Instagram'), findsNothing);
-      expect(find.text('Connecting WhatsApp is not available yet'), findsOneWidget);
+      expect(find.text('Connecting WhatsApp is not available yet'), findsNothing);
+      expect(find.text('WhatsApp Business'), findsNothing);
       expect(find.text('Messages today'), findsNothing);
-      await tapText(tester, 'Connect');
-      expect(find.textContaining('WhatsApp is connected'), findsNothing);
       await drain(tester);
     });
 
@@ -636,4 +871,14 @@ void main() {
       await drain(tester);
     });
   });
+}
+
+/// Taps a label, also when it is a button's rich text with an inline icon.
+Future<void> _tapLabel(WidgetTester tester, String text) async {
+  final found = find
+      .byWidgetPredicate((w) => w is RichText && w.text.toPlainText().replaceAll('\uFFFC', '').trim() == text)
+      .first;
+  await tester.ensureVisible(found);
+  await tester.tap(found);
+  await settle(tester);
 }

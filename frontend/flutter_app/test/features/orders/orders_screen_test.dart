@@ -9,6 +9,8 @@ import '../../support/fake_sellix_api.dart';
 import 'orders_test_support.dart';
 
 void main() {
+  group('paging', pagingTests);
+
   testWidgets('shows a skeleton while loading', (tester) async {
     final api = FakeSellixApi()..delay = const Duration(seconds: 1);
     await pumpScreen(tester, api, const OrdersScreen(), settle: false);
@@ -83,5 +85,51 @@ void main() {
     await tester.enterText(find.byType(EditableText), 'nobody');
     await tester.pumpAndSettle();
     expect(find.text('No orders match'), findsOneWidget);
+  });
+}
+
+/// Records the `before` of each orders call, as the paging sends it.
+class _PagingApi extends FakeSellixApi {
+  final befores = <DateTime?>[];
+
+  @override
+  Future<List<Order>> orders({List<String>? status, List<String>? paymentStatus, int? limit, DateTime? before}) {
+    befores.add(before);
+    return super.orders(status: status, paymentStatus: paymentStatus, limit: limit, before: before);
+  }
+}
+
+Finder _labelled(String text) => find.byWidgetPredicate(
+  (w) => w is RichText && w.text.toPlainText().replaceAll('\uFFFC', '').trim() == text,
+  skipOffstage: false,
+);
+
+void pagingTests() {
+  testWidgets('a full first page offers older orders, a page at a time', (tester) async {
+    final api = _PagingApi()
+      ..orderList = [
+        for (var i = 0; i < 230; i++)
+          makeOrder(
+            id: 'o$i',
+            number: 1000 - i,
+            status: OrderStatus.completed,
+            createdAt: FakeSellixApi.now.subtract(Duration(minutes: i)),
+          ),
+      ];
+    await pumpScreen(tester, api, const OrdersScreen());
+    expect(api.befores, [null]);
+    final more = _labelled('Load older orders');
+    await tester.ensureVisible(more);
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    // The page starts before the oldest order shown, which is the 200th.
+    expect(api.befores.last, FakeSellixApi.now.subtract(const Duration(minutes: 199)));
+    // 30 more came back: fewer than a page, so there is nothing older.
+    expect(_labelled('Load older orders'), findsNothing);
+  });
+
+  testWidgets('a short first page offers nothing more', (tester) async {
+    await pumpScreen(tester, FakeSellixApi(), const OrdersScreen());
+    expect(_labelled('Load older orders'), findsNothing);
   });
 }

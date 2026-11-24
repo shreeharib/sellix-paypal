@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
 import '../../design/design.dart';
 import 'chat_labels.dart';
@@ -144,11 +145,12 @@ Future<ChatMenuChoice?> showChatMenu(
                   onTap: () => pick(ChatMenuChoice.order),
                 ),
               // BACKEND GAP: no endpoint creates an order or sends a payment link from the app.
-              const SxListRow(
-                title: 'Create an order',
-                subtitle: 'Not available yet. sellix takes orders in the chat.',
-                icon: TablerIcons.receipt_2,
-              ),
+              if (kShowComingSoon)
+                const SxListRow(
+                  title: 'Create an order',
+                  subtitle: 'Not available yet. sellix takes orders in the chat.',
+                  icon: TablerIcons.receipt_2,
+                ),
               // BACKEND GAP: conversations carry no link to the thread, so this opens the inbox.
               SxListRow(
                 title: 'Open in $channel',

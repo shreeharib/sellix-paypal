@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
@@ -361,18 +362,22 @@ class _MorningScreenState extends ConsumerState<MorningScreen> {
                 onTap: () => _typeIt(view),
               ),
               // BACKEND GAP: no endpoint returns yesterday's list. Leftovers hold only unsold units.
-              const SxFilterChip(label: 'Same as yesterday', icon: TablerIcons.copy, selected: false, onTap: null),
+              if (kShowComingSoon)
+                const SxFilterChip(label: 'Same as yesterday', icon: TablerIcons.copy, selected: false, onTap: null),
               // BACKEND GAP: no photo upload or recognition endpoint.
-              const SxFilterChip(label: 'Photo', icon: TablerIcons.camera, selected: false, onTap: null),
+              if (kShowComingSoon)
+                const SxFilterChip(label: 'Photo', icon: TablerIcons.camera, selected: false, onTap: null),
             ],
           ),
-          const SizedBox(height: SxSpace.s8),
-          side(
-            Text(
-              'Same as yesterday and Photo aren’t ready yet.',
-              style: SxText.micro.copyWith(color: p.textSecondary),
+          if (kShowComingSoon) ...[
+            const SizedBox(height: SxSpace.s8),
+            side(
+              Text(
+                'Same as yesterday and Photo aren’t ready yet.',
+                style: SxText.micro.copyWith(color: p.textSecondary),
+              ),
             ),
-          ),
+          ],
           if (_ids.isNotEmpty)
             SxSectionHeader(
               title: '${_typed != null ? 'sellix found' : 'Your list:'} ${plural(_ids.length, 'item', 'items')}',

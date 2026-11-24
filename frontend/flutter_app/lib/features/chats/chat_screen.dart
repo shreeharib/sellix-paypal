@@ -42,6 +42,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final List<Question> _justAnswered = [];
   final Set<String> _busy = {};
   int _stuckLength = -1;
+  bool _sending = false;
+
+  /// The most `POST /conversations/{id}/messages` takes.
+  static const _maxMessage = 1000;
 
   @override
   void dispose() {
@@ -71,6 +75,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _refresh() => refreshChatThread(ref, _id);
+
+  /// Sends the merchant's own message. The server pauses sellix in this chat when it does.
+  Future<void> _send(Conversation chat) async {
+    final text = _composer.text.trim();
+    if (text.isEmpty || _sending) return;
+    if (text.length > _maxMessage) {
+      showSxSnack(context, 'Keep it under $_maxMessage characters.', icon: TablerIcons.alert_circle);
+      return;
+    }
+    setState(() => _sending = true);
+    try {
+      await ref.read(sellixApiProvider).sendMessage(_id, text);
+      if (!mounted) return;
+      _composer.clear();
+      final first = firstNameOf(chat.customerHandle);
+      setState(() {
+        _agentActive = false;
+        _switchNote = (text: 'You replied. sellix is paused in this chat.', icon: TablerIcons.user);
+      });
+      showSxSnack(context, 'Sent to $first. sellix is paused in this chat.', icon: TablerIcons.send, sellix: false);
+      _stuckLength = -1;
+      await _refresh();
+    } on ApiException catch (error) {
+      // 409: Instagram's 24-hour window is closed. The text stays, so nothing typed is lost.
+      if (mounted) showSxSnack(context, error.message, icon: TablerIcons.alert_circle, sellix: false);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
 
   Future<void> _switchAgent(bool active) async {
     setState(() => _switching = true);
@@ -217,7 +250,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final order = thread == null ? null : chatOrderOf(thread.orders);
     return SxScaffold(
       floatingMargin: 16,
-      floating: chat == null ? null : _disabledComposer(context, chat),
+      floating: chat == null ? null : _composerBox(context, chat),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -239,6 +272,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               loading: _switching,
               onToggle: _switching ? null : () => _switchAgent(!sellixOn),
             ),
+            if (!sellixOn && chat.agentPausedReason == AgentPausedReason.merchantReplied)
+              _pausedNote(context, chat),
             if (order != null) _orderLink(context, order),
           ],
           Expanded(
@@ -259,6 +294,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Why sellix is quiet here, when it stepped back because the merchant replied.
+  Widget _pausedNote(BuildContext context, Conversation chat) {
+    final until = chat.agentPausedUntil;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(SxSpace.screen, 0, SxSpace.screen, SxSpace.s8),
+      child: SxBanner(
+        tone: SxBannerTone.neutral,
+        icon: TablerIcons.player_pause,
+        message: until == null
+            ? 'Paused because you replied.'
+            : 'Paused because you replied. Back on ${pauseEndWords(until)}.',
+        action: SxLinkButton(
+          label: 'Turn back on',
+          onTap: _switching ? null : () => _switchAgent(true),
+        ),
       ),
     );
   }
@@ -388,16 +442,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   ],
                 ),
               ),
-            // BACKEND GAP: no endpoint sends a free-form message from the merchant. The chat routers
-            // (chats.py, questions.py) only switch the agent, answer questions and approve drafts.
-            Padding(
-              padding: const EdgeInsets.only(top: SxSpace.s8),
-              child: Text(
-                'You can’t send messages from this app yet. Reply in $channel.',
-                textAlign: TextAlign.center,
-                style: SxText.micro.copyWith(color: p.textSecondary),
+            if (_agentActive ?? chat.agentActive)
+              Padding(
+                padding: const EdgeInsets.only(top: SxSpace.s8),
+                child: Text(
+                  'If you send a message here or in $channel, sellix steps back from this chat for a while.',
+                  textAlign: TextAlign.center,
+                  style: SxText.micro.copyWith(color: p.textSecondary),
+                ),
               ),
-            ),
           ],
         ),
       ],
@@ -428,22 +481,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     };
   }
 
-  /// The prototype's composer, switched off. The backdrop keeps the thread from showing through it.
-  Widget _disabledComposer(BuildContext context, Conversation chat) {
+  /// The send box. The backdrop keeps the thread from showing through it.
+  Widget _composerBox(BuildContext context, Conversation chat) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: context.sx.page,
         borderRadius: BorderRadius.circular(SxRadius.pill),
       ),
-      child: Opacity(
-        opacity: 0.55,
-        child: SxComposer(
-          controller: _composer,
-          hint: 'Reply in ${channelName(chat.channel)} for now',
-          enabled: false,
-          // BACKEND GAP: no endpoint sends a merchant's message. See the note in the thread.
-          onSend: null,
-        ),
+      child: SxComposer(
+        controller: _composer,
+        hint: 'Message ${firstNameOf(chat.customerHandle)}',
+        sending: _sending,
+        onSend: _sending ? null : () => _send(chat),
       ),
     );
   }

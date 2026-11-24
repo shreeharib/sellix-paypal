@@ -79,6 +79,10 @@ class ShopProfileUpdate(BaseModel):
     content_md: str = Field(min_length=1, max_length=8000)
 
 
+class ShopDeletion(BaseModel):
+    confirm_name: str = Field(min_length=1, max_length=120)  # the shop's exact name
+
+
 # Onboarding -----------------------------------------------------------------------------------
 
 
@@ -87,7 +91,7 @@ class Onboarding(BaseModel):
     answers: OnboardingAnswers
     completed: bool
     channels: list[Channel]
-    payments_ready: bool  # online payment links (PayPal) can be sent
+    payments_ready: bool  # online payment links (Razorpay, or the simulator) can be sent
 
 
 class OnboardingUpdate(BaseModel):
@@ -270,10 +274,69 @@ class CancelOrderRequest(BaseModel):
 class PaymentLinkResponse(BaseModel):
     order_id: uuid.UUID
     order_number: int
-    payment_method: Literal["upi", "paypal"]
+    payment_method: Literal["razorpay", "upi", "simulator"]
     payment_link: str
     currency: str
     total_minor: int
+
+
+# Payments -------------------------------------------------------------------------------------
+
+
+class PaymentAccount(BaseModel):
+    """How this shop's customers pay online (Settings > Payments)."""
+
+    provider: Literal["razorpay"] = "razorpay"
+    # Where new payment links come from: the shop's own Razorpay account, the server's shared
+    # one (not in production), the dev simulator, or nowhere (no online payments).
+    source: Literal["own", "shared", "simulator", "none"]
+    payments_ready: bool
+    connected: bool  # the shop's own account is connected
+    key_id_hint: str | None  # rzp_test_••••ab12
+    mode: Literal["test", "live"] | None
+    # For Razorpay Dashboard > Settings > Webhooks: the address, the secret and the events to tick.
+    webhook_url: str | None
+    webhook_secret: str | None
+    webhook_events: list[str]
+    last_webhook_at: datetime | None
+    connected_at: datetime | None
+
+
+class PaymentAccountConnect(BaseModel):
+    key_id: str = Field(min_length=1, max_length=64)
+    key_secret: str = Field(min_length=1, max_length=128)
+
+
+class OrderPayment(BaseModel):
+    id: uuid.UUID
+    provider: str  # razorpay | simulator | upi_manual | cash | manual
+    method: str | None  # upi | card | netbanking | wallet | ... | cash; None until paid
+    status: str  # created | completed | failed | denied | cancelled | expired | refunded
+    amount_minor: int
+    currency: str
+    fee_minor: int  # Razorpay's fee, when it said
+    link: str | None  # the payment link, while it is open
+    provider_payment_id: str | None  # Razorpay's pay_... id, or the reference typed in
+    paid_at: datetime | None
+    created_at: datetime
+    test_mode: bool = False  # made with Razorpay test keys: no real money moved
+
+
+class OrderRefund(BaseModel):
+    status: Literal["pending", "completed", "failed"]
+    amount_minor: int
+    reason: str | None
+    provider_refund_id: str | None
+    created_at: datetime
+
+
+class OrderPayments(BaseModel):
+    payments: list[OrderPayment]
+    refund: OrderRefund | None
+    refundable: bool
+    # razorpay: the money goes back to the customer automatically; manual: you return it
+    # yourself (UPI you confirmed, cash) and sellix records it; simulator: dev payments.
+    refund_mode: Literal["razorpay", "manual", "simulator"] | None
 
 
 # Ask me ---------------------------------------------------------------------------------------
@@ -320,6 +383,9 @@ class Conversation(BaseModel):
     last_message_sender: str | None
     last_message_body: str | None
     last_message_at: datetime | None
+    # Set while the owner's reply has paused the assistant (agent_paused_reason
+    # "merchant_replied"); it answers again from the customer's next message after this.
+    agent_paused_until: datetime | None = None
 
 
 class ChatMessage(BaseModel):
@@ -333,6 +399,27 @@ class ChatMessage(BaseModel):
 
 class AgentSwitch(BaseModel):
     active: bool
+
+
+class MerchantMessageCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class MerchantMessageSent(BaseModel):
+    id: uuid.UUID
+    text: str
+    status: Literal["queued"] = "queued"
+    created_at: datetime
+
+
+class Rule(BaseModel):
+    """A saved "always" answer (Settings > Rules)."""
+
+    id: uuid.UUID
+    text: str  # "<question>: <answer>", as the app lists it
+    question: str
+    answer: str
+    created_at: datetime
 
 
 # Catalog --------------------------------------------------------------------------------------
@@ -386,6 +473,9 @@ class ProductUpdate(BaseModel):
     # Send null to clear, leave out to keep.
     available_on: date | None = None
     order_by_date: date | None = None
+    # false removes the product (off stock lists, menus and the assistant; past orders keep
+    # it); true brings it back.
+    is_active: bool | None = None
 
 
 class CreateAliasRequest(BaseModel):

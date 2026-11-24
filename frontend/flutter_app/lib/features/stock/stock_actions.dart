@@ -160,7 +160,7 @@ class StockActions {
     final ok = await _write(() => _api.markSoldOut(item.variantId));
     if (!ok) return;
     HapticFeedback.mediumImpact();
-    _snack('${item.label} is sold out. sellix tells customers and notes who asked.', icon: TablerIcons.ban);
+    _snack('${item.label} is sold out. sellix stops offering it to customers.', icon: TablerIcons.ban);
   }
 
   Future<void> fixCount(BuildContext context, StockItem item) async {

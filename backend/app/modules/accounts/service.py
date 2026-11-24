@@ -1,8 +1,10 @@
 """Public interface of the accounts module: sign-in, login codes and sessions.
 
 Access tokens are short-lived signed JWTs, checked without a database lookup. Refresh tokens
-are random, stored only as hashes, and rotated on every use; presenting a rotated-out token
-again revokes the session, because it means the token was copied.
+are random, stored as hashes, and rotated on every use. A rotated-out token presented again
+within REFRESH_REUSE_GRACE (a refresh answer lost on a mobile connection, or two refreshes sent
+at once) gets a new access token and the session's current refresh token; after that, it
+revokes the session, because it means the token was copied.
 """
 
 import base64
@@ -13,10 +15,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import crypto
 from app.core.config import get_settings
 from app.modules.accounts.models import LoginCode, MerchantMember, Session, User, UserIdentity
 from app.modules.accounts.schemas import Membership, Principal, TokenPair
@@ -24,6 +27,7 @@ from app.modules.accounts.schemas import Membership, Principal, TokenPair
 ACCESS_TOKEN_TTL = timedelta(minutes=15)
 REFRESH_TOKEN_TTL = timedelta(days=60)
 LOGIN_CODE_TTL = timedelta(minutes=2)
+REFRESH_REUSE_GRACE = timedelta(minutes=2)
 _ISSUER = "sellix"
 _AUDIENCE = "sellix-app"
 
@@ -96,7 +100,12 @@ async def refresh(
     session: AsyncSession, *, refresh_token: str, user_agent: str | None
 ) -> TokenPair | None:
     """Rotate a refresh token. None means "sign in again"; if a rotated-out token was
-    reused, its session is revoked in this transaction (so the caller must commit)."""
+    reused after its grace, its session is revoked in this transaction (so the caller must
+    commit).
+
+    Concurrent refreshes with the same token serialise on the session row: the first rotates,
+    the others find it rotated within the grace and get the same new refresh token.
+    """
     token_hash = _hash(refresh_token)
     now = datetime.now(UTC)
     current = await session.scalar(
@@ -104,17 +113,31 @@ async def refresh(
     )
     if current is None:
         reused = await session.scalar(
-            select(Session).where(Session.previous_refresh_token_hash == token_hash)
+            select(Session)
+            .where(Session.previous_refresh_token_hash == token_hash)
+            .with_for_update()
         )
-        if reused is not None and reused.revoked_at is None:
+        if reused is None or reused.revoked_at is not None or reused.expires_at < now:
+            return None
+        repeat = _within_grace(reused, now)
+        if repeat is None:
             reused.revoked_at = now  # a copied token was used: end that session
-        return None
+            reused.refresh_token_encrypted = None
+            return None
+        reused.last_used_at = now
+        return TokenPair(
+            access_token=_access_token(reused.user_id, reused.id),
+            refresh_token=repeat,
+            expires_in=int(ACCESS_TOKEN_TTL.total_seconds()),
+        )
     if current.revoked_at is not None or current.expires_at < now:
         return None
 
     new_refresh_token = secrets.token_urlsafe(32)
     current.previous_refresh_token_hash = current.refresh_token_hash
     current.refresh_token_hash = _hash(new_refresh_token)
+    current.refresh_token_encrypted = crypto.encrypt(new_refresh_token)
+    current.refresh_rotated_at = now
     current.last_used_at = now
     current.user_agent = user_agent or current.user_agent
     return TokenPair(
@@ -124,12 +147,52 @@ async def refresh(
     )
 
 
+def _within_grace(record: Session, now: datetime) -> str | None:
+    """The session's current refresh token, if its previous one was rotated out just now."""
+    rotated_at = record.refresh_rotated_at
+    if rotated_at is None or now - rotated_at > REFRESH_REUSE_GRACE:
+        return None
+    if not record.refresh_token_encrypted:
+        return None
+    try:
+        current = crypto.decrypt(record.refresh_token_encrypted)
+    except crypto.EncryptionError:
+        return None
+    # Only if it is still the session's token (it is replaced on every rotation).
+    return current if hmac.compare_digest(_hash(current), record.refresh_token_hash) else None
+
+
 async def revoke_session(session: AsyncSession, session_id: uuid.UUID) -> None:
     await session.execute(
         update(Session)
         .where(Session.id == session_id, Session.revoked_at.is_(None))
-        .values(revoked_at=datetime.now(UTC))
+        .values(revoked_at=datetime.now(UTC), refresh_token_encrypted=None)
     )
+
+
+async def remove_shop_users(session: AsyncSession, merchant_id: uuid.UUID) -> int:
+    """Before a shop is deleted: end every session of its members, and delete the members who
+    belong to no other shop (their sign-in identities, sessions and login codes go with them).
+    Returns how many users were deleted."""
+    member_ids = list(
+        await session.scalars(
+            select(MerchantMember.user_id).where(MerchantMember.merchant_id == merchant_id)
+        )
+    )
+    if not member_ids:
+        return 0
+    await session.execute(
+        update(Session)
+        .where(Session.user_id.in_(member_ids), Session.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(UTC), refresh_token_encrypted=None)
+    )
+    elsewhere = select(MerchantMember.user_id).where(
+        MerchantMember.user_id.in_(member_ids), MerchantMember.merchant_id != merchant_id
+    )
+    deleted = await session.execute(
+        delete(User).where(User.id.in_(member_ids), User.id.not_in(elsewhere))
+    )
+    return int(deleted.rowcount or 0)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def verify_access_token(token: str) -> Principal:
@@ -247,3 +310,24 @@ async def operator_token(
         return pair.access_token
     claims = jwt.decode(pair.access_token, options={"verify_signature": False})
     return _access_token(user_id, uuid.UUID(claims["sid"]), timedelta(minutes=minutes))
+
+
+async def forget_rotated_refresh_tokens(
+    session: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """Drop the copy of each session's refresh token once its reuse grace has passed.
+
+    The copy only answers a repeated refresh within REFRESH_REUSE_GRACE; keeping it for the
+    session's whole life would expose every live refresh token if the database and the
+    encryption key leaked together. Returns how many were dropped.
+    """
+    cutoff = (now or datetime.now(UTC)) - REFRESH_REUSE_GRACE
+    result = await session.execute(
+        update(Session)
+        .where(
+            Session.refresh_token_encrypted.is_not(None),
+            Session.refresh_rotated_at < cutoff,
+        )
+        .values(refresh_token_encrypted=None)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)

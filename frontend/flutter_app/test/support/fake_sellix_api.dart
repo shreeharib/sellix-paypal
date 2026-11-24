@@ -88,6 +88,49 @@ class FakeSellixApi implements SellixApi {
   List<SimulatorMessage> simulatorMessages = [];
   bool loggedOut = false;
 
+  /// `Me.role`: "owner" or "staff".
+  String role = 'owner';
+
+  /// What `GET /v1/payments/account` answers. Not connected by default.
+  PaymentAccount account = notConnected;
+
+  static const webhookEvents = [
+    'payment_link.paid',
+    'payment_link.expired',
+    'payment_link.cancelled',
+    'payment.failed',
+    'refund.processed',
+    'refund.failed',
+  ];
+
+  static const notConnected = PaymentAccount(
+    source: PaymentSource.none,
+    paymentsReady: false,
+    connected: false,
+    webhookEvents: webhookEvents,
+  );
+
+  /// Thrown by `connectPaymentAccount` while set, e.g. a 422 for refused keys.
+  ApiException? connectFailure;
+
+  /// What `GET /v1/orders/{id}/payments` answers, by order id. Orders not listed have none.
+  Map<String, OrderPayments> paymentsByOrder = {};
+
+  /// The saved "always" answers (`GET /v1/rules`).
+  List<MerchantRule> ruleList = [];
+
+  /// Messages the merchant sent from the app.
+  List<SentMessage> sentMessages = [];
+
+  /// Thrown by `sendMessage` while set, e.g. a 409 for a closed reply window.
+  ApiException? sendFailure;
+
+  /// The name `deleteShop` was confirmed with, once it was called successfully.
+  String? deletedShopName;
+
+  /// The last `updateProduct` body, for tests.
+  Map<String, dynamic>? lastProductUpdate;
+
   /// Thrown by every call while set.
   ApiException? failure;
 
@@ -292,6 +335,43 @@ class FakeSellixApi implements SellixApi {
     memoryByConversation = {
       FakeIds.conversationA: [MemoryFact(key: 'prefers', value: 'pickup', updatedAt: now)],
     };
+    paymentsByOrder = {
+      FakeIds.orderUnpaid: OrderPayments(
+        payments: [
+          OrderPayment(
+            id: 'pay-row-1',
+            provider: 'razorpay',
+            method: null,
+            status: PaymentStatus.created,
+            amountMinor: 10000,
+            currency: 'INR',
+            link: 'https://rzp.io/l/test1',
+            createdAt: now,
+          ),
+        ],
+      ),
+      FakeIds.orderPaid: OrderPayments(
+        payments: [
+          OrderPayment(
+            id: 'pay-row-2',
+            provider: 'razorpay',
+            method: 'upi',
+            status: PaymentStatus.completed,
+            amountMinor: 20000,
+            currency: 'INR',
+            feeMinor: 472,
+            providerPaymentId: 'pay_TEST2',
+            paidAt: now.subtract(const Duration(minutes: 50)),
+            createdAt: now.subtract(const Duration(hours: 1)),
+          ),
+        ],
+        refundable: true,
+        refundMode: RefundMode.razorpay,
+      ),
+    };
+    ruleList = [
+      MerchantRule(id: FakeIds.ruleA, text: 'Bulk orders: ask the owner first.', createdAt: now),
+    ];
     stories = [
       Story(
         storyId: 'story-1',
@@ -461,7 +541,9 @@ class FakeSellixApi implements SellixApi {
       attributes: update.attributes == null
           ? product.attributes
           : {...product.attributes, ...update.attributes!},
-      isActive: product.isActive,
+      availableOn: update.clearAvailableOn ? null : (update.availableOn ?? product.availableOn),
+      orderByDate: update.clearOrderByDate ? null : (update.orderByDate ?? product.orderByDate),
+      isActive: update.isActive ?? product.isActive,
       variants: product.variants,
       aliases: aliases ?? product.aliases,
     );
@@ -480,7 +562,7 @@ class FakeSellixApi implements SellixApi {
     return Me(
       userId: FakeIds.user,
       merchant: merchant,
-      role: 'owner',
+      role: role,
       channels: channels,
       onboardingCompleted: onboardingCompleted,
     );
@@ -545,6 +627,10 @@ class FakeSellixApi implements SellixApi {
       agentEnabled: merchant.agentEnabled,
     );
     this.answers = answers;
+    // Finishing onboarding switches the assistant on, as the server does for a new shop.
+    if (complete && !onboardingCompleted) {
+      merchant = Merchant(id: merchant.id, name: merchant.name, timezone: merchant.timezone, agentEnabled: true);
+    }
     onboardingCompleted = onboardingCompleted || complete;
     return _onboarding();
   }
@@ -788,11 +874,12 @@ class FakeSellixApi implements SellixApi {
   }
 
   @override
-  Future<List<ProductDetail>> products({String? category}) async {
+  Future<List<ProductDetail>> products({String? category, bool includeInactive = false}) async {
     await _call('products');
     return [
       for (final product in catalog)
-        if (category == null || product.category == category) product,
+        if ((category == null || product.category == category) && (includeInactive || product.isActive))
+          product,
     ];
   }
 
@@ -805,6 +892,7 @@ class FakeSellixApi implements SellixApi {
   @override
   Future<ProductDetail> updateProduct(String productId, ProductUpdate update) async {
     await _call('updateProduct');
+    lastProductUpdate = update.toJson();
     return _replaceProduct(_product(productId), update: update);
   }
 
@@ -855,6 +943,7 @@ class FakeSellixApi implements SellixApi {
     List<String>? status,
     List<String>? paymentStatus,
     int? limit,
+    DateTime? before,
   }) async {
     await _call('orders');
     final found = [
@@ -862,54 +951,97 @@ class FakeSellixApi implements SellixApi {
         if ((status == null || status.isEmpty || status.contains(order.status)) &&
             (paymentStatus == null ||
                 paymentStatus.isEmpty ||
-                paymentStatus.contains(order.paymentStatus)))
+                paymentStatus.contains(order.paymentStatus)) &&
+            (before == null || order.createdAt.isBefore(before)))
           order,
     ];
-    return found.take(limit ?? 50).toList();
+    // Newest first, as the backend pages them. A stable sort keeps equal times in list order.
+    final indexed = found.indexed.toList()
+      ..sort((a, b) {
+        final byTime = b.$2.createdAt.compareTo(a.$2.createdAt);
+        return byTime != 0 ? byTime : a.$1.compareTo(b.$1);
+      });
+    return [for (final (_, order) in indexed) order].take(limit ?? 50).toList();
+  }
+
+  @override
+  Future<Order> order(String orderId) async {
+    await _call('order');
+    return _order(orderId);
+  }
+
+  @override
+  Future<OrderPayments> orderPayments(String orderId) async {
+    await _call('orderPayments');
+    return paymentsByOrder[orderId] ?? _paidByHand(_order(orderId));
+  }
+
+  /// An order with no payments set up in [paymentsByOrder]: paid ones were confirmed by hand (UPI).
+  OrderPayments _paidByHand(Order order) {
+    final paid = order.paymentStatus == 'paid' || order.paymentStatus == 'refunded';
+    if (!paid) return const OrderPayments();
+    return OrderPayments(
+      payments: [
+        OrderPayment(
+          id: 'pay-${order.id}',
+          provider: 'upi_manual',
+          method: 'upi',
+          status: order.paymentStatus == 'refunded' ? PaymentStatus.refunded : PaymentStatus.completed,
+          amountMinor: order.totalMinor,
+          currency: order.currency,
+          paidAt: order.paidAt ?? now,
+          createdAt: order.createdAt,
+        ),
+      ],
+      refundable: order.paymentStatus == 'paid' && order.status != OrderStatus.refunded,
+      refundMode: order.paymentStatus == 'paid' ? RefundMode.manual : null,
+    );
   }
 
   @override
   Future<RefundResponse> refundOrder(String orderId, {String? reason, bool restock = true}) async {
     await _call('refundOrder');
-    final order = _updateOrder(
-      orderId,
-      status: OrderStatus.refunded,
-      paymentStatus: 'refunded',
-      comment: reason,
+    final payments = paymentsByOrder[orderId];
+    final mode = payments?.refundMode ?? RefundMode.manual;
+    // Razorpay confirms later; manual and simulator refunds are done at once.
+    final pending = mode == RefundMode.razorpay;
+    final current = _order(orderId);
+    final order = pending
+        ? current
+        : _updateOrder(orderId, status: OrderStatus.refunded, paymentStatus: 'refunded', comment: reason);
+    final status = pending ? 'pending' : 'completed';
+    paymentsByOrder[orderId] = OrderPayments(
+      payments: payments?.payments ?? const [],
+      refund: OrderRefund(
+        status: status,
+        amountMinor: order.totalMinor,
+        reason: reason,
+        providerRefundId: pending ? 'rfnd_TEST${order.number}' : null,
+        createdAt: now,
+      ),
+      refundMode: mode,
     );
     return RefundResponse(
       orderId: order.id,
       refundId: 'refund-${order.number}',
       amountMinor: order.totalMinor,
       currency: order.currency,
-      status: 'completed',
-    );
-  }
-
-  @override
-  Future<CreateInvoiceResponse> createInvoice(
-    String orderId, {
-    String? customerName,
-    String? customerEmail,
-  }) async {
-    await _call('createInvoice');
-    final order = _order(orderId);
-    return CreateInvoiceResponse(
-      orderId: order.id,
-      invoiceId: 'invoice-${order.number}',
-      payerViewUrl: 'https://example.com/invoice/${order.number}',
+      status: status,
+      mode: mode,
     );
   }
 
   @override
   Future<Order> markOrderPaid(String orderId, {String method = 'upi', String? referenceId}) async {
     await _call('markOrderPaid');
-    return _updateOrder(
+    final order = _updateOrder(
       orderId,
       status: OrderStatus.paid,
       paymentStatus: 'paid',
       paidAt: now,
     );
+    paymentsByOrder.remove(orderId);
+    return order;
   }
 
   @override
@@ -928,11 +1060,14 @@ class FakeSellixApi implements SellixApi {
   Future<PaymentLinkResponse> paymentLink(String orderId) async {
     await _call('paymentLink');
     final order = _order(orderId);
+    final razorpay = account.connected;
     return PaymentLinkResponse(
       orderId: order.id,
       orderNumber: order.number,
-      paymentMethod: 'upi',
-      paymentLink: 'upi://pay?pa=test@upi&tn=${order.number}',
+      paymentMethod: razorpay ? PaymentMethod.razorpay : PaymentMethod.upi,
+      paymentLink: razorpay
+          ? 'https://rzp.io/l/test${order.number}'
+          : 'upi://pay?pa=test@upi&tn=${order.number}',
       currency: order.currency,
       totalMinor: order.totalMinor,
     );
@@ -949,6 +1084,111 @@ class FakeSellixApi implements SellixApi {
     await _call('orderTimeline');
     _order(orderId);
     return timelines[orderId] ?? const [];
+  }
+
+  // Payments
+
+  @override
+  Future<PaymentAccount> paymentAccount() async {
+    await _call('paymentAccount');
+    return _forRole(account);
+  }
+
+  PaymentAccount _forRole(PaymentAccount a) => role == 'owner'
+      ? a
+      : PaymentAccount(
+          source: a.source,
+          paymentsReady: a.paymentsReady,
+          connected: a.connected,
+          keyIdHint: a.keyIdHint,
+          mode: a.mode,
+          webhookUrl: a.webhookUrl,
+          webhookEvents: a.webhookEvents,
+          lastWebhookAt: a.lastWebhookAt,
+          connectedAt: a.connectedAt,
+        );
+
+  void _ownerOnly() {
+    if (role != 'owner') {
+      throw const ApiException('Only the shop\'s owner can change payments.', statusCode: 403);
+    }
+  }
+
+  /// A connected account, as the server answers after `PUT /v1/payments/account`.
+  static PaymentAccount connectedAccount({
+    String keyId = 'rzp_test_abcd1234',
+    String secret = 'whsec_test_1',
+    DateTime? lastWebhookAt,
+  }) => PaymentAccount(
+    source: PaymentSource.own,
+    paymentsReady: true,
+    connected: true,
+    keyIdHint: '${keyId.substring(0, 9)}••••${keyId.substring(keyId.length - 4)}',
+    mode: keyId.startsWith('rzp_live_') ? 'live' : 'test',
+    webhookUrl: 'https://api.example.com/webhooks/razorpay/tok123',
+    webhookSecret: secret,
+    webhookEvents: webhookEvents,
+    lastWebhookAt: lastWebhookAt,
+    connectedAt: now,
+  );
+
+  @override
+  Future<PaymentAccount> connectPaymentAccount({required String keyId, required String keySecret}) async {
+    await _call('connectPaymentAccount');
+    _ownerOnly();
+    final error = connectFailure;
+    if (error != null) throw error;
+    // Reconnecting keeps the webhook address and secret.
+    account = connectedAccount(keyId: keyId, secret: account.webhookSecret ?? 'whsec_test_1');
+    paymentsReady = true;
+    return account;
+  }
+
+  @override
+  Future<void> disconnectPaymentAccount() async {
+    await _call('disconnectPaymentAccount');
+    _ownerOnly();
+    account = notConnected;
+    paymentsReady = false;
+  }
+
+  @override
+  Future<PaymentAccount> rotateWebhookSecret() async {
+    await _call('rotateWebhookSecret');
+    _ownerOnly();
+    if (!account.connected) throw const ApiException('Connect Razorpay first.', statusCode: 404);
+    final next = 'whsec_test_${(account.webhookSecret?.length ?? 0) + 1}';
+    account = PaymentAccount(
+      source: account.source,
+      paymentsReady: account.paymentsReady,
+      connected: true,
+      keyIdHint: account.keyIdHint,
+      mode: account.mode,
+      webhookUrl: account.webhookUrl,
+      webhookSecret: next,
+      webhookEvents: account.webhookEvents,
+      lastWebhookAt: account.lastWebhookAt,
+      connectedAt: account.connectedAt,
+    );
+    return account;
+  }
+
+  // Rules
+
+  @override
+  Future<List<MerchantRule>> rules() async {
+    await _call('rules');
+    return ruleList;
+  }
+
+  @override
+  Future<void> deleteRule(String ruleId) async {
+    await _call('deleteRule');
+    if (!ruleList.any((r) => r.id == ruleId)) _notFound('Rule');
+    ruleList = [
+      for (final rule in ruleList)
+        if (rule.id != ruleId) rule,
+    ];
   }
 
   // Ask me
@@ -982,9 +1222,65 @@ class FakeSellixApi implements SellixApi {
   );
 
   @override
-  Future<List<Conversation>> conversations() async {
+  Future<List<Conversation>> conversations({DateTime? before, int? limit}) async {
     await _call('conversations');
-    return conversationList;
+    final found = [
+      for (final chat in conversationList)
+        if (before == null || (chat.lastMessageAt != null && chat.lastMessageAt!.isBefore(before))) chat,
+    ];
+    return found.take(limit ?? 50).toList();
+  }
+
+  @override
+  Future<SentMessage> sendMessage(String conversationId, String text) async {
+    await _call('sendMessage');
+    final current = _conversation(conversationId);
+    final error = sendFailure;
+    if (error != null) throw error;
+    final sent = SentMessage(id: 'sent-${sentMessages.length + 1}', text: text, status: 'queued', createdAt: now);
+    sentMessages = [...sentMessages, sent];
+    messagesByConversation[conversationId] = [
+      ...?messagesByConversation[conversationId],
+      ChatMessage(
+        id: sent.id,
+        direction: 'outbound',
+        sender: 'merchant',
+        body: text,
+        status: 'queued',
+        createdAt: now,
+      ),
+    ];
+    // Like a reply typed in Instagram, it pauses the assistant in this chat.
+    _replaceConversation(
+      current,
+      agentActive: false,
+      reason: AgentPausedReason.merchantReplied,
+      pausedUntil: now.add(const Duration(hours: 12)),
+    );
+    return sent;
+  }
+
+  void _replaceConversation(
+    Conversation current, {
+    required bool agentActive,
+    String? reason,
+    DateTime? pausedUntil,
+  }) {
+    final next = Conversation(
+      id: current.id,
+      channel: current.channel,
+      customerHandle: current.customerHandle,
+      agentActive: agentActive,
+      agentPausedReason: reason,
+      lastMessageSender: current.lastMessageSender,
+      lastMessageBody: current.lastMessageBody,
+      lastMessageAt: current.lastMessageAt,
+      agentPausedUntil: pausedUntil,
+    );
+    conversationList = [
+      for (final conversation in conversationList)
+        if (conversation.id == current.id) next else conversation,
+    ];
   }
 
   @override
@@ -998,20 +1294,7 @@ class FakeSellixApi implements SellixApi {
   Future<AgentSwitch> switchAgent(String conversationId, {required bool active}) async {
     await _call('switchAgent');
     final current = _conversation(conversationId);
-    final next = Conversation(
-      id: current.id,
-      channel: current.channel,
-      customerHandle: current.customerHandle,
-      agentActive: active,
-      agentPausedReason: active ? null : 'merchant',
-      lastMessageSender: current.lastMessageSender,
-      lastMessageBody: current.lastMessageBody,
-      lastMessageAt: current.lastMessageAt,
-    );
-    conversationList = [
-      for (final conversation in conversationList)
-        if (conversation.id == conversationId) next else conversation,
-    ];
+    _replaceConversation(current, agentActive: active, reason: active ? null : 'merchant');
     return AgentSwitch(active: active);
   }
 
@@ -1152,6 +1435,18 @@ class FakeSellixApi implements SellixApi {
     await _call('logout');
     loggedOut = true;
   }
+
+  @override
+  Future<void> deleteShop(String confirmName) async {
+    await _call('deleteShop');
+    if (role != 'owner') {
+      throw const ApiException('Only the shop\'s owner can delete the shop.', statusCode: 403);
+    }
+    if (confirmName != merchant.name) {
+      throw const ApiException('The name doesn\'t match your shop\'s name.', statusCode: 422);
+    }
+    deletedShopName = confirmName;
+  }
 }
 
 /// Product schemas as `GET /v1/product-schema` answers them (docs: the add-product form).
@@ -1271,4 +1566,5 @@ abstract final class FakeIds {
   static const conversationA = '00000000-0000-4000-8000-000000000041';
   static const messageA = '00000000-0000-4000-8000-000000000042';
   static const draftA = '00000000-0000-4000-8000-000000000043';
+  static const ruleA = '00000000-0000-4000-8000-000000000051';
 }

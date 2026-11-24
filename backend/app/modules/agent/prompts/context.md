@@ -1,6 +1,6 @@
 ---
 id: context
-version: 5
+version: 6
 description: "The per-turn context block: shop, time, menu, stage, draft, quote, open questions."
 ---
 # The shop: {{ shop_name }}
@@ -19,7 +19,7 @@ description: "The per-turn context block: shop, time, menu, stage, draft, quote,
 
 # Today's menu
 {% for item in menu -%}
-- {{ item.name }} | id {{ item.id }} | price [[price:{{ item.id }}]] | {% if item.available > 0 %}{{ item.available }} left{% else %}sold out{% endif %}
+- {{ item.name }} | id {{ item.id }} | price [[price:{{ item.id }}]] | {{ item.availability }}
 {% else -%}
 - Nothing has been added to today's stock yet.
 {% endfor %}

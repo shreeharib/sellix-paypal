@@ -3,7 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api/api_exception.dart';
+import '../../core/api/models.dart';
+import '../../core/config.dart';
 import '../../core/format.dart';
+import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
 import 'stock_actions.dart';
@@ -111,7 +115,8 @@ class _Body extends ConsumerWidget {
                 children: const [
                   SxBackButton(fallback: Routes.stock),
                   // BACKEND GAP: products have no public link, so there is nothing to share yet.
-                  SxIconButton(icon: TablerIcons.share, semanticLabel: 'Sharing isn’t available yet', onTap: null),
+                  if (kShowComingSoon)
+                    SxIconButton(icon: TablerIcons.share, semanticLabel: 'Sharing isn’t available yet', onTap: null),
                 ],
               ),
             ),
@@ -220,6 +225,30 @@ class _Body extends ConsumerWidget {
         side(
           SxGroup(
             children: [
+              if (item.productId != null)
+                SxListRow(
+                  title: 'Name',
+                  subtitle: item.name,
+                  icon: TablerIcons.pencil,
+                  onTap: () => _rename(context, ref, item),
+                ),
+              if (item.productId != null) ...[
+                SxListRow(
+                  title: item.availableOn == null ? 'Sold every day' : 'One-day item',
+                  subtitle: item.availableOn == null
+                      ? 'Tap to sell it on one day only, as a pre-order'
+                      : 'Sold on ${_dayWords(item.availableOn!)} only. Tap to change',
+                  icon: TablerIcons.calendar_event,
+                  onTap: () => _pickDay(context, ref, item),
+                ),
+                if (item.availableOn != null)
+                  SxListRow(
+                    title: 'Last day to order',
+                    value: item.orderByDate == null ? 'Not set' : _dayWords(item.orderByDate!),
+                    icon: TablerIcons.clock,
+                    onTap: () => _pickOrderBy(context, ref, item),
+                  ),
+              ],
               if (item.counted)
                 SxSwitchRow(
                   title: 'On sale today',
@@ -281,15 +310,237 @@ class _Body extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             spacing: SxSpace.s4,
             children: [
-              // BACKEND GAP: PATCH /v1/products/{id} doesn't accept is_active, so nothing can remove it.
-              const SxLinkButton(label: 'Remove product', icon: TablerIcons.trash, onTap: null),
-              Text(
-                'Removing products isn’t available yet.',
-                style: SxText.caption.copyWith(color: p.textSecondary),
-              ),
+              if (item.productId != null) ...[
+                SxLinkButton(
+                  label: 'Remove product',
+                  icon: TablerIcons.trash,
+                  color: p.errorText,
+                  onTap: () => _remove(context, ref, item),
+                ),
+                Text(
+                  'It leaves your stock lists and sellix stops offering it. Past orders keep it.',
+                  style: SxText.caption.copyWith(color: p.textSecondary),
+                ),
+              ],
             ],
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// `today`, `tomorrow` or the date, inside a sentence.
+String _dayWords(DateTime day) {
+  final label = dayLabel(day);
+  return label == 'Today' || label == 'Tomorrow' || label == 'Yesterday' ? label.toLowerCase() : label;
+}
+
+/// Reloads the lists a product change shows in.
+void _refreshProducts(ProviderContainer container) => container
+  ..invalidate(catalogProvider)
+  ..invalidate(todayProvider);
+
+Future<bool> _update(BuildContext context, String productId, ProductUpdate update, String done) async {
+  final container = ProviderScope.containerOf(context, listen: false);
+  try {
+    await container.read(sellixApiProvider).updateProduct(productId, update);
+  } on ApiException catch (error) {
+    if (context.mounted) showSxSnack(context, sxErrorMessage(error), icon: TablerIcons.alert_circle);
+    return false;
+  }
+  _refreshProducts(container);
+  if (context.mounted) showSxSnack(context, done, icon: TablerIcons.check, sellix: false);
+  return true;
+}
+
+/// `PATCH is_active: false`, after asking. Undo brings it back.
+Future<void> _remove(BuildContext context, WidgetRef ref, StockItem item) async {
+  final yes = await showSxConfirm(
+    context,
+    title: 'Remove ${item.name}?',
+    body: 'It leaves your stock lists and menus, and sellix stops offering it. Past orders keep it.',
+    confirmLabel: 'Remove',
+    confirmIcon: TablerIcons.trash,
+  );
+  if (!yes || !context.mounted) return;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final api = container.read(sellixApiProvider);
+  final productId = item.productId!;
+  try {
+    await api.updateProduct(productId, const ProductUpdate(isActive: false));
+  } on ApiException catch (error) {
+    if (context.mounted) showSxSnack(context, sxErrorMessage(error), icon: TablerIcons.alert_circle);
+    return;
+  }
+  _refreshProducts(container);
+  if (!context.mounted) return;
+  showSxSnack(
+    context,
+    '${item.name} removed.',
+    icon: TablerIcons.trash,
+    sellix: false,
+    action: 'Undo',
+    onAction: () async {
+      try {
+        await api.updateProduct(productId, const ProductUpdate(isActive: true));
+        _refreshProducts(container);
+      } on ApiException {
+        // The product stays removed; the stock list shows the truth.
+      }
+    },
+  );
+  if (context.canPop()) {
+    context.pop();
+  } else {
+    context.go(Routes.stock);
+  }
+}
+
+/// A new name for the same product: it keeps its orders, stock and aliases.
+Future<void> _rename(BuildContext context, WidgetRef ref, StockItem item) async {
+  final name = await showSxSheet<String>(
+    context,
+    title: 'Rename',
+    subtitle: 'Past orders keep the name they were placed with.',
+    builder: (_) => _RenameSheet(current: item.name),
+  );
+  if (name == null || name == item.name || !context.mounted) return;
+  await _update(context, item.productId!, ProductUpdate(name: name), 'Renamed to $name.');
+}
+
+/// Sell it on one day only, or every day again.
+Future<void> _pickDay(BuildContext context, WidgetRef ref, StockItem item) async {
+  final today = ref.read(todayProvider).value?.businessDate ?? dateOnly(DateTime.now());
+  final current = item.availableOn;
+  if (current != null) {
+    final choice = await showSxSheet<String>(
+      context,
+      title: 'One-day item',
+      subtitle: 'Sold on ${_dayWords(current)} only.',
+      builder: (sheet) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: SxSpace.s8,
+        children: [
+          SxChoiceCard(
+            title: 'Change the day',
+            icon: TablerIcons.calendar_event,
+            onTap: () => Navigator.of(sheet).pop('day'),
+          ),
+          SxChoiceCard(
+            title: 'Sell it every day',
+            subtitle: 'It stops being a one-day item',
+            icon: TablerIcons.calendar_x,
+            onTap: () => Navigator.of(sheet).pop('clear'),
+          ),
+        ],
+      ),
+    );
+    if (!context.mounted || choice == null) return;
+    if (choice == 'clear') {
+      await _update(
+        context,
+        item.productId!,
+        const ProductUpdate(clearAvailableOn: true, clearOrderByDate: true),
+        '${item.name} is sold every day again.',
+      );
+      return;
+    }
+  }
+  if (!context.mounted) return;
+  final start = current != null && !current.isBefore(today) ? current : today;
+  final picked = await showDatePicker(
+    context: context,
+    initialDate: start,
+    firstDate: today,
+    lastDate: addDays(today, 365),
+    helpText: 'Day it is sold',
+  );
+  if (picked == null || !context.mounted) return;
+  final day = dateOnly(picked);
+  final orderBy = item.orderByDate;
+  await _update(
+    context,
+    item.productId!,
+    ProductUpdate(
+      availableOn: day,
+      // A last order day after the new day can't be right: it goes.
+      clearOrderByDate: orderBy != null && orderBy.isAfter(day),
+    ),
+    '${item.name} is sold on ${_dayWords(day)} only.',
+  );
+}
+
+/// The last day to order a one-day item: on or before its day.
+Future<void> _pickOrderBy(BuildContext context, WidgetRef ref, StockItem item) async {
+  final day = item.availableOn!;
+  final today = ref.read(todayProvider).value?.businessDate ?? dateOnly(DateTime.now());
+  final first = day.isBefore(today) ? day : today;
+  final current = item.orderByDate;
+  final picked = await showDatePicker(
+    context: context,
+    initialDate: current != null && !current.isBefore(first) && !current.isAfter(day) ? current : day,
+    firstDate: first,
+    lastDate: day,
+    helpText: 'Last day to order',
+  );
+  if (picked == null || !context.mounted) return;
+  final orderBy = dateOnly(picked);
+  await _update(
+    context,
+    item.productId!,
+    ProductUpdate(orderByDate: orderBy),
+    'Orders close ${_dayWords(orderBy)}.',
+  );
+}
+
+class _RenameSheet extends StatefulWidget {
+  const _RenameSheet({required this.current});
+
+  final String current;
+
+  @override
+  State<_RenameSheet> createState() => _RenameSheetState();
+}
+
+class _RenameSheetState extends State<_RenameSheet> {
+  late final _name = TextEditingController(text: widget.current);
+  String? _error;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final name = _name.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (name.isEmpty) {
+      setState(() => _error = 'Type a name.');
+      return;
+    }
+    Navigator.of(context).pop(name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      spacing: SxSpace.s12,
+      children: [
+        SxField(
+          controller: _name,
+          label: 'Product name',
+          errorText: _error,
+          maxLength: 200,
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          onSubmitted: (_) => _save(),
+          onChanged: (_) {
+            if (_error != null) setState(() => _error = null);
+          },
+        ),
+        SxButton(label: 'Save name', fullWidth: true, onTap: _save),
       ],
     );
   }

@@ -406,7 +406,7 @@ void main() {
       expect(order.conversationId, isNull);
     });
 
-    test('timeline, payment link, refund and invoice', () {
+    test('timeline, payment link and refund', () {
       final event = OrderTimelineEvent.fromJson({
         'id': _uuid,
         'order_id': _uuid2,
@@ -421,12 +421,12 @@ void main() {
       final link = PaymentLinkResponse.fromJson({
         'order_id': _uuid,
         'order_number': 7,
-        'payment_method': 'upi',
-        'payment_link': 'upi://pay?pa=test@upi',
+        'payment_method': 'razorpay',
+        'payment_link': 'https://rzp.io/l/abc',
         'currency': 'INR',
         'total_minor': 100,
       });
-      expect(link.paymentMethod, 'upi');
+      expect(link.paymentMethod, PaymentMethod.razorpay);
 
       final refund = RefundResponse.fromJson({
         'order_id': _uuid,
@@ -434,22 +434,149 @@ void main() {
         'amount_minor': 100,
         'currency': 'USD',
         'status': 'pending',
+        'mode': 'razorpay',
       });
       expect(refund.status, 'pending');
+      expect(refund.mode, RefundMode.razorpay);
+    });
 
-      final invoice = CreateInvoiceResponse.fromJson({
-        'order_id': _uuid,
-        'invoice_id': 'INV-1',
-        'payer_view_url': 'https://example.com/i',
+    test('payment account, as the contract shows it', () {
+      final account = PaymentAccount.fromJson({
+        'provider': 'razorpay',
+        'source': 'own',
+        'payments_ready': true,
+        'connected': true,
+        'key_id_hint': 'rzp_test_••••ab12',
+        'mode': 'test',
+        'webhook_url': 'https://api.example.com/webhooks/razorpay/Xy3',
+        'webhook_secret': 'k2J',
+        'webhook_events': ['payment_link.paid', 'refund.failed'],
+        'last_webhook_at': null,
+        'connected_at': '2026-11-24T10:00:00+05:30',
       });
-      expect(invoice.invoiceId, 'INV-1');
+      expect(account.connected, isTrue);
+      expect(account.mode, 'test');
+      expect(account.webhookEvents, ['payment_link.paid', 'refund.failed']);
+      expect(account.lastWebhookAt, isNull);
+      expect(account.connectedAt, DateTime.utc(2026, 11, 24, 4, 30));
+      expect(account.isTestSetup, isFalse);
+
+      final none = PaymentAccount.fromJson({
+        'source': 'none',
+        'payments_ready': false,
+        'connected': false,
+        'key_id_hint': null,
+        'mode': null,
+        'webhook_url': null,
+        'webhook_secret': null,
+        'webhook_events': <dynamic>[],
+        'last_webhook_at': null,
+        'connected_at': null,
+      });
+      expect(none.connected, isFalse);
+      expect(none.webhookSecret, isNull);
+      expect(PaymentAccount.fromJson({'source': 'shared', 'payments_ready': true, 'connected': false}).isTestSetup, isTrue);
+    });
+
+    test('order payments with a refund', () {
+      final payments = OrderPayments.fromJson({
+        'payments': [
+          {
+            'id': _uuid,
+            'provider': 'razorpay',
+            'method': null,
+            'status': 'expired',
+            'amount_minor': 18000,
+            'currency': 'INR',
+            'fee_minor': 0,
+            'link': null,
+            'provider_payment_id': null,
+            'paid_at': null,
+            'created_at': _at,
+          },
+          {
+            'id': _uuid2,
+            'provider': 'razorpay',
+            'method': 'upi',
+            'status': 'completed',
+            'amount_minor': 18000,
+            'currency': 'INR',
+            'fee_minor': 425,
+            'link': null,
+            'provider_payment_id': 'pay_ABC',
+            'paid_at': _at,
+            'created_at': _at,
+          },
+        ],
+        'refund': {
+          'status': 'pending',
+          'amount_minor': 18000,
+          'reason': 'Out of stock',
+          'provider_refund_id': 'rfnd_X',
+          'created_at': _at,
+        },
+        'refundable': true,
+        'refund_mode': 'razorpay',
+      });
+      expect(payments.paid?.providerPaymentId, 'pay_ABC');
+      expect(payments.paid?.feeMinor, 425);
+      expect(payments.paid?.testMode, isFalse);
+      expect(
+        OrderPayment.fromJson({
+          'id': _uuid,
+          'provider': 'razorpay',
+          'method': 'card',
+          'status': 'completed',
+          'amount_minor': 100,
+          'currency': 'INR',
+          'created_at': _at,
+          'test_mode': true,
+        }).testMode,
+        isTrue,
+      );
+      expect(payments.openLink, isNull);
+      expect(payments.refund?.status, 'pending');
+      expect(payments.refundable, isTrue);
+      expect(payments.refundMode, RefundMode.razorpay);
+      final empty = OrderPayments.fromJson({'payments': <dynamic>[], 'refund': null, 'refundable': false, 'refund_mode': null});
+      expect(empty.paid, isNull);
+      expect(empty.refundMode, isNull);
+    });
+
+    test('rules, sent messages and the paused chat', () {
+      final rule = MerchantRule.fromJson({'id': _uuid, 'text': 'Bulk: ask me', 'created_at': _at});
+      expect(rule.text, 'Bulk: ask me');
+      final sent = SentMessage.fromJson({'id': _uuid, 'text': 'Hi', 'status': 'queued', 'created_at': _at});
+      expect(sent.status, 'queued');
+      final chat = Conversation.fromJson({
+        'id': _uuid,
+        'channel': 'instagram',
+        'customer_handle': 'a',
+        'agent_active': false,
+        'agent_paused_reason': 'merchant_replied',
+        'agent_paused_until': '2026-11-24T22:00:00+05:30',
+        'last_message_sender': null,
+        'last_message_body': null,
+        'last_message_at': null,
+      });
+      expect(chat.agentPausedReason, AgentPausedReason.merchantReplied);
+      expect(chat.agentPausedUntil, DateTime.utc(2026, 11, 24, 16, 30));
     });
 
     test('request bodies leave out what is unset', () {
       expect(const MarkPaidRequest().toJson(), {'method': 'upi'});
       expect(const CancelOrderRequest().toJson(), isEmpty);
       expect(const RefundRequest().toJson(), {'restock': true});
-      expect(const CreateInvoiceRequest().toJson(), isEmpty);
+      expect(const ProductUpdate(isActive: false).toJson(), {'is_active': false});
+      expect(ProductUpdate(availableOn: DateTime(2026, 11, 9), orderByDate: DateTime(2026, 11, 7)).toJson(), {
+        'available_on': '2026-11-09',
+        'order_by_date': '2026-11-07',
+      });
+      expect(const ProductUpdate(clearAvailableOn: true, clearOrderByDate: true).toJson(), {
+        'available_on': null,
+        'order_by_date': null,
+      });
+      expect(const ProductUpdate(name: 'x').toJson(), {'name': 'x'});
       expect(const UpdateOrderStatusRequest(status: 'ready').toJson(), {'status': 'ready'});
     });
   });

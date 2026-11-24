@@ -20,6 +20,16 @@ final onboardingProvider = FutureProvider.autoDispose<Onboarding>(
   (ref) => ref.watch(sellixApiProvider).onboarding(),
 );
 
+/// How customers pay online: the shop's own Razorpay account, a test setup, or nothing.
+final paymentAccountProvider = FutureProvider.autoDispose<PaymentAccount>(
+  (ref) => ref.watch(sellixApiProvider).paymentAccount(),
+);
+
+/// The saved "always" answers (made with "always answer this way" on a question).
+final merchantRulesProvider = FutureProvider.autoDispose<List<MerchantRule>>(
+  (ref) => ref.watch(sellixApiProvider).rules(),
+);
+
 /// The newest version of what the agent reads. Null until something is written.
 final shopProfileProvider = FutureProvider.autoDispose<ShopProfile?>(
   (ref) => ref.watch(sellixApiProvider).shopProfile(),

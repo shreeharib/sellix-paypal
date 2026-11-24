@@ -1,0 +1,19 @@
+id: payment_try_again
+version: 1
+description: "Sent by code once per order when a Razorpay payment try failed and the same link is still open and unpaid a little later (PAYMENT_FAILED_NOTICE_SECONDS)."
+texts:
+  en: |-
+    The payment for order {{ number }} didn't go through. You can try again with the same link: {{ link }}
+    If money left your account for the failed try, your bank returns it automatically.
+  ta-en: |-
+    Order {{ number }} payment aagala. Same link-la thirumba try pannunga: {{ link }}
+    Fail aana try-ku account-la irundhu panam pochuna, bank thaane thirumbi kudukkum.
+  ta: |-
+    ஆர்டர் {{ number }} பணம் செலுத்தல் நடக்கவில்லை. அதே லிங்கில் மீண்டும் முயற்சிக்கலாம்: {{ link }}
+    தோல்வியான முயற்சிக்கு உங்கள் கணக்கிலிருந்து பணம் போயிருந்தால், வங்கி தானாகவே திருப்பித் தரும்.
+  hi-en: |-
+    Order {{ number }} ka payment nahi ho paya. Usi link se dobara try kariye: {{ link }}
+    Agar fail hue try mein account se paise kate hain, to bank apne aap wapas kar dega.
+  hi: |-
+    ऑर्डर {{ number }} का भुगतान नहीं हो पाया। उसी लिंक से फिर से कोशिश करें: {{ link }}
+    अगर असफल कोशिश में खाते से पैसे कटे हैं, तो बैंक अपने आप लौटा देगा।

@@ -43,6 +43,8 @@ class Conversation(Base):
     channel_connection_id: Mapped[uuid.UUID]
     agent_active: Mapped[bool] = mapped_column(server_default=text("true"))
     agent_paused_reason: Mapped[str | None]
+    # A pause for an owner's reply ('merchant_replied') ends here, on the next customer message.
+    agent_paused_until: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
     last_customer_message_at: Mapped[datetime | None]
     # browsing | collecting_details | awaiting_confirmation | payment_pending | handed_off
     order_stage: Mapped[str] = mapped_column(server_default=text("'browsing'"))

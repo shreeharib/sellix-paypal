@@ -30,7 +30,9 @@ _SECRET_FIELDS = frozenset(
         "email",
     }
 )
-_PAYMENT_URL = re.compile(r"(?:upi://|https?://\S*(?:paypal\.com|/pay))\S*", re.IGNORECASE)
+_PAYMENT_URL = re.compile(
+    r"(?:upi://|https?://\S*(?:rzp\.io|razorpay\.com|/pay))\S*", re.IGNORECASE
+)
 
 
 def redact(_: Any, __: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:

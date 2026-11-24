@@ -4,6 +4,7 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
 import '../../core/api/api_exception.dart';
 import '../../core/api/models.dart';
+import '../../core/format.dart';
 import '../../core/providers.dart';
 import '../../core/router.dart';
 import '../../design/design.dart';
@@ -77,6 +78,29 @@ class RulesScreen extends ConsumerWidget {
     );
   }
 
+  /// A saved "always" answer: ask first, then `DELETE /v1/rules/{id}`.
+  Future<void> _deleteAlways(BuildContext context, MerchantRule rule) async {
+    final container = containerOf(context);
+    final yes = await showSxConfirm(
+      context,
+      title: 'Delete this answer?',
+      body: '“${rule.text}”\n\nsellix stops giving it, and asks you the next time someone asks.',
+      confirmLabel: 'Delete',
+      confirmIcon: TablerIcons.trash,
+    );
+    if (!yes) return;
+    try {
+      await container.read(sellixApiProvider).deleteRule(rule.id);
+      container.invalidate(merchantRulesProvider);
+    } on ApiException catch (error) {
+      if (context.mounted) showSxSnack(context, sxErrorMessage(error));
+      return;
+    }
+    if (context.mounted) {
+      showSxSnack(context, 'Answer deleted. sellix will ask you next time.', icon: TablerIcons.trash);
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(shopProfileProvider);
@@ -86,7 +110,7 @@ class RulesScreen extends ConsumerWidget {
           : null,
       body: Column(
         children: [
-          const SxDetailHeader(title: 'Saved rules', meta: 'sellix answers these alone', fallback: Routes.automations),
+          const SxDetailHeader(title: 'Saved rules', meta: 'sellix answers these alone', fallback: Routes.profile),
           Expanded(
             child: SxAsyncView<ShopProfile?>(
               value: profile,
@@ -102,11 +126,16 @@ class RulesScreen extends ConsumerWidget {
 
   Widget _list(BuildContext context, WidgetRef ref, List<SavedRule> rules) {
     final p = context.sx;
-    Future<void> refresh() => ref.refresh(shopProfileProvider.future);
+    final always = ref.watch(merchantRulesProvider);
+    Future<void> refresh() {
+      ref.invalidate(merchantRulesProvider);
+      return ref.refresh(shopProfileProvider.future);
+    }
+
     return SxScrollList(
       onRefresh: refresh,
       children: [
-        if (rules.isEmpty)
+        if (rules.isEmpty && (always.value?.isEmpty ?? true))
           const Padding(
             padding: EdgeInsets.only(top: SxSpace.s48),
             child: SxEmptyState(
@@ -155,14 +184,55 @@ class RulesScreen extends ConsumerWidget {
                     ),
                   ),
                 ),
-              // BACKEND GAP: "always answer this way" from a question goes to the merchant_rules table,
-              // which has no read, edit or delete endpoint. The agent uses those; this list cannot show them.
-              Text(
-                'Answers you saved from a chat with “always” work, but do not show here yet.',
-                style: SxText.caption.copyWith(color: p.textSecondary),
-              ),
             ],
           ),
+        ),
+        const SxSectionHeader(title: 'Saved from chats'),
+        Mx(
+          child: switch (always) {
+            AsyncValue(value: final list?) when list.isEmpty => Text(
+              'When you answer a question with “always answer this way”, it shows here.',
+              style: SxText.caption.copyWith(color: p.textSecondary),
+            ),
+            AsyncValue(value: final list?) => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: SxSpace.s8,
+              children: [
+                for (final rule in list)
+                  SxCard(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      spacing: SxSpace.s8,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            spacing: SxSpace.s4,
+                            children: [
+                              Text(rule.text, style: SxText.bodyS.copyWith(color: p.textPrimary)),
+                              Text(
+                                'Saved ${formatDate(rule.createdAt)}',
+                                style: SxText.caption.copyWith(color: p.textSecondary),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SxIconButton(
+                          icon: TablerIcons.trash,
+                          semanticLabel: 'Delete saved answer',
+                          onTap: () => _deleteAlways(context, rule),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+            AsyncValue(hasError: true) => SxErrorState(
+              error: always.error,
+              onRetry: () => ref.invalidate(merchantRulesProvider),
+            ),
+            _ => const SxSkeleton(height: 72, radius: SxRadius.card),
+          },
         ),
       ],
     );

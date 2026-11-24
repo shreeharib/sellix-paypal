@@ -3,12 +3,16 @@
 import asyncio
 import os
 import sys
-from typing import Any
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from cryptography.fernet import Fernet
 
 from app.core.runtime import new_event_loop
+
+if TYPE_CHECKING:
+    from tests.integration.fake_razorpay import FakeRazorpay
 
 TEST_ENV = {
     "APP_ENV": "test",
@@ -34,11 +38,13 @@ TEST_ENV = {
     # Turns route by the rules, so scripted conversations never make a real router call; the
     # router's own tests switch it to "model" with a fake model.
     "AGENT_PLAYBOOK_ROUTER": "rules",
-    # Only tests/sandbox talks to PayPal, with its own credentials (see that conftest).
-    "PAYPAL_ENV": "sandbox",
-    "PAYPAL_CLIENT_ID": "",
-    "PAYPAL_CLIENT_SECRET": "",
-    "PAYPAL_WEBHOOK_ID": "",
+    # Razorpay: tests use a fake Razorpay (tests/support/fake_razorpay.py); no shared keys, so a
+    # shop pays only through the account it connects. The simulator stays off.
+    "PAYMENT_PROVIDER": "razorpay",
+    "RAZORPAY_KEY_ID": "",
+    "RAZORPAY_KEY_SECRET": "",
+    "RAZORPAY_WEBHOOK_SECRET": "",
+    "RAZORPAY_API_BASE": "https://api.razorpay.test",
 }
 os.environ.update(TEST_ENV)
 
@@ -54,3 +60,22 @@ def anyio_backend() -> tuple[str, dict[str, Any]]:
 def _event_loop_for_sync_clients() -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+# Razorpay: every test that pays goes through the fake (tests/integration/fake_razorpay.py).
+RAZORPAY_KEY_ID = "rzp_test_SellixShop0001"
+RAZORPAY_KEY_SECRET = "TestSecretAbc123XYZ"
+
+
+@pytest.fixture
+def fake_razorpay(monkeypatch: pytest.MonkeyPatch) -> Iterator["FakeRazorpay"]:
+    """Razorpay's API, faked; it knows the test shop's keys. No waits between retries."""
+    from app.modules.payments import razorpay
+    from tests.integration.fake_razorpay import FakeRazorpay
+
+    fake = FakeRazorpay()
+    fake.add_account(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+    monkeypatch.setattr(razorpay, "_RETRY_DELAYS", (0.0, 0.0))
+    razorpay.use_transport(fake.transport())
+    yield fake
+    razorpay.use_transport(None)

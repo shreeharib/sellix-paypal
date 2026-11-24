@@ -1,24 +1,19 @@
 id: payment_link
-version: 2
-description: "Sent by code right after an order is placed, with the payment link. `charge` is what PayPal will charge when that differs from the order total (a rupee order is charged in dollars); empty otherwise."
+version: 3
+description: "Sent by code right after an order is placed, with the payment link (Razorpay: UPI, card, net banking, wallet; or the shop's own UPI link)."
 texts:
   en: |-
-    Order {{ number }} is placed: {{ total }}. Pay here: {{ link }}
-    {% if charge %}PayPal charges {{ charge }} at today's rate.
-    {% endif %}We're holding your items for {{ hold_minutes }} minutes.
+    Order {{ number }} is placed: {{ total }}. Pay here (UPI, card or net banking): {{ link }}
+    We're holding your items for {{ hold_minutes }} minutes.
   ta-en: |-
-    Order {{ number }} confirm aachu: {{ total }}. Inga pay pannunga: {{ link }}
-    {% if charge %}PayPal-la innaiku rate-ku {{ charge }} charge aagum.
-    {% endif %}{{ hold_minutes }} nimisham ungalukkaga vechirukkom.
+    Order {{ number }} confirm aachu: {{ total }}. Inga pay pannunga (UPI, card illa net banking): {{ link }}
+    {{ hold_minutes }} nimisham ungalukkaga vechirukkom.
   ta: |-
-    ஆர்டர் {{ number }} உறுதியானது: {{ total }}. இங்கே பணம் செலுத்துங்கள்: {{ link }}
-    {% if charge %}PayPal இன்றைய விகிதத்தில் {{ charge }} வசூலிக்கும்.
-    {% endif %}{{ hold_minutes }} நிமிடம் உங்களுக்காக வைத்திருக்கிறோம்.
+    ஆர்டர் {{ number }} உறுதியானது: {{ total }}. இங்கே பணம் செலுத்துங்கள் (UPI, கார்டு அல்லது நெட் பேங்கிங்): {{ link }}
+    {{ hold_minutes }} நிமிடம் உங்களுக்காக வைத்திருக்கிறோம்.
   hi-en: |-
-    Order {{ number }} ho gaya: {{ total }}. Yahan pay kariye: {{ link }}
-    {% if charge %}PayPal aaj ke rate par {{ charge }} charge karega.
-    {% endif %}{{ hold_minutes }} minute ke liye aapke items rakhe hain.
+    Order {{ number }} ho gaya: {{ total }}. Yahan pay kariye (UPI, card ya net banking): {{ link }}
+    {{ hold_minutes }} minute ke liye aapke items rakhe hain.
   hi: |-
-    ऑर्डर {{ number }} हो गया: {{ total }}। यहाँ भुगतान करें: {{ link }}
-    {% if charge %}PayPal आज की दर पर {{ charge }} लेगा।
-    {% endif %}{{ hold_minutes }} मिनट के लिए आपका सामान रखा है।
+    ऑर्डर {{ number }} हो गया: {{ total }}। यहाँ भुगतान करें (UPI, कार्ड या नेट बैंकिंग): {{ link }}
+    {{ hold_minutes }} मिनट के लिए आपका सामान रखा है।

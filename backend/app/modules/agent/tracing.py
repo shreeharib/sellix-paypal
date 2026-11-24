@@ -244,9 +244,7 @@ async def health(merchant_id: uuid.UUID | None, since: datetime) -> dict[str, An
                 await session.execute(
                     select(AgentTurn.status, func.count()).where(*scope).group_by(AgentTurn.status)
                 )
-            )
-            .tuples()
-            .all()
+            ).all()
         )
         found = await session.scalars(
             select(AgentTurn.latency_ms).where(*scope, AgentTurn.latency_ms.is_not(None))
@@ -254,18 +252,14 @@ async def health(merchant_id: uuid.UUID | None, since: datetime) -> dict[str, An
         latencies = sorted(value for value in found if value is not None)
         cost = await session.scalar(select(func.sum(AgentTurn.cost_usd)).where(*scope))
         errors = (
-            (
-                await session.execute(
-                    select(AgentTurn.error, func.count())
-                    .where(*scope, AgentTurn.error.is_not(None))
-                    .group_by(AgentTurn.error)
-                    .order_by(func.count().desc())
-                    .limit(5)
-                )
+            await session.execute(
+                select(AgentTurn.error, func.count())
+                .where(*scope, AgentTurn.error.is_not(None))
+                .group_by(AgentTurn.error)
+                .order_by(func.count().desc())
+                .limit(5)
             )
-            .tuples()
-            .all()
-        )
+        ).all()
     total = sum(by_status.values())
     return {
         "turns": total,

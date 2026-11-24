@@ -1,1 +1,1 @@
-"""PaymentProvider interface with the PayPal adapter (UPI later); payment webhooks and refunds."""
+"""Payments: Razorpay links on each shop's own account, UPI by hand, refunds, the simulator."""

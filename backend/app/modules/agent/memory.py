@@ -20,7 +20,7 @@ from app.core.db import session_scope
 from app.modules.agent import llm, prompt_store
 from app.modules.agent.guardrails import output
 from app.modules.agent.models import ConversationSummary, CustomerMemory, GlossaryTerm, MerchantRule
-from app.modules.agent.schemas import ChatMessage
+from app.modules.agent.schemas import ChatMessage, SavedRule
 from app.modules.conversations import service as conversations
 
 log = structlog.get_logger()
@@ -128,6 +128,26 @@ async def rules(session: AsyncSession, merchant_id: uuid.UUID) -> list[tuple[str
         .limit(20)
     )
     return [(question, answer) for question, answer in rows]
+
+
+async def saved_rules(session: AsyncSession, merchant_id: uuid.UUID) -> list[SavedRule]:
+    """The shop's active saved answers, newest first (Settings > Rules)."""
+    rows = await session.scalars(
+        select(MerchantRule)
+        .where(MerchantRule.merchant_id == merchant_id, MerchantRule.active)
+        .order_by(MerchantRule.created_at.desc(), MerchantRule.id)
+    )
+    return [SavedRule(row.id, row.question, row.answer, row.created_at) for row in rows]
+
+
+async def delete_rule(session: AsyncSession, merchant_id: uuid.UUID, rule_id: uuid.UUID) -> bool:
+    """Delete one of the shop's saved answers. False if the shop has no such rule."""
+    deleted = await session.execute(
+        delete(MerchantRule).where(
+            MerchantRule.id == rule_id, MerchantRule.merchant_id == merchant_id
+        )
+    )
+    return bool(deleted.rowcount)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def latest_summary(session: AsyncSession, conversation_id: uuid.UUID) -> str | None:

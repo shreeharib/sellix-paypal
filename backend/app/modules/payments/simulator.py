@@ -1,8 +1,8 @@
 """A payment provider for demos and tests: a hosted checkout page with Accept and Reject buttons.
 
-It stands where PayPal stands. The customer gets a link to a page here instead of PayPal's, and
-the buttons send a signed webhook to /webhooks/simulator. That webhook is stored in the same
-inbox and applied by a job, like PayPal's, so everything behind it (order paid, payment
+It stands where Razorpay stands. The customer gets a link to a page here instead of Razorpay's,
+and the buttons send a signed webhook to /webhooks/simulator. That webhook is stored in the same
+inbox and applied by a job, like Razorpay's, so everything behind it (order paid, payment
 declined, a new link, the order cancelled) is the real order flow. It takes no card or login.
 
 Never offered in production.

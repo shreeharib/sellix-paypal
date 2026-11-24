@@ -50,6 +50,10 @@ class Session(Base):
     user_id: Mapped[uuid.UUID]
     refresh_token_hash: Mapped[str]
     previous_refresh_token_hash: Mapped[str | None]
+    # When the previous token was rotated out (its 2-minute grace runs from here), and the
+    # current token, encrypted, so a grace answer can repeat it.
+    refresh_rotated_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(nullable=True, default=None)
     user_agent: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     last_used_at: Mapped[datetime] = mapped_column(server_default=func.now())

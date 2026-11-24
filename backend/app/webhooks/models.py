@@ -17,7 +17,7 @@ class WebhookEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    source: Mapped[str]  # meta | paypal
+    source: Mapped[str]  # meta | razorpay | simulator (paypal: old rows)
     dedupe_key: Mapped[str]
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(server_default="pending")

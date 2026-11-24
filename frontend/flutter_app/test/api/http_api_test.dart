@@ -71,7 +71,16 @@ void main() {
     'GET /v1/shop-types': (a) => a.shopTypes(),
     'GET /v1/orders': (a) => a.orders(),
     'POST /v1/orders/o1/refund': (a) => a.refundOrder('o1'),
-    'POST /v1/orders/o1/invoice': (a) => a.createInvoice('o1'),
+    'GET /v1/orders/o1': (a) => a.order('o1'),
+    'GET /v1/orders/o1/payments': (a) => a.orderPayments('o1'),
+    'GET /v1/payments/account': (a) => a.paymentAccount(),
+    'PUT /v1/payments/account': (a) => a.connectPaymentAccount(keyId: 'rzp_test_x', keySecret: 'y'),
+    'DELETE /v1/payments/account': (a) => a.disconnectPaymentAccount(),
+    'POST /v1/payments/account/webhook-secret': (a) => a.rotateWebhookSecret(),
+    'GET /v1/rules': (a) => a.rules(),
+    'DELETE /v1/rules/r1': (a) => a.deleteRule('r1'),
+    'POST /v1/conversations/c1/messages': (a) => a.sendMessage('c1', 'hi'),
+    'DELETE /v1/shop': (a) => a.deleteShop('Test Shop'),
     'POST /v1/orders/o1/mark-paid': (a) => a.markOrderPaid('o1'),
     'POST /v1/orders/o1/complete': (a) => a.completeOrder('o1'),
     'POST /v1/orders/o1/cancel': (a) => a.cancelOrder('o1'),
@@ -118,6 +127,55 @@ void main() {
     adapter.responseBody = '[]';
     await api.orders(status: ['paid', 'ready'], paymentStatus: ['paid'], limit: 20);
     expect(adapter.last!.uri.query, 'status=paid&status=ready&payment_status=paid&limit=20');
+  });
+
+  test('paging sends before as an ISO time with the limit', () async {
+    adapter.responseBody = '[]';
+    final at = DateTime.utc(2026, 11, 24, 4, 30, 1, 123, 456);
+    await api.orders(limit: 50, before: at);
+    expect(adapter.last!.uri.queryParameters, {'limit': '50', 'before': '2026-11-24T04:30:01.123456Z'});
+    await api.conversations(limit: 50, before: at);
+    expect(adapter.last!.uri.queryParameters, {'limit': '50', 'before': '2026-11-24T04:30:01.123456Z'});
+    await api.products(includeInactive: true);
+    expect(adapter.last!.uri.queryParameters, {'include_inactive': 'true'});
+  });
+
+  test('the bodies of the new writes are what the contract says', () async {
+    adapter.responseBody = 'null';
+    try {
+      await api.connectPaymentAccount(keyId: 'rzp_test_abc', keySecret: 'sec');
+    } on TypeError {
+      // Empty body.
+    }
+    expect(adapter.last!.data, {'key_id': 'rzp_test_abc', 'key_secret': 'sec'});
+    try {
+      await api.sendMessage('c1', 'On my way');
+    } on TypeError {
+      // Empty body.
+    }
+    expect(adapter.last!.data, {'text': 'On my way'});
+    await api.deleteShop('Test Shop');
+    expect(adapter.last!.data, {'confirm_name': 'Test Shop'});
+    try {
+      await api.refundOrder('o1', reason: 'Out of stock', restock: false);
+    } on TypeError {
+      // Empty body.
+    }
+    expect(adapter.last!.data, {'reason': 'Out of stock', 'restock': false});
+  });
+
+  test('a 422 from connecting Razorpay keeps the server’s detail', () async {
+    adapter
+      ..statusCode = 422
+      ..responseBody = '{"detail": "Razorpay did not accept these keys."}';
+    await expectLater(
+      api.connectPaymentAccount(keyId: 'rzp_test_abc', keySecret: 'sec'),
+      throwsA(
+        isA<ApiException>()
+            .having((e) => e.message, 'message', 'Razorpay did not accept these keys.')
+            .having((e) => e.statusCode, 'statusCode', 422),
+      ),
+    );
   });
 
   test('a 409 on the payment link keeps the server’s detail as the message', () async {
@@ -262,4 +320,5 @@ bool _returnsList(String route) => const {
   'GET /v1/conversations/c1/memory',
   'GET /v1/conversations/c1/drafts',
   'GET /v1/stories/unconfirmed',
+  'GET /v1/rules',
 }.contains(route);

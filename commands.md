@@ -121,7 +121,7 @@ Until onboarding lives in the app, operators use these. The `cli` recipe forward
 
 ```bash
 just cli --help
-just cli create-merchant --name "Sweet Crumbs"                         # prints the merchant ID
+just cli create-merchant --name "Sweet Crumbs"                         # prints the merchant ID (assistant off, v2)
 just cli set-shop-profile --merchant-id <id> --file shop.md            # Markdown: hours, policies, FAQs
 just cli set-stock --merchant-id <id> --file stock.json                # today's items (format below)
 just cli set-stock --merchant-id <id> --file stock.json --date 2026-11-01 --until 2026-11-05   # the same stock each day (pre-orders)

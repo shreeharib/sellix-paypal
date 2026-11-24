@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # 0 turns a limit off.
     rate_limit_api_per_minute: int = 240  # the merchant app's /v1 endpoints
     rate_limit_auth_per_minute: int = 20  # sign-in, token and refresh: stops guessing
-    rate_limit_webhook_per_minute: int = 600  # Meta and PayPal callbacks, per address
+    rate_limit_webhook_per_minute: int = 600  # Meta and Razorpay callbacks, per address
 
     # Comma-separated Fernet keys that encrypt channel access tokens; the first one encrypts.
     token_encryption_keys: str = ""
@@ -98,32 +98,38 @@ class Settings(BaseSettings):
     # For reasoning models (e.g. GPT-5 family): "minimal", "low", ... Empty: provider default.
     llm_reasoning_effort: str = ""
 
-    # PayPal (Orders API v2). Payments are offered only when these are set.
-    paypal_env: Literal["sandbox", "live"] = "sandbox"
-    paypal_client_id: str = ""
-    paypal_client_secret: str = ""
-    # ID of the webhook registered in the PayPal app; needed to verify webhook signatures.
-    paypal_webhook_id: str = ""
-    # Sandbox only: PayPal's negative testing. A JSON value such as
-    # {"mock_application_codes": "INSTRUMENT_DECLINED"} is sent as the PayPal-Mock-Response header
-    # on every PayPal call, so PayPal answers with that error. Leave empty for normal behaviour.
-    paypal_mock_response: str = ""
-    # Who offers the payment link: real PayPal (sandbox or live), or the built-in simulator, a
-    # hosted page with Accept / Reject buttons that sends a webhook, for demos and tests. The
-    # simulator is refused when APP_ENV is prod (payments/simulator.py).
-    payment_provider: Literal["paypal", "simulator"] = "paypal"
-    # A failed payment may be retried until this many links have been made for the order in all,
-    # waiting this long after a failure before the next link, and only while the order is still
-    # held: PAYMENT_HOLD_MINUTES below is the retry window.
+    # Razorpay. Each shop connects its own Razorpay account in the app (Settings > Payments), and
+    # its customers' money goes straight to that account. These server keys are a shared account
+    # for shops that haven't connected one: used only outside production, unless
+    # RAZORPAY_SHARED_ACCOUNT_IN_PROD is true (a server that runs one shop). Collecting money for
+    # other shops in your own account would make you a payment aggregator, which needs an RBI
+    # licence: in production each shop connects its own account.
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    # The secret of the webhook registered for <PUBLIC_BASE_URL>/webhooks/razorpay (shared keys).
+    razorpay_webhook_secret: str = ""
+    razorpay_shared_account_in_prod: bool = False
+    # Refuse Razorpay test keys (rzp_test_): with them, customers can "pay" with Razorpay's public
+    # test cards and no money moves. Turn on once real shops take real orders.
+    razorpay_live_keys_only: bool = False
+    # Tests and local mocks only; empty: https://api.razorpay.com.
+    razorpay_api_base: str = ""
+    # Who offers the payment link: Razorpay, or the built-in simulator, a hosted page with
+    # Accept / Reject buttons that sends a webhook, for demos and tests. The simulator is refused
+    # when APP_ENV is prod (payments/simulator.py).
+    payment_provider: Literal["razorpay", "simulator"] = "razorpay"
+    # Limits on payment links per order: at most this many links in all, waiting this long after
+    # a rejected payment before the next one, and only while the order is still held
+    # (PAYMENT_HOLD_MINUTES below is the window). A Razorpay link stays open after a failed try,
+    # so the customer simply tries again on it; a new link is needed only when one has ended.
     payment_max_attempts: int = 3
     payment_retry_cooldown_seconds: int = 60
-    # PayPal can't take every currency (rupees are missing). The order stays in the shop's currency
-    # and PayPal charges dollars at the live rate (payments/fx.py). This fixed rate is the last
-    # resort when both live sources are down, and the sanity check for what they return.
-    fx_fallback_inr_per_usd: float = 94.0
-    fx_cache_minutes: int = 60
-    # Unpaid orders give their held stock back after this many minutes.
+    # Unpaid orders give their held stock back after this many minutes. Razorpay links stay open
+    # at least 16 minutes (its minimum is 15); sellix cancels a link once its order has expired.
     payment_hold_minutes: int = 15
+    # After a failed payment try, wait this long before telling the customer in chat: most people
+    # retry on the payment page at once, and a paid order needs no "it didn't go through".
+    payment_failed_notice_seconds: int = 90
 
     # Wait this long after a customer message before replying, so bursts get one reply.
     turn_batch_seconds: int = 3
@@ -156,6 +162,10 @@ class Settings(BaseSettings):
     agent_daily_budget_usd: float = 1.0
     # Messages of history the agent sees on each turn.
     history_messages: int = 20
+    # When the shop owner replies in a chat (typed in Instagram, or sent from the app), the
+    # assistant steps back from that chat for this many hours, then answers again from the
+    # customer's next message. "I'll reply myself" in the app switches it off with no end.
+    agent_resume_after_merchant_hours: float = 12.0
 
     def missing_required(self) -> list[str]:
         """Settings the API can't work without."""

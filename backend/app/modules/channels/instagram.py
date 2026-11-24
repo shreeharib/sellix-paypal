@@ -43,6 +43,7 @@ class TokenGrant:
 class InstagramAccount:
     account_id: str  # the professional account ID that webhooks use
     username: str
+    app_user_id: str | None = None  # the app-scoped user id (Meta's deletion callback)
 
 
 def parse_messages(payload: dict[str, Any]) -> list[IncomingMessage]:
@@ -149,10 +150,25 @@ async def fetch_account(*, api_version: str, token: str) -> InstagramAccount:
     data = await _request(
         "GET",
         f"{GRAPH_URL}/{api_version}/me",
-        params={"fields": "user_id,username"},
+        params={"fields": "user_id,username,id"},
         token=token,
     )
-    return InstagramAccount(account_id=str(data["user_id"]), username=data.get("username", ""))
+    return InstagramAccount(
+        account_id=str(data["user_id"]),
+        username=data.get("username", ""),
+        app_user_id=str(data["id"]) if data.get("id") else None,
+    )
+
+
+async def fetch_user_profile(*, api_version: str, token: str, user_id: str) -> dict[str, Any]:
+    """A customer's name and username, by the id their messages come from (IGSID). Instagram
+    answers only for people who have messaged the shop."""
+    return await _request(
+        "GET",
+        f"{GRAPH_URL}/{api_version}/{user_id}",
+        params={"fields": "name,username"},
+        token=token,
+    )
 
 
 async def subscribe_webhooks(*, api_version: str, token: str) -> None:

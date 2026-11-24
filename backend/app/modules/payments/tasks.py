@@ -12,9 +12,11 @@ log = structlog.get_logger()
 @jobs.periodic(cron="* * * * *")
 @jobs.task(name="settle_open_payments", queue="payments")
 async def settle_open_payments(timestamp: int) -> None:
-    """Every minute: capture payments the buyer approved when no return page or webhook told us.
+    """Every minute: ask Razorpay about each open payment link.
 
-    The customer gets their confirmation in chat from here, whatever device the buyer paid on.
+    Payments confirm within a minute even when no webhook arrives (a shop that never set one up,
+    a webhook that failed), and links of orders that expired or were cancelled are cancelled at
+    Razorpay. The customer gets their confirmation in chat from here.
     """
     for result in await service.settle_open_payments():
         await conversations.after_payment(result)
@@ -24,7 +26,7 @@ async def settle_open_payments(timestamp: int) -> None:
 @jobs.periodic(cron="*/5 * * * *")
 @jobs.task(name="reconcile_refunds", queue="payments")
 async def reconcile_refunds(timestamp: int) -> None:
-    """Every 5 minutes: settle refunds whose PayPal answer never arrived."""
+    """Every 5 minutes: settle refunds whose Razorpay answer never arrived."""
     completed = await service.reconcile_refunds()
     if completed:
         log.info("payments.refunds_reconciled", count=completed)

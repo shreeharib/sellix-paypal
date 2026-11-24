@@ -1,4 +1,4 @@
-"""Pages PayPal sends the buyer back to after approving or cancelling a payment."""
+"""The page Razorpay sends the customer back to after paying, and the simulator's pages."""
 
 import uuid
 from html import escape
@@ -13,54 +13,66 @@ from app.modules.conversations import service as conversations
 from app.modules.payments import service, simulator
 from app.webhooks import simulator as simulator_webhook
 
-router = APIRouter(prefix="/payments/paypal", tags=["payments"])
+router = APIRouter(prefix="/payments/razorpay", tags=["payments"])
 simulator_router = APIRouter(prefix="/payments/simulator", tags=["payments"])
 log = structlog.get_logger()
 
 
 @router.get("/return", response_class=HTMLResponse)
-async def paypal_return(token: Annotated[str | None, Query()] = None) -> HTMLResponse:
-    """`token` is the PayPal order ID. Capturing here is a shortcut: PayPal's webhooks
-    confirm the payment too, so a buyer who closes the page is still covered."""
-    if not token:
+async def razorpay_return(
+    razorpay_payment_id: Annotated[str, Query()] = "",
+    razorpay_payment_link_id: Annotated[str, Query()] = "",
+    razorpay_payment_link_reference_id: Annotated[str, Query()] = "",
+    razorpay_payment_link_status: Annotated[str, Query()] = "",
+    razorpay_signature: Annotated[str, Query()] = "",
+) -> HTMLResponse:
+    """Razorpay's redirect after a payment. Confirming here is a shortcut: the webhook and the
+    settle job confirm it too, so a customer who closes the page is still covered."""
+    if not razorpay_payment_link_id:
         return _page("Payment", "Something went wrong. Please go back to the chat.", 400)
     try:
-        result = await service.capture(token)
-    except service.PayPalError as exc:
-        log.error("payments.capture_failed", paypal_order_id=token, error=str(exc))
+        check = await service.check_return(
+            link_id=razorpay_payment_link_id,
+            reference_id=razorpay_payment_link_reference_id,
+            status=razorpay_payment_link_status,
+            payment_id=razorpay_payment_id,
+            signature=razorpay_signature,
+        )
+    except service.RazorpayError as exc:
+        log.error("payments.return_check_failed", link_id=razorpay_payment_link_id, error=str(exc))
         return _page(
-            "Payment processing",
+            "Confirming your payment",
             "We're confirming your payment. You'll get a message in the chat shortly.",
             200,
         )
-    if result is not None:
-        await conversations.after_payment(result)
-    if isinstance(result, service.PaymentFailed):
+    if not check.genuine:
         return _page(
-            "Payment not completed",
-            "PayPal couldn't complete the payment. Please go back to the chat and try again.",
+            "Payment",
+            "We couldn't check this payment page. If you paid, you'll get a message in the chat "
+            "shortly.",
+            400,
+        )
+    if check.result is not None:
+        await conversations.after_payment(check.result)
+    order = f"order #{check.order_number}" if check.order_number else "your order"
+    shop = check.shop_name or "the shop"
+    if check.paid:
+        return _page(
+            "Thank you!",
+            f"Your payment for {order} with {shop} is received. You'll get a message in the "
+            "chat. You can close this page.",
             200,
         )
     return _page(
-        "Thank you!",
-        "Your payment is being confirmed. You'll get a message in the chat. "
-        "You can close this page.",
-        200,
-    )
-
-
-@router.get("/cancel", response_class=HTMLResponse)
-async def paypal_cancel() -> HTMLResponse:
-    return _page(
-        "Payment cancelled",
-        "No payment was taken. Go back to the chat if you'd like to pay or change your order.",
+        "Confirming your payment",
+        f"We're confirming your payment for {order}. You'll get a message in the chat shortly.",
         200,
     )
 
 
 @simulator_router.get("/{payment_id}", response_class=HTMLResponse)
 async def simulator_checkout(payment_id: uuid.UUID) -> HTMLResponse:
-    """The simulator's stand-in for PayPal's page: Accept payment or Reject payment."""
+    """The simulator's stand-in for a payment page: Accept payment or Reject payment."""
     return await _simulator_page(payment_id)
 
 
@@ -115,7 +127,8 @@ def _page(title: str, message: str, status_code: int) -> HTMLResponse:
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{escape(title)}</title>"
         "<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;"
-        "padding:0 1rem;line-height:1.5}</style></head>"
+        "padding:0 1rem;line-height:1.5;color:#1a1a1a}h1{font-size:1.5rem}"
+        "@media (prefers-color-scheme:dark){body{background:#111;color:#eee}}</style></head>"
         f"<body><h1>{escape(title)}</h1><p>{escape(message)}</p></body></html>"
     )
     return HTMLResponse(html, status_code=status_code)

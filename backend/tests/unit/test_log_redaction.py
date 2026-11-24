@@ -26,7 +26,7 @@ def test_payment_links_inside_other_values_are_hashed() -> None:
     event = redact(
         None,
         "info",
-        {"event": "sent", "text": "Pay here: https://www.paypal.com/checkoutnow?token=ABC123"},
+        {"event": "sent", "text": "Pay here: https://rzp.io/rzp/ABC123"},
     )
 
     assert "ABC123" not in event["text"]
